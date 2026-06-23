@@ -46,7 +46,7 @@ const pendingRec = {
 describe('recommendations repo — pending dedup', () => {
   it('inserting the same (profile, title) pending twice yields ONE pending row', () => {
     const db = createTestDb();
-    upsertProfile(db, { name: 'Jono', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
     upsertTitle(db, baseTitle);
 
     upsertRecommendation(db, pendingRec);
@@ -61,7 +61,7 @@ describe('recommendations repo — pending dedup', () => {
 
   it('a dismissed row and a pending row for the same title can coexist', () => {
     const db = createTestDb();
-    upsertProfile(db, { name: 'Jono', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
     upsertTitle(db, baseTitle);
 
     upsertRecommendation(db, { ...pendingRec, state: 'dismissed' });
@@ -75,7 +75,7 @@ describe('recommendations repo — pending dedup', () => {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
     runMigrations(db);
-    upsertProfile(db, { name: 'Jono', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
     upsertTitle(db, baseTitle);
 
     // Drop the guard index, inject duplicates the way the old buggy code did, then re-migrate.

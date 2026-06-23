@@ -9,3 +9,8 @@ graphify-out/
 
 # Your real watch history — keep it private. Copy seed.example.json to seed.json.
 seed.json
+
+# Maintainer-local files (kept on disk, never tracked) — harmless if absent
+CLAUDE.md
+docs/
+data/

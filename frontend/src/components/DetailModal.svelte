@@ -69,6 +69,9 @@
   let zoomed = $state(false);
   let note = $state('');
   let noteSaved = $state(false);
+  // Set true the moment "Not interested" is tapped: turns the button solid red,
+  // then after 1s closes the modal (onDismiss also drops it from the list).
+  let dismissing = $state(false);
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -90,6 +93,7 @@
       lastSavedNote = note;
       noteSaved = false;
       zoomed = false;
+      dismissing = false;
     });
   });
 
@@ -183,6 +187,13 @@
   // Safety net: if the modal closes before blur fires (mobile), still save.
   onDestroy(() => { void saveNote(); });
   function openZoom() { if (!suppressClick) zoomed = true; }
+  // "Not interested": flash the button red, then after 1s fire onDismiss
+  // (the parent closes the modal and removes the title from the list).
+  function doDismiss() {
+    if (dismissing) return;
+    dismissing = true;
+    setTimeout(() => onDismiss?.(), 1000);
+  }
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -297,7 +308,9 @@
                 </button>
               {/if}
               {#if onDismiss}
-                <button class="act dismiss" onclick={() => onDismiss?.()}>Not interested</button>
+                <button class="act dismiss" class:dismissing onclick={doDismiss} disabled={dismissing}>
+                  {dismissing ? '✗ Not interested' : 'Not interested'}
+                </button>
               {/if}
             </div>
 
@@ -436,6 +449,8 @@
   .act.on { background: #16352a; border-color: #4ade80; color: #6ee7a0; }
   .act.dismiss { color: #e9728a; border-color: #5a3a44; }
   .act.dismiss:hover { background: #2a1620; border-color: #e94560; color: #e94560; }
+  /* Confirmed: solid red while the modal is closing out. */
+  .act.dismiss.dismissing, .act.dismiss.dismissing:hover { background: #e94560; border-color: #e94560; color: #fff; cursor: default; opacity: 1; }
 
   /* scroll-margin keeps the field clear of the sheet edge when scrolled into view
      above the mobile keyboard; padding-bottom gives the last element breathing room. */
