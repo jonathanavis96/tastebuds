@@ -1,0 +1,14 @@
+[
+  { "title": "Severance", "year": 2022, "mediaType": "tv", "rating": 9, "status": "watched", "profile": "alex" },
+  { "title": "Dark", "year": 2017, "mediaType": "tv", "rating": 10, "status": "watched", "profile": "alex" },
+  { "title": "Blade Runner 2049", "year": 2017, "mediaType": "movie", "rating": 8, "status": "watched", "profile": "alex" },
+  { "title": "The Bear", "year": 2022, "mediaType": "tv", "status": "watchlist", "profile": "alex" },
+
+  { "title": "The Queen's Gambit", "year": 2020, "mediaType": "tv", "rating": 9, "status": "watched", "profile": "sam" },
+  { "title": "Bridgerton", "year": 2020, "mediaType": "tv", "rating": 8, "status": "watched", "profile": "sam" },
+  { "title": "Knives Out", "year": 2019, "mediaType": "movie", "rating": 8, "status": "watched", "profile": "sam" },
+  { "title": "Fleabag", "year": 2016, "mediaType": "tv", "status": "watchlist", "profile": "sam" },
+
+  { "title": "The Last of Us", "year": 2023, "mediaType": "tv", "rating": 9, "status": "watched", "profile": "joint" },
+  { "title": "Everything Everywhere All at Once", "year": 2022, "mediaType": "movie", "rating": 9, "status": "watched", "profile": "joint" }
+]

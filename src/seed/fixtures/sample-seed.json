@@ -1,0 +1,8 @@
+[
+  { "title": "Dark", "year": 2017, "mediaType": "tv", "rating": 5, "status": "watched", "profile": "alex" },
+  { "title": "Severance", "year": 2022, "mediaType": "tv", "rating": 5, "status": "watched", "profile": "alex" },
+  { "title": "Bridgerton", "year": 2020, "mediaType": "tv", "rating": 4, "status": "watched", "profile": "sam" },
+  { "title": "The Queen's Gambit", "year": 2020, "mediaType": "tv", "rating": 5, "status": "watched", "profile": "sam" },
+  { "title": "Parasite", "year": 2019, "mediaType": "movie", "rating": 5, "status": "watched", "profile": "joint" },
+  { "title": "The Bear", "year": 2022, "mediaType": "tv", "status": "watchlist", "profile": "alex" }
+]

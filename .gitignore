@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.env
+*.local
+graphify-out/
+
+# Your real watch history — keep it private. Copy seed.example.json to seed.json.
+seed.json
