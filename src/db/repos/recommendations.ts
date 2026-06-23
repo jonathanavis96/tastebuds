@@ -10,9 +10,13 @@ export function upsertRecommendation(
   rec: UpsertRec,
 ): void {
   const row = { ...rec, kind: rec.kind ?? 'core' };
+  // At most one pending rec per (profile_id, title_id) — guarded by the partial
+  // unique index (MIGRATE_005). A racing/duplicate pending insert is silently
+  // skipped (DO NOTHING) rather than creating a duplicate row or throwing.
   db.prepare(`
     INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, kind)
     VALUES (@profile_id, @title_id, @category, @score, @why_blurb, @request_text, @state, @kind)
+    ON CONFLICT (profile_id, title_id) WHERE state = 'pending' DO NOTHING
   `).run(row);
 }
 

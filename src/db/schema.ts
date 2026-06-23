@@ -85,3 +85,20 @@ export const CREATE_RECOMMENDATIONS = `
 export const MIGRATE_001_ADD_KIND = `
   ALTER TABLE recommendations ADD COLUMN kind TEXT NOT NULL DEFAULT 'core'
 `;
+
+// Migration 005: at most ONE pending recommendation per (profile_id, title_id).
+// Without this, two overlapping /generate calls each read the pending set before
+// either inserted, so the read-time excludeTitleIds missed the other's picks and
+// the same title landed as two pending rows. First dedupe any existing duplicates
+// (keep the earliest), then enforce it at the DB with a partial unique index.
+export const MIGRATE_005_DEDUP_PENDING = [
+  `DELETE FROM recommendations
+     WHERE state = 'pending'
+       AND id NOT IN (
+         SELECT MIN(id) FROM recommendations
+         WHERE state = 'pending'
+         GROUP BY profile_id, title_id
+       )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_rec_pending_unique
+     ON recommendations (profile_id, title_id) WHERE state = 'pending'`,
+];

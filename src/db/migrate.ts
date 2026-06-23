@@ -9,6 +9,7 @@ import {
   MIGRATE_002_ADD_IMDB_COLS,
   MIGRATE_003_ADD_RT_URL,
   MIGRATE_004_ADD_NOTE,
+  MIGRATE_005_DEDUP_PENDING,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -54,6 +55,15 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     for (const sql of MIGRATE_004_ADD_NOTE) {
       const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
       if (!weColNames.includes(colName)) {
+        db.exec(sql);
+      }
+    }
+
+    // Migration 005: dedupe pending recs + enforce one pending rec per (profile, title) (idempotent)
+    const recIndexes = db.prepare("PRAGMA index_list('recommendations')").all() as Array<{ name: string }>;
+    const hasPendingUnique = recIndexes.some(i => i.name === 'idx_rec_pending_unique');
+    if (!hasPendingUnique) {
+      for (const sql of MIGRATE_005_DEDUP_PENDING) {
         db.exec(sql);
       }
     }
