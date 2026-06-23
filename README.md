@@ -21,6 +21,45 @@ LLM call when you explicitly ask for fresh picks.
 
 ---
 
+## Hand this to your Claude
+
+Repo: **<https://github.com/jonathanavis96/tastebuds>**
+
+The fastest way to get this running is to let [Claude Code](https://claude.com/claude-code)
+drive the whole setup. Clone the repo, open it in Claude Code, and paste the prompt below —
+it will use the **Docker** path (recommended), walk you through getting the API keys, and run
+the Claude OAuth step itself.
+
+> You are setting up TasteBuds — a self-hosted household movie & TV recommender
+> (<https://github.com/jonathanavis96/tastebuds>). Read `README.md` first, then set it up for me
+> end to end using the **Docker** path (recommended over bare Node).
+>
+> Do this in order, and don't skip the explanations:
+>
+> 1. **Check prerequisites.** Make sure Docker and [Ollama](https://ollama.com/) are installed
+>    and running. Pull the embedding model: `ollama pull nomic-embed-text`.
+> 2. **Get the TMDB API key (required, free).** Walk me through it: tell me to sign up at
+>    <https://www.themoviedb.org/signup>, then go to **Settings → API**
+>    (<https://www.themoviedb.org/settings/api>), request a developer key, and copy the
+>    **"API Key" (v3 auth)** value. Wait for me to paste it back to you.
+> 3. **Get the OMDb API key (optional, free).** Tell me I can grab one at
+>    <https://www.omdbapi.com/apikey.aspx> for IMDb/Rotten Tomatoes ratings, or skip it. If I
+>    skip it, leave `OMDB_API_KEY` blank.
+> 4. **Set up the Claude OAuth token yourself.** I have a Claude Pro/Max subscription. Run
+>    `claude setup-token` for me, follow the browser auth flow, capture the printed token, and
+>    write it into `CLAUDE_CODE_OAUTH_TOKEN` — don't ask me to copy/paste it manually.
+> 5. **Configure.** Copy `.env.example` to `.env` and fill in `TMDB_API_KEY`, the OAuth token,
+>    and `OMDB_API_KEY` if I provided one. Leave `OLLAMA_URL` as
+>    `http://host.docker.internal:11434` for the Docker path.
+> 6. **Build and start:** `docker compose up -d --build`.
+> 7. **Seed and verify:** seed the profiles, run a harvest, then confirm
+>    `curl http://localhost:8094/api/profiles` responds.
+>
+> If anything fails along the way, diagnose and fix it before moving on, and tell me what you
+> changed.
+
+---
+
 ## How it works
 
 ```
@@ -193,18 +232,6 @@ just ignore the profiles you don't use.
 npm test          # vitest
 npx tsc --noEmit  # type-check
 ```
-
----
-
-## Hand this to your Claude
-
-Running [Claude Code](https://claude.com/claude-code)? Paste this and let it drive the setup:
-
-> Set up the TasteBuds app in this repo. Read `README.md`. Make sure Docker and Ollama are
-> installed, pull the `nomic-embed-text` model, copy `.env.example` to `.env` and prompt me
-> for my TMDB API key and Claude OAuth token (`claude setup-token`), then build and start it
-> with `docker compose up -d --build`, seed the profiles, run a harvest, and confirm
-> `http://localhost:8094/api/profiles` responds. If anything fails, diagnose and fix it.
 
 ---
 
