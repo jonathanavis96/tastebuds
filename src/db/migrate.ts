@@ -10,6 +10,7 @@ import {
   MIGRATE_003_ADD_RT_URL,
   MIGRATE_004_ADD_NOTE,
   MIGRATE_005_DEDUP_PENDING,
+  MIGRATE_006_API_USAGE,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -67,5 +68,8 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
         db.exec(sql);
       }
     }
+
+    // Migration 006: create api_usage table for daily budget tracking (idempotent via IF NOT EXISTS)
+    db.exec(MIGRATE_006_API_USAGE);
   })();
 }

@@ -164,6 +164,8 @@ describe('curateCandidates — kind field parsing', () => {
     tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
     claudeToken: 'test-token', port: 8094, dbPath: ':memory:',
     omdbApiKey: undefined,
+    harvestDailyTarget: 500,
+    requestLookupDailyBudget: 500,
   };
 
   function makeSpawnMock(stdout: string, exitCode = 0) {

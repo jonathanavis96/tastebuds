@@ -86,6 +86,17 @@ export const MIGRATE_001_ADD_KIND = `
   ALTER TABLE recommendations ADD COLUMN kind TEXT NOT NULL DEFAULT 'core'
 `;
 
+// Migration 006: daily API usage budget tracking table.
+// Persists per-day counters for harvest and request-driven title ingestion so
+// each configured daily budget is respected across restarts and partial runs.
+export const MIGRATE_006_API_USAGE = `
+  CREATE TABLE IF NOT EXISTS api_usage (
+    day              TEXT PRIMARY KEY,
+    harvest_added    INTEGER NOT NULL DEFAULT 0,
+    request_added    INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before
 // either inserted, so the read-time excludeTitleIds missed the other's picks and

@@ -29,5 +29,11 @@ export interface TmdbTitleDetail extends TmdbTitle {
 export interface DiscoverOpts {
   mediaType: 'movie' | 'tv';
   genreIds?: number[];
+  /** TMDB keyword ids to pass as with_keywords= (comma-separated). */
+  keywordIds?: number[];
   page?: number;
+  /** TMDB sort_by value, e.g. 'vote_count.desc', 'popularity.desc'. */
+  sortBy?: string;
+  /** Minimum vote_count to filter out obscure titles. */
+  voteCountGte?: number;
 }

@@ -88,6 +88,8 @@ describe('curateCandidates', () => {
     port: 8094,
     dbPath: ':memory:',
     omdbApiKey: undefined,
+    harvestDailyTarget: 500,
+    requestLookupDailyBudget: 500,
   };
 
   const mockDb = {

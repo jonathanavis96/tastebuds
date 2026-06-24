@@ -43,7 +43,7 @@ const defaultPrefs = (
 upsertTasteSignature(db, {
   profile_id: soloAId,
   taste_vector: null,
-  prefs: defaultPrefs(['Drama', 'Thriller', 'Science Fiction', 'Mystery'], ['Horror'], '2010s-present', 0.3),
+  prefs: defaultPrefs(['Drama', 'Thriller', 'Science Fiction', 'Mystery', 'Horror'], [], '2010s-present', 0.3),
   refreshed_at: new Date().toISOString(),
 });
 

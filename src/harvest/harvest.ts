@@ -6,9 +6,16 @@ import { getAllProfiles } from '../db/repos/profiles.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { getWatchEvents } from '../db/repos/watchEvents.js';
 import { upsertTitle, getTitleByTmdbId } from '../db/repos/titles.js';
-import { discoverTitles, getTrendingTitles, getTitleDetails } from '../tmdb/client.js';
+import { getUsage, bumpHarvestAdded, today } from '../db/repos/apiUsage.js';
+import { discoverTitles, getTrendingTitles, getTitleDetails, searchKeyword } from '../tmdb/client.js';
 import { mapTmdbToTitleRow } from '../tmdb/mappers.js';
 import { embedText } from '../ollama/embed.js';
+import {
+  MOVIE_GENRE_MAP,
+  TV_GENRE_MAP,
+  resolveGenreNames,
+} from '../tmdb/taxonomy.js';
+import { resolveKeywordId } from './onDemand.js';
 import type { TmdbTitle } from '../tmdb/types.js';
 
 export interface HarvestResult {
@@ -17,44 +24,27 @@ export interface HarvestResult {
   errors: string[];
 }
 
-// TMDB genre name → ID map
-const MOVIE_GENRE_MAP: Record<string, number> = {
-  Action: 28,
-  Adventure: 12,
-  Animation: 16,
-  Comedy: 35,
-  Crime: 80,
-  Drama: 18,
-  Fantasy: 14,
-  Horror: 27,
-  Mystery: 9648,
-  Romance: 10749,
-  'Science Fiction': 878,
-  Thriller: 53,
-  Documentary: 99,
-  Family: 10751,
-};
-
-const TV_GENRE_MAP: Record<string, number> = {
-  'Action & Adventure': 10759,
-  Animation: 16,
-  Comedy: 35,
-  Crime: 80,
-  Drama: 18,
-  Fantasy: 10765,
-  Kids: 10762,
-  Mystery: 9648,
-  Reality: 10764,
-  'Sci-Fi & Fantasy': 10765,
-  Thriller: 53,
-  Documentary: 99,
-};
-
-function genreNamesToIds(names: string[], mediaType: 'movie' | 'tv'): number[] {
-  const map = mediaType === 'movie' ? MOVIE_GENRE_MAP : TV_GENRE_MAP;
+/**
+ * Resolve loved genre names to TMDB genre ids for movies.
+ * Movies have a full genre taxonomy including Horror (27) and Thriller (53),
+ * so a direct id lookup is all that's needed.
+ */
+function movieGenreNamesToIds(names: string[]): number[] {
   return names
-    .map((name) => map[name])
+    .map((name) => MOVIE_GENRE_MAP[name])
     .filter((id): id is number => id !== undefined);
+}
+
+/**
+ * Day-of-year (1-based) for the current UTC date. Used to rotate the broad
+ * discovery page so each daily run pulls a different page of popular titles
+ * rather than always fetching page 1.
+ */
+function dayOfYear(): number {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), 0, 0));
+  const diff = now.getTime() - start.getTime();
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
 }
 
 export async function runHarvest(
@@ -63,18 +53,36 @@ export async function runHarvest(
 ): Promise<HarvestResult> {
   const result: HarvestResult = { titlesAdded: 0, titlesUpdated: 0, errors: [] };
 
+  // ── Budget gate ───────────────────────────────────────────────────────────
+  // Respect the configured daily target: don't re-ingest more titles than the
+  // budget allows. We read the counter up front and stop adding once exhausted.
+  const runDay = today();
+  const usageAtStart = getUsage(db, runDay);
+  let remaining = Math.max(0, config.harvestDailyTarget - usageAtStart.harvest_added);
+
+  if (remaining === 0) {
+    return result; // already hit today's budget
+  }
+
   const nonDerivedProfiles = getAllProfiles(db).filter((p) => !p.is_derived);
 
   // Collect unique tmdb_id+media_type pairs to harvest
   const toHarvest = new Map<string, { tmdbId: number; mediaType: 'movie' | 'tv' }>();
 
+  // ── Per-profile loved-genre discovery + trending ──────────────────────────
   for (const profile of nonDerivedProfiles) {
     const sig = getTasteSignature(db, profile.id);
     const prefs = sig ? (JSON.parse(sig.prefs) as { loved_genres?: string[] }) : {};
     const lovedGenres = prefs.loved_genres ?? [];
 
-    const movieGenreIds = genreNamesToIds(lovedGenres, 'movie');
-    const tvGenreIds = genreNamesToIds(lovedGenres, 'tv');
+    // Movies: full genre taxonomy — Horror (27), Thriller (53), etc. all resolve to ids.
+    const movieGenreIds = movieGenreNamesToIds(lovedGenres);
+
+    // TV: use resolveGenreNames so Horror/Thriller (absent from TMDB's TV genre list)
+    // are surfaced as keywordTerms rather than being silently dropped. Genre-id titles
+    // (Drama, Comedy, …) go through the standard discover path; keyword-only genres
+    // (Horror, Thriller for TV) go through keyword discovery below.
+    const { genreIds: tvGenreIds, keywordTerms: tvKeywordTerms } = resolveGenreNames(lovedGenres, 'tv');
 
     // Discover + trending, collect into dedup map
     const fetches: Array<Promise<TmdbTitle[]>> = [
@@ -109,6 +117,91 @@ export async function runHarvest(
       const key = `${t.id}:tv`;
       if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType: 'tv' });
     }
+
+    // ── TV keyword discovery for loved genres absent from TMDB's TV genre list ──
+    // Horror and Thriller don't exist as TV genre ids — they must be discovered via
+    // keyword search (e.g. "horror" → keyword id 315058). One discover call per
+    // keyword term per profile. Shares the in-process keyword id cache with the
+    // on-demand module so a single nightly harvest + a same-day request don't
+    // double-spend on identical searchKeyword calls.
+    for (const term of tvKeywordTerms) {
+      try {
+        const kwId = await resolveKeywordId(term, config, { searchKeyword });
+        if (kwId == null) {
+          result.errors.push(`TV keyword harvest: could not resolve keyword id for "${term}"`);
+          continue;
+        }
+        const kwTitles = await discoverTitles(
+          { mediaType: 'tv', keywordIds: [kwId], sortBy: 'vote_count.desc', voteCountGte: 50 },
+          config,
+        );
+        for (const t of kwTitles) {
+          const key = `${t.id}:tv`;
+          if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType: 'tv' });
+        }
+      } catch (err) {
+        result.errors.push(`TV keyword harvest for "${term}" failed: ${String(err)}`);
+      }
+    }
+  }
+
+  // ── Broad discovery slice (independent of loved_genres) ──────────────────
+  // Ensures the DB grows across all genres every day, not just what the profiles
+  // love. Rotates by day-of-year so each daily run fetches a different page of
+  // the most-voted titles — capped to TMDB's page range 1..500.
+  const broadPage = Math.max(1, Math.min(500, dayOfYear() % 500 || 1));
+
+  // All movie genres + all TV genres for round-robin broad coverage
+  const allMovieGenreIds = Object.values(MOVIE_GENRE_MAP);
+  const allTvGenreIds = [...new Set(Object.values(TV_GENRE_MAP))];
+
+  const broadFetches: Array<Promise<TmdbTitle[]>> = [
+    // Global most-voted movies (no genre filter) — catches top films across all genres
+    discoverTitles(
+      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: broadPage },
+      config,
+    ).catch(() => []),
+    // Global most-voted TV series
+    discoverTitles(
+      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: broadPage },
+      config,
+    ).catch(() => []),
+    // A second page for variety (broadPage+1 wraps within 1..500)
+    discoverTitles(
+      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: Math.max(1, Math.min(500, broadPage + 1)) },
+      config,
+    ).catch(() => []),
+    discoverTitles(
+      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: Math.max(1, Math.min(500, broadPage + 1)) },
+      config,
+    ).catch(() => []),
+    // Round-robin one movie genre for genre diversity
+    discoverTitles(
+      {
+        mediaType: 'movie',
+        genreIds: [allMovieGenreIds[dayOfYear() % allMovieGenreIds.length]],
+        sortBy: 'popularity.desc',
+      },
+      config,
+    ).catch(() => []),
+    // Round-robin one TV genre for genre diversity
+    discoverTitles(
+      {
+        mediaType: 'tv',
+        genreIds: [allTvGenreIds[dayOfYear() % allTvGenreIds.length]],
+        sortBy: 'popularity.desc',
+      },
+      config,
+    ).catch(() => []),
+  ];
+
+  const broadResults = await Promise.all(broadFetches);
+  for (let i = 0; i < broadResults.length; i++) {
+    const mediaType: 'movie' | 'tv' = i % 2 === 0 ? 'movie' : 'tv';
+    for (const t of broadResults[i]) {
+      const key = `${t.id}:${mediaType}`;
+      if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType });
+    }
   }
 
   // Build per-profile sets of watched tmdb_ids (regardless of media_type).
@@ -131,11 +224,22 @@ export async function runHarvest(
   }
 
   for (const [, { tmdbId, mediaType }] of toHarvest.entries()) {
+    // Budget exhausted — stop ingesting
+    if (remaining <= 0) break;
+
     // Skip if ALL non-derived profiles have this tmdb_id in their watch_events
     const allWatched =
       nonDerivedProfiles.length > 0 &&
       nonDerivedProfiles.every((p) => watchedTmdbIds.get(p.id)?.has(tmdbId));
     if (allWatched) {
+      continue;
+    }
+
+    // Skip titles already in the DB — avoids re-fetching details for known titles
+    // and focuses the budget on growing the DB with genuinely new content.
+    const alreadyPresent = getTitleByTmdbId(db, tmdbId);
+    if (alreadyPresent) {
+      // We no longer update existing titles during harvest — budget is for growth.
       continue;
     }
 
@@ -154,17 +258,18 @@ export async function runHarvest(
         result.errors.push(`embed failed for ${mapped.title}: ${String(embedErr)}`);
       }
 
-      const existing = getTitleByTmdbId(db, tmdbId);
       upsertTitle(db, { ...mapped, embedding });
-
-      if (existing) {
-        result.titlesUpdated++;
-      } else {
-        result.titlesAdded++;
-      }
+      result.titlesAdded++;
+      remaining--;
     } catch (err) {
       result.errors.push(`Failed to process tmdb_id=${tmdbId} (${mediaType}): ${String(err)}`);
     }
+  }
+
+  // Persist today's addition count so subsequent runs and /generate calls can
+  // check the budget without re-counting rows.
+  if (result.titlesAdded > 0) {
+    bumpHarvestAdded(db, runDay, result.titlesAdded);
   }
 
   return result;

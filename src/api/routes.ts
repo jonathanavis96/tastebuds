@@ -11,6 +11,7 @@ import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
+import { ensureRequestCoverage } from '../harvest/onDemand.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
@@ -122,6 +123,20 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // from a generic taste pool. Surprise Me has no request and keeps the 7+2+1 pool.
     const request = body.request?.trim();
     const hasRequest = !!request && body.surprise !== true;
+
+    // When the user has typed a free-text request, seed the DB with titles that
+    // match the request's genre/keyword vibe BEFORE retrieval runs. This ensures
+    // "scary thrillers" finds horror series even if the daily harvest hasn't
+    // covered them yet (TV Horror/Thriller aren't in TMDB's genre list — they
+    // need keyword discovery which only fires on-demand here).
+    // Non-fatal: a TMDB blip must never break /generate.
+    if (hasRequest) {
+      try {
+        await ensureRequestCoverage(db, request!, mediaType, config);
+      } catch {
+        // swallow — coverage failure degrades quality, not correctness
+      }
+    }
 
     // For a derived (Joint) profile, blend the two solo profiles.
     let candidatePool;
