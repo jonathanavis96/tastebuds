@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { blendVectors } from './blend.js';
 import {
   refreshTasteVector,
   retrieveJointCandidates,
@@ -15,22 +14,7 @@ import type { Config } from '../config.js';
 
 const mockConfig: Pick<Config, 'ollamaUrl'> = { ollamaUrl: 'http://localhost:11434' };
 
-describe('blendVectors', () => {
-  it('blends orthogonal unit vectors with equal weights', () => {
-    const v1 = [1, 0];
-    const v2 = [0, 1];
-    const result = blendVectors(v1, 0.5, v2, 0.5);
-    expect(result).toEqual([0.5, 0.5]);
-  });
-
-  it('respects unequal weights', () => {
-    const v1 = [2, 0];
-    const v2 = [0, 2];
-    const result = blendVectors(v1, 0.75, v2, 0.25);
-    expect(result[0]).toBeCloseTo(1.5);
-    expect(result[1]).toBeCloseTo(0.5);
-  });
-});
+// blendVectors has its own dedicated, magnitude-aware test suite in blend.test.ts.
 
 describe('refreshTasteVector', () => {
   it('computes mean embedding from rated titles and upserts', async () => {
