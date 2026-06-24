@@ -115,12 +115,15 @@
     (modalItem as { note?: string | null }).note = note;
     scheduleRefresh();
   }
-  async function modalDismiss() {
-    if (!activeProfileId || !modalItem) return;
-    const recId = (modalItem as Recommendation).id;
-    await dismissRecommendation(activeProfileId, recId);
+  // Dismiss a SPECIFIC rec in the background — the modal passes the title that was
+  // armed, so this removes the right one even after the user scrolled to others.
+  // The modal stays open; idempotent so a stray double-fire is harmless.
+  async function modalDismiss(item: Recommendation | WatchEvent) {
+    if (!activeProfileId) return;
+    const recId = (item as Recommendation).id;
+    if (recId == null || !recommendations.some(r => r.id === recId)) return;
     recommendations = recommendations.filter(r => r.id !== recId);
-    closeModal();
+    await dismissRecommendation(activeProfileId, recId);
   }
 
   onMount(async () => {

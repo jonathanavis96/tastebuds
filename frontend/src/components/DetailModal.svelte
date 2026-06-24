@@ -42,7 +42,9 @@
     onMarkWatched?: () => void | Promise<void>;
     onUnwatch?: () => void | Promise<void>;
     onSaveNote?: (note: string) => void | Promise<void>;
-    onDismiss?: () => void;
+    /** Fired with the SPECIFIC title to dismiss — bound at tap time so a delayed
+        background dismiss removes the right one even after carousel navigation. */
+    onDismiss?: (item: DetailItem) => void;
   }
 
   let {
@@ -69,9 +71,18 @@
   let zoomed = $state(false);
   let note = $state('');
   let noteSaved = $state(false);
-  // Set true the moment "Not interested" is tapped: turns the button solid red,
-  // then after 1s closes the modal (onDismiss also drops it from the list).
+  // Set true the moment "Not interested" is tapped: turns the button solid red.
+  // There's then a ~1s grace window in which re-tapping undoes it; if you don't,
+  // the dismiss "locks in" for THAT title and fires in the background — you can
+  // freely scroll to other titles meanwhile and it removes the right one.
   let dismissing = $state(false);
+  // Pending dismiss timer. Held so re-tap (undo) or unmount (modal closed before
+  // it locked in) can cancel it. Navigation does NOT cancel it — the dismiss is
+  // bound to the title it was armed on, not whatever is shown when it fires.
+  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
+  function cancelDismiss() {
+    if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+  }
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -86,6 +97,9 @@
   $effect(() => {
     item.title_id; // the only tracked dependency
     untrack(() => {
+      // Carousel navigated to a new title. Reset only the VISUAL armed state for
+      // this title — the pending dismiss timer keeps running so the title it was
+      // armed on still gets dismissed in the background.
       rating = item.rating ?? null;
       seen = watched || item.watched_at != null || item.rating != null;
       inList = inWatchlist || item.we_status === 'watchlist';
@@ -185,14 +199,19 @@
     setTimeout(() => { noteSaved = false; }, 1800);
   }
   // Safety net: if the modal closes before blur fires (mobile), still save.
-  onDestroy(() => { void saveNote(); });
+  onDestroy(() => { cancelDismiss(); void saveNote(); });
   function openZoom() { if (!suppressClick) zoomed = true; }
-  // "Not interested": flash the button red, then after 1s fire onDismiss
-  // (the parent closes the modal and removes the title from the list).
+  // "Not interested": arm a red 1s grace window. Re-tapping within it (while still
+  // on this title) undoes it. Otherwise it locks in and fires onDismiss in the
+  // background for the title it was armed on — bound here so carousel navigation
+  // can't redirect it at the wrong title. The modal stays open; the parent just
+  // drops that title from the list.
   function doDismiss() {
-    if (dismissing) return;
+    if (dismissing) { cancelDismiss(); dismissing = false; return; } // undo within the window
+    cancelDismiss(); // drop any orphaned timer before re-arming
     dismissing = true;
-    setTimeout(() => onDismiss?.(), 1000);
+    const target = item; // lock to THIS title, not whatever is shown when the timer fires
+    dismissTimer = setTimeout(() => { dismissTimer = null; onDismiss?.(target); }, 1000);
   }
 </script>
 
@@ -308,8 +327,9 @@
                 </button>
               {/if}
               {#if onDismiss}
-                <button class="act dismiss" class:dismissing onclick={doDismiss} disabled={dismissing}>
-                  {dismissing ? '✗ Not interested' : 'Not interested'}
+                <button class="act dismiss" class:dismissing onclick={doDismiss}
+                        title={dismissing ? 'Tap to undo' : 'Not interested'}>
+                  {dismissing ? '✗ Not interested — tap to undo' : 'Not interested'}
                 </button>
               {/if}
             </div>
@@ -449,8 +469,8 @@
   .act.on { background: #16352a; border-color: #4ade80; color: #6ee7a0; }
   .act.dismiss { color: #e9728a; border-color: #5a3a44; }
   .act.dismiss:hover { background: #2a1620; border-color: #e94560; color: #e94560; }
-  /* Confirmed: solid red while the modal is closing out. */
-  .act.dismiss.dismissing, .act.dismiss.dismissing:hover { background: #e94560; border-color: #e94560; color: #fff; cursor: default; opacity: 1; }
+  /* Armed: solid red during the grace window — still tappable to undo. */
+  .act.dismiss.dismissing, .act.dismiss.dismissing:hover { background: #e94560; border-color: #e94560; color: #fff; cursor: pointer; opacity: 1; }
 
   /* scroll-margin keeps the field clear of the sheet edge when scrolled into view
      above the mobile keyboard; padding-bottom gives the last element breathing room. */
