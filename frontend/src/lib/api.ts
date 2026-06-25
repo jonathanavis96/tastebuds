@@ -8,6 +8,14 @@ export async function getProfiles(): Promise<Profile[]> {
   return res.json();
 }
 
+export interface CatalogueStats { total: number; movie: number; tv: number; }
+
+export async function getStats(): Promise<CatalogueStats> {
+  const res = await fetch(`${BASE}/stats`);
+  if (!res.ok) throw new Error(`getStats failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getRecommendations(profileId: number): Promise<Recommendation[]> {
   const res = await fetch(`${BASE}/recommendations/${profileId}`);
   if (!res.ok) throw new Error(`getRecommendations failed: ${res.status}`);
@@ -73,6 +81,15 @@ export async function dismissRecommendation(profileId: number, recommendationId:
     body: JSON.stringify({ profileId, recommendationId }),
   });
   if (!res.ok) throw new Error(`dismiss failed: ${res.status}`);
+}
+
+export async function undismissRecommendation(profileId: number, recommendationId: number): Promise<void> {
+  const res = await fetch(`${BASE}/undismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, recommendationId }),
+  });
+  if (!res.ok) throw new Error(`undismiss failed: ${res.status}`);
 }
 
 export async function removeWatch(profileId: number, titleId: number): Promise<void> {

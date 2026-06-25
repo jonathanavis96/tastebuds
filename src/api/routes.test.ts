@@ -195,3 +195,47 @@ describe('POST /api/dismiss', () => {
     expect(rec.state).toBe('dismissed');
   });
 });
+
+describe('POST /api/undismiss', () => {
+  it('restores a dismissed recommendation to pending', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (994, 'tv', 'Undo Show', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=994').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/undismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId }),
+    });
+    expect(res.status).toBe(200);
+    const rec = db.prepare('SELECT state FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.state).toBe('pending');
+  });
+});
+
+describe('GET /api/stats', () => {
+  it('returns the catalogue total plus the movie/series split', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (981, 'movie', 'Film One', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (982, 'movie', 'Film Two', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (983, 'tv', 'Series One', 2022, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/stats');
+    expect(res.status).toBe(200);
+    const body = await res.json() as { total: number; movie: number; tv: number };
+    expect(body).toEqual({ total: 3, movie: 2, tv: 1 });
+  });
+});

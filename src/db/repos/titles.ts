@@ -80,6 +80,16 @@ export function getTitleByTmdbId(
   );
 }
 
+/** Catalogue size for the header readout: total titles plus the movie/series split. */
+export function countTitles(
+  db: InstanceType<typeof Database>,
+): { total: number; movie: number; tv: number } {
+  const total = (db.prepare('SELECT COUNT(*) AS n FROM titles').get() as { n: number }).n;
+  const movie = (db.prepare("SELECT COUNT(*) AS n FROM titles WHERE media_type = 'movie'").get() as { n: number }).n;
+  const tv = (db.prepare("SELECT COUNT(*) AS n FROM titles WHERE media_type = 'tv'").get() as { n: number }).n;
+  return { total, movie, tv };
+}
+
 export function getUnwatchedTitles(
   db: InstanceType<typeof Database>,
   profileId: number,

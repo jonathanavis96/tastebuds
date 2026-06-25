@@ -10,13 +10,18 @@
   import type { Profile, Recommendation, WatchEvent, MediaFilter } from './lib/types.js';
   import {
     getProfiles, getRecommendations, generateRecommendations,
-    rateTitle, addToWatchlist, markWatched, dismissRecommendation,
-    removeWatch, getWatched, getWatchlist, saveNote,
+    rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation,
+    removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
   } from './lib/api.js';
 
+  let stats = $state<CatalogueStats | null>(null);
   let profiles = $state<Profile[]>([]);
   let activeProfileId = $state<number | null>(null);
   let recommendations = $state<Recommendation[]>([]);
+  // Rec ids the user marked "Not interested" THIS session. They stay visible in the
+  // feed (marked, dimmed) instead of vanishing — so the grid never jumps — and clear
+  // on the next Generate/Surprise/profile-switch (when a fresh pending list loads).
+  let dismissedRecIds = $state<number[]>([]);
   let watchlist = $state<WatchEvent[]>([]);
   let watched = $state<WatchEvent[]>([]);
   let tab = $state<'recs' | 'watchlist' | 'history'>('recs');
@@ -115,19 +120,35 @@
     (modalItem as { note?: string | null }).note = note;
     scheduleRefresh();
   }
-  // Dismiss a SPECIFIC rec in the background — the modal passes the title that was
-  // armed, so this removes the right one even after the user scrolled to others.
-  // The modal stays open; idempotent so a stray double-fire is harmless.
+  // Whether the title currently shown in the modal is marked "Not interested".
+  const modalItemDismissed = $derived(
+    modalItem != null && dismissedRecIds.includes((modalItem as Recommendation).id),
+  );
+
+  // Mark a rec "Not interested": commit immediately and mark it IN PLACE (kept in the
+  // feed, dimmed, with a "Not interested" badge) rather than removing it — so the grid
+  // doesn't jump and it's clear it's headed for the dismissed fold. No background
+  // refresh (that would drop it and cause the jump). Idempotent.
   async function modalDismiss(item: Recommendation | WatchEvent) {
     if (!activeProfileId) return;
     const recId = (item as Recommendation).id;
-    if (recId == null || !recommendations.some(r => r.id === recId)) return;
-    recommendations = recommendations.filter(r => r.id !== recId);
+    if (recId == null || dismissedRecIds.includes(recId)) return;
+    dismissedRecIds = [...dismissedRecIds, recId];
     await dismissRecommendation(activeProfileId, recId);
+  }
+
+  // Undo "Not interested": restore the rec to pending on the server and un-mark it.
+  async function modalUndismiss(item: Recommendation | WatchEvent) {
+    if (!activeProfileId) return;
+    const recId = (item as Recommendation).id;
+    if (recId == null || !dismissedRecIds.includes(recId)) return;
+    dismissedRecIds = dismissedRecIds.filter(id => id !== recId);
+    await undismissRecommendation(activeProfileId, recId);
   }
 
   onMount(async () => {
     try {
+      getStats().then(s => stats = s).catch(() => {});
       profiles = await getProfiles();
       if (profiles.length > 0) {
         activeProfileId = profiles[0].id;
@@ -160,6 +181,7 @@
     closeModal();
     // Clear stale data so a slow fetch never shows the previous profile's lists.
     recommendations = [];
+    dismissedRecIds = [];
     watchlist = [];
     watched = [];
     await loadRecs();
@@ -175,6 +197,7 @@
       if (mediaFilter === 'tv') opts.mediaType = 'tv';
       if (request) opts.request = request;
       recommendations = await generateRecommendations(opts);
+      dismissedRecIds = [];
     } catch (e) {
       error = String(e);
     } finally {
@@ -193,6 +216,7 @@
       if (mediaFilter === 'movie') opts.mediaType = 'movie';
       if (mediaFilter === 'tv') opts.mediaType = 'tv';
       recommendations = await generateRecommendations(opts);
+      dismissedRecIds = [];
     } catch (e) {
       error = String(e);
     } finally {
@@ -216,12 +240,20 @@
 
 <div class="app">
   <header>
-    <div class="brand">
-      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-        <path d="M9.5 11 Q16 8.5 22.5 11 Q23.5 22 16 27 Q8.5 22 9.5 11Z" fill="#e94560" />
-        <path d="M16 12 Q16 19 16 23" stroke="#0c0c14" stroke-width="1.7" fill="none" stroke-linecap="round" />
-      </svg>
-      <h1>Taste<span class="accent">Buds</span></h1>
+    <div class="header-top">
+      <div class="brand">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M9.5 11 Q16 8.5 22.5 11 Q23.5 22 16 27 Q8.5 22 9.5 11Z" fill="#e94560" />
+          <path d="M16 12 Q16 19 16 23" stroke="#0c0c14" stroke-width="1.7" fill="none" stroke-linecap="round" />
+        </svg>
+        <h1>Taste<span class="accent">Buds</span></h1>
+      </div>
+      {#if stats}
+        <div class="catalogue" title="Titles available in the library on the home server">
+          <span class="cat-total">{stats.total.toLocaleString()}</span>
+          <span class="cat-split">{stats.movie.toLocaleString()} films · {stats.tv.toLocaleString()} series</span>
+        </div>
+      {/if}
     </div>
     <p class="tag">Picked for how you actually watch</p>
   </header>
@@ -271,7 +303,7 @@
         {#each Array(6) as _}<div class="skel"></div>{/each}
       </div>
     {:else}
-      <PosterFeed recommendations={visibleRecs} onOpen={openRec} />
+      <PosterFeed recommendations={visibleRecs} dismissedIds={dismissedRecIds} onOpen={openRec} />
     {/if}
   {:else if tab === 'watchlist'}
     {#if loading}
@@ -303,7 +335,9 @@
     onMarkWatched={modalMarkWatched}
     onUnwatch={modalUnwatch}
     onSaveNote={modalSaveNote}
+    dismissed={modalItemDismissed}
     onDismiss={modalContext === 'recs' ? modalDismiss : undefined}
+    onUndismiss={modalContext === 'recs' ? modalUndismiss : undefined}
   />
 {/if}
 
@@ -321,7 +355,11 @@
     content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
     background: #e94560;
   }
+  .header-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
   .brand { display: flex; align-items: center; gap: 0.5rem; }
+  .catalogue { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; flex-shrink: 0; cursor: default; }
+  .cat-total { font-size: 1.05rem; font-weight: 800; color: #fff; letter-spacing: -0.01em; }
+  .cat-split { font-size: 0.66rem; color: #8a8ab0; margin-top: 2px; white-space: nowrap; }
   .mark { width: 30px; height: 30px; flex-shrink: 0; margin-top: -2px; }
   h1 { font-size: 1.4rem; color: #fff; font-weight: 800; letter-spacing: -0.01em; }
   h1 .accent { color: #e94560; }

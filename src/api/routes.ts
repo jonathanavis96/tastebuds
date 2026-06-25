@@ -4,7 +4,7 @@ import type { Config } from '../config.js';
 import { getAllProfiles, getProfile } from '../db/repos/profiles.js';
 import { getRecommendations, updateRecommendationState } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
-import { getTitleById, updateTitleRatings, updateTitleRtUrl } from '../db/repos/titles.js';
+import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates } from '../retrieval/retrieve.js';
 import { getOmdbRatings } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
@@ -19,6 +19,11 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   api.get('/profiles', (c) => {
     const profiles = getAllProfiles(db);
     return c.json(profiles);
+  });
+
+  // Catalogue size readout for the header — total titles + movie/series split.
+  api.get('/stats', (c) => {
+    return c.json(countTitles(db));
   });
 
   // Attach display/detail fields from the joined title (the embedding Buffer is omitted).
@@ -265,6 +270,18 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     }
     updateRecommendationState(db, body.recommendationId, 'dismissed');
     // "Not interested" is a mild negative signal — fold it into the taste vector.
+    await refreshTasteVector(db, body.profileId, config);
+    return c.json({ ok: true });
+  });
+
+  // Undo a dismiss — restore the rec to pending so it shows in Picks again, and
+  // recompute the taste vector so the (now-removed) negative signal stops biasing it.
+  api.post('/undismiss', async (c) => {
+    const body = await c.req.json<{ profileId: number; recommendationId: number }>();
+    if (!body.profileId || !body.recommendationId) {
+      return c.json({ error: 'profileId and recommendationId required' }, 400);
+    }
+    updateRecommendationState(db, body.recommendationId, 'pending');
     await refreshTasteVector(db, body.profileId, config);
     return c.json({ ok: true });
   });

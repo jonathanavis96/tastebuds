@@ -42,15 +42,18 @@
     onMarkWatched?: () => void | Promise<void>;
     onUnwatch?: () => void | Promise<void>;
     onSaveNote?: (note: string) => void | Promise<void>;
-    /** Fired with the SPECIFIC title to dismiss — bound at tap time so a delayed
-        background dismiss removes the right one even after carousel navigation. */
+    /** Whether THIS title is currently marked "Not interested" (parent-owned truth). */
+    dismissed?: boolean;
+    /** Mark / un-mark "Not interested". Both commit immediately in the parent. */
     onDismiss?: (item: DetailItem) => void;
+    onUndismiss?: (item: DetailItem) => void;
   }
 
   let {
     item, onClose, position, onPrev, onNext,
     inWatchlist = false, watched = false,
-    onRate, onWatchlist, onRemoveWatchlist, onMarkWatched, onUnwatch, onSaveNote, onDismiss,
+    onRate, onWatchlist, onRemoveWatchlist, onMarkWatched, onUnwatch, onSaveNote,
+    dismissed = false, onDismiss, onUndismiss,
   }: Props = $props();
 
   const meta = $derived(item.kind ? kindMeta(item) : null);
@@ -71,18 +74,9 @@
   let zoomed = $state(false);
   let note = $state('');
   let noteSaved = $state(false);
-  // Set true the moment "Not interested" is tapped: turns the button solid red.
-  // There's then a ~1s grace window in which re-tapping undoes it; if you don't,
-  // the dismiss "locks in" for THAT title and fires in the background — you can
-  // freely scroll to other titles meanwhile and it removes the right one.
-  let dismissing = $state(false);
-  // Pending dismiss timer. Held so re-tap (undo) or unmount (modal closed before
-  // it locked in) can cancel it. Navigation does NOT cancel it — the dismiss is
-  // bound to the title it was armed on, not whatever is shown when it fires.
-  let dismissTimer: ReturnType<typeof setTimeout> | null = null;
-  function cancelDismiss() {
-    if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
-  }
+  // Optimistic local copy of the parent's "Not interested" flag for THIS title, so
+  // the button flips instantly on tap; reconciled from the prop on every nav.
+  let isDismissed = $state(false);
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -107,7 +101,7 @@
       lastSavedNote = note;
       noteSaved = false;
       zoomed = false;
-      dismissing = false;
+      isDismissed = dismissed; // reconcile the armed state from the parent for this title
     });
   });
 
@@ -199,19 +193,15 @@
     setTimeout(() => { noteSaved = false; }, 1800);
   }
   // Safety net: if the modal closes before blur fires (mobile), still save.
-  onDestroy(() => { cancelDismiss(); void saveNote(); });
+  onDestroy(() => { void saveNote(); });
   function openZoom() { if (!suppressClick) zoomed = true; }
-  // "Not interested": arm a red 1s grace window. Re-tapping within it (while still
-  // on this title) undoes it. Otherwise it locks in and fires onDismiss in the
-  // background for the title it was armed on — bound here so carousel navigation
-  // can't redirect it at the wrong title. The modal stays open; the parent just
-  // drops that title from the list.
+  // "Not interested" toggle. Commits immediately (parent marks it in place + persists)
+  // and flips the button optimistically — so it always reflects reality on the first
+  // tap. Tapping again genuinely undoes it (restores to pending). The modal stays open.
   function doDismiss() {
-    if (dismissing) { cancelDismiss(); dismissing = false; return; } // undo within the window
-    cancelDismiss(); // drop any orphaned timer before re-arming
-    dismissing = true;
-    const target = item; // lock to THIS title, not whatever is shown when the timer fires
-    dismissTimer = setTimeout(() => { dismissTimer = null; onDismiss?.(target); }, 1000);
+    const target = item;
+    if (isDismissed) { isDismissed = false; onUndismiss?.(target); }
+    else { isDismissed = true; onDismiss?.(target); }
   }
 </script>
 
@@ -327,9 +317,9 @@
                 </button>
               {/if}
               {#if onDismiss}
-                <button class="act dismiss" class:dismissing onclick={doDismiss}
-                        title={dismissing ? 'Tap to undo' : 'Not interested'}>
-                  {dismissing ? '✗ Not interested — tap to undo' : 'Not interested'}
+                <button class="act dismiss" class:dismissing={isDismissed} onclick={doDismiss}
+                        title={isDismissed ? 'Tap to undo' : 'Not interested'}>
+                  {isDismissed ? '✗ Not interested — tap to undo' : 'Not interested'}
                 </button>
               {/if}
             </div>
