@@ -19,8 +19,8 @@ export interface Config {
   requestLookupDailyBudget: number;
   /**
    * Deepest TMDB discover page the harvest cursor sweeps to before wrapping back
-   * to page 1. Each bucket advances one page per run. Defaults to 30 (~600 titles
-   * per bucket before it loops). Set via HARVEST_MAX_PAGE env var.
+   * to page 1. Each bucket advances one page per run. Defaults to 100 (~2,000
+   * titles per bucket before it loops). Set via HARVEST_MAX_PAGE env var.
    */
   harvestMaxPage: number;
 }
@@ -58,6 +58,6 @@ export function loadConfig(): Config {
       : 500,
     harvestMaxPage: process.env.HARVEST_MAX_PAGE
       ? parseInt(process.env.HARVEST_MAX_PAGE, 10)
-      : 30,
+      : 100,
   };
 }
