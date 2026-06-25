@@ -42,6 +42,7 @@ const tinyBudgetConfig: Config = {
   omdbApiKey: undefined,
   harvestDailyTarget: 2,
   requestLookupDailyBudget: 500,
+  harvestMaxPage: 30,
 };
 
 function createTestDb(): InstanceType<typeof Database> {

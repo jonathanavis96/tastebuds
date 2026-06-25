@@ -13,6 +13,7 @@ const mockConfig: Config = {
   omdbApiKey: undefined,
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 500,
+  harvestMaxPage: 30,
 };
 
 function setupDb() {

@@ -36,6 +36,7 @@ const mockConfig: Config = {
   omdbApiKey: undefined,
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 500,
+  harvestMaxPage: 30,
 };
 
 const mockTmdbTitle = {
@@ -242,5 +243,40 @@ describe('runHarvest', () => {
     expect(saved!.title).toBe('The Terror');
     expect(result.titlesAdded).toBeGreaterThanOrEqual(1);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it('advances the harvest page cursor across runs (sweeps deeper, not re-listing page 1)', async () => {
+    const db = createTestDb();
+    seedProfileAndSig(db);
+
+    // Pages passed to the GLOBAL broad-movie query (no genre filter, vote_count.desc).
+    const broadMoviePages = () =>
+      vi
+        .mocked(discoverTitles)
+        .mock.calls.filter(
+          ([opts]) => opts.mediaType === 'movie' && opts.sortBy === 'vote_count.desc' && !opts.genreIds,
+        )
+        .map(([opts]) => opts.page);
+
+    await runHarvest(db, mockConfig);
+    const firstRun = broadMoviePages();
+    // First run claims two consecutive pages starting at 1
+    expect(firstRun).toContain(1);
+    expect(firstRun).toContain(2);
+
+    // Reset mocks for the second run (counts only; cursor lives in the DB)
+    vi.clearAllMocks();
+    vi.mocked(discoverTitles).mockResolvedValue([mockTmdbTitle]);
+    vi.mocked(getTrendingTitles).mockResolvedValue([]);
+    vi.mocked(getTitleDetails).mockResolvedValue(mockTmdbDetail);
+    vi.mocked(embedText).mockResolvedValue([0.1, 0.2, 0.3]);
+    vi.mocked(searchKeyword).mockResolvedValue([{ id: 99999, name: 'mock-keyword' }]);
+    keywordIdCache.clear();
+
+    await runHarvest(db, mockConfig);
+    const secondRun = broadMoviePages();
+    // Second run continues the sweep (pages 3 & 4) — it does NOT re-list page 1
+    expect(secondRun).toContain(3);
+    expect(secondRun).not.toContain(1);
   });
 });

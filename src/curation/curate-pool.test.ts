@@ -166,6 +166,7 @@ describe('curateCandidates — kind field parsing', () => {
     omdbApiKey: undefined,
     harvestDailyTarget: 500,
     requestLookupDailyBudget: 500,
+    harvestMaxPage: 30,
   };
 
   function makeSpawnMock(stdout: string, exitCode = 0) {

@@ -97,6 +97,19 @@ export const MIGRATE_006_API_USAGE = `
   )
 `;
 
+// Migration 007: per-bucket harvest page cursor.
+// One row per discovery "bucket" (e.g. "movie:broad", "tv:genre:18",
+// "movie:loved:18,28"). next_page is the TMDB discover page to fetch on the NEXT
+// harvest for that bucket — lets the nightly harvest sweep DEEPER through the
+// catalogue each run instead of re-listing page 1 (which mostly returns titles
+// already in the DB). Wraps back to page 1 at harvestMaxPage.
+export const MIGRATE_007_HARVEST_CURSOR = `
+  CREATE TABLE IF NOT EXISTS harvest_cursor (
+    bucket      TEXT PRIMARY KEY,
+    next_page   INTEGER NOT NULL DEFAULT 1
+  )
+`;
+
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before
 // either inserted, so the read-time excludeTitleIds missed the other's picks and

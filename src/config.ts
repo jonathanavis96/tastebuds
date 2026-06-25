@@ -17,6 +17,12 @@ export interface Config {
    * Defaults to 500. Set via REQUEST_LOOKUP_DAILY_BUDGET env var.
    */
   requestLookupDailyBudget: number;
+  /**
+   * Deepest TMDB discover page the harvest cursor sweeps to before wrapping back
+   * to page 1. Each bucket advances one page per run. Defaults to 30 (~600 titles
+   * per bucket before it loops). Set via HARVEST_MAX_PAGE env var.
+   */
+  harvestMaxPage: number;
 }
 
 export class ConfigError extends Error {
@@ -50,5 +56,8 @@ export function loadConfig(): Config {
     requestLookupDailyBudget: process.env.REQUEST_LOOKUP_DAILY_BUDGET
       ? parseInt(process.env.REQUEST_LOOKUP_DAILY_BUDGET, 10)
       : 500,
+    harvestMaxPage: process.env.HARVEST_MAX_PAGE
+      ? parseInt(process.env.HARVEST_MAX_PAGE, 10)
+      : 30,
   };
 }

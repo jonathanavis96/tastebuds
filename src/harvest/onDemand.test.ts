@@ -32,6 +32,7 @@ const mockConfig: Config = {
   omdbApiKey: undefined,
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 10,
+  harvestMaxPage: 30,
 };
 
 /** A horror TV series returned by the keyword discovery path. */

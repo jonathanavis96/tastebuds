@@ -11,6 +11,7 @@ import {
   MIGRATE_004_ADD_NOTE,
   MIGRATE_005_DEDUP_PENDING,
   MIGRATE_006_API_USAGE,
+  MIGRATE_007_HARVEST_CURSOR,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -71,5 +72,8 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
 
     // Migration 006: create api_usage table for daily budget tracking (idempotent via IF NOT EXISTS)
     db.exec(MIGRATE_006_API_USAGE);
+
+    // Migration 007: create harvest_cursor table for per-bucket page sweeping (idempotent via IF NOT EXISTS)
+    db.exec(MIGRATE_007_HARVEST_CURSOR);
   })();
 }

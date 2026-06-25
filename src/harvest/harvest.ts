@@ -7,6 +7,7 @@ import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { getWatchEvents } from '../db/repos/watchEvents.js';
 import { upsertTitle, getTitleByTmdbId } from '../db/repos/titles.js';
 import { getUsage, bumpHarvestAdded, today } from '../db/repos/apiUsage.js';
+import { claimPage } from '../db/repos/harvestCursor.js';
 import { discoverTitles, getTrendingTitles, getTitleDetails, searchKeyword } from '../tmdb/client.js';
 import { mapTmdbToTitleRow } from '../tmdb/mappers.js';
 import { embedText } from '../ollama/embed.js';
@@ -69,7 +70,30 @@ export async function runHarvest(
   // Collect unique tmdb_id+media_type pairs to harvest
   const toHarvest = new Map<string, { tmdbId: number; mediaType: 'movie' | 'tv' }>();
 
-  // ── Per-profile loved-genre discovery + trending ──────────────────────────
+  // ── Trending (profile-independent — fetch ONCE, not per profile) ──────────
+  // Trending returns the same list regardless of profile, so fetching it inside
+  // the per-profile loop just duplicated calls. It stays on page 1 (no cursor)
+  // because trending is inherently volatile/shallow — page 1 IS the signal.
+  const [trendingMovies, trendingTv] = await Promise.all([
+    getTrendingTitles('movie', config).catch((err) => {
+      result.errors.push(`TMDB trending movie failed: ${String(err)}`);
+      return [] as TmdbTitle[];
+    }),
+    getTrendingTitles('tv', config).catch((err) => {
+      result.errors.push(`TMDB trending tv failed: ${String(err)}`);
+      return [] as TmdbTitle[];
+    }),
+  ]);
+  for (const t of trendingMovies) {
+    const key = `${t.id}:movie`;
+    if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType: 'movie' });
+  }
+  for (const t of trendingTv) {
+    const key = `${t.id}:tv`;
+    if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType: 'tv' });
+  }
+
+  // ── Per-profile loved-genre discovery ─────────────────────────────────────
   for (const profile of nonDerivedProfiles) {
     const sig = getTasteSignature(db, profile.id);
     const prefs = sig ? (JSON.parse(sig.prefs) as { loved_genres?: string[] }) : {};
@@ -84,30 +108,33 @@ export async function runHarvest(
     // (Horror, Thriller for TV) go through keyword discovery below.
     const { genreIds: tvGenreIds, keywordTerms: tvKeywordTerms } = resolveGenreNames(lovedGenres, 'tv');
 
-    // Discover + trending, collect into dedup map
+    // Loved-genre discovery, paged via the cursor so each run sweeps deeper.
+    // Bucket key is the sorted genre-id signature so a profile's recurring query
+    // keeps its own page position (independent of other profiles/buckets).
+    const movieBucket = `movie:loved:${[...movieGenreIds].sort((a, b) => a - b).join(',') || 'none'}`;
+    const tvBucket = `tv:loved:${[...tvGenreIds].sort((a, b) => a - b).join(',') || 'none'}`;
+
     const fetches: Array<Promise<TmdbTitle[]>> = [
-      discoverTitles({ mediaType: 'movie', genreIds: movieGenreIds }, config).catch((err) => {
+      discoverTitles(
+        { mediaType: 'movie', genreIds: movieGenreIds, page: claimPage(db, movieBucket, config.harvestMaxPage) },
+        config,
+      ).catch((err) => {
         result.errors.push(`TMDB discover movie failed: ${String(err)}`);
         return [];
       }),
-      discoverTitles({ mediaType: 'tv', genreIds: tvGenreIds }, config).catch((err) => {
+      discoverTitles(
+        { mediaType: 'tv', genreIds: tvGenreIds, page: claimPage(db, tvBucket, config.harvestMaxPage) },
+        config,
+      ).catch((err) => {
         result.errors.push(`TMDB discover tv failed: ${String(err)}`);
-        return [];
-      }),
-      getTrendingTitles('movie', config).catch((err) => {
-        result.errors.push(`TMDB trending movie failed: ${String(err)}`);
-        return [];
-      }),
-      getTrendingTitles('tv', config).catch((err) => {
-        result.errors.push(`TMDB trending tv failed: ${String(err)}`);
         return [];
       }),
     ];
 
-    const [movieDiscover, tvDiscover, trendingMovies, trendingTv] = await Promise.all(fetches);
+    const [movieDiscover, tvDiscover] = await Promise.all(fetches);
 
-    const allMovies = [...movieDiscover, ...trendingMovies];
-    const allTv = [...tvDiscover, ...trendingTv];
+    const allMovies = [...movieDiscover];
+    const allTv = [...tvDiscover];
 
     for (const t of allMovies) {
       const key = `${t.id}:movie`;
@@ -132,7 +159,13 @@ export async function runHarvest(
           continue;
         }
         const kwTitles = await discoverTitles(
-          { mediaType: 'tv', keywordIds: [kwId], sortBy: 'vote_count.desc', voteCountGte: 50 },
+          {
+            mediaType: 'tv',
+            keywordIds: [kwId],
+            sortBy: 'vote_count.desc',
+            voteCountGte: 50,
+            page: claimPage(db, `tv:kw:${kwId}`, config.harvestMaxPage),
+          },
           config,
         );
         for (const t of kwTitles) {
@@ -149,47 +182,53 @@ export async function runHarvest(
   // Ensures the DB grows across all genres every day, not just what the profiles
   // love. Rotates by day-of-year so each daily run fetches a different page of
   // the most-voted titles — capped to TMDB's page range 1..500.
-  const broadPage = Math.max(1, Math.min(500, dayOfYear() % 500 || 1));
-
   // All movie genres + all TV genres for round-robin broad coverage
   const allMovieGenreIds = Object.values(MOVIE_GENRE_MAP);
   const allTvGenreIds = [...new Set(Object.values(TV_GENRE_MAP))];
 
+  // dayOfYear still selects WHICH genre gets a dedicated slice today; the PAGE
+  // for every broad query now comes from that bucket's own cursor, so each
+  // recurring slice sweeps deeper instead of re-listing page 1.
+  const rrMovieGenre = allMovieGenreIds[dayOfYear() % allMovieGenreIds.length];
+  const rrTvGenre = allTvGenreIds[dayOfYear() % allTvGenreIds.length];
+
   const broadFetches: Array<Promise<TmdbTitle[]>> = [
-    // Global most-voted movies (no genre filter) — catches top films across all genres
+    // Global most-voted movies (no genre filter) — two consecutive cursor pages
     discoverTitles(
-      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: broadPage },
+      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: claimPage(db, 'movie:broad', config.harvestMaxPage) },
       config,
     ).catch(() => []),
     // Global most-voted TV series
     discoverTitles(
-      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: broadPage },
+      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: claimPage(db, 'tv:broad', config.harvestMaxPage) },
       config,
     ).catch(() => []),
-    // A second page for variety (broadPage+1 wraps within 1..500)
+    // Second consecutive page of each broad bucket for variety
     discoverTitles(
-      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: Math.max(1, Math.min(500, broadPage + 1)) },
+      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: claimPage(db, 'movie:broad', config.harvestMaxPage) },
       config,
     ).catch(() => []),
     discoverTitles(
-      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: Math.max(1, Math.min(500, broadPage + 1)) },
+      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: claimPage(db, 'tv:broad', config.harvestMaxPage) },
       config,
     ).catch(() => []),
-    // Round-robin one movie genre for genre diversity
+    // Round-robin one movie genre for genre diversity (page from its own cursor)
     discoverTitles(
       {
         mediaType: 'movie',
-        genreIds: [allMovieGenreIds[dayOfYear() % allMovieGenreIds.length]],
+        genreIds: [rrMovieGenre],
         sortBy: 'popularity.desc',
+        page: claimPage(db, `movie:genre:${rrMovieGenre}`, config.harvestMaxPage),
       },
       config,
     ).catch(() => []),
-    // Round-robin one TV genre for genre diversity
+    // Round-robin one TV genre for genre diversity (page from its own cursor)
     discoverTitles(
       {
         mediaType: 'tv',
-        genreIds: [allTvGenreIds[dayOfYear() % allTvGenreIds.length]],
+        genreIds: [rrTvGenre],
         sortBy: 'popularity.desc',
+        page: claimPage(db, `tv:genre:${rrTvGenre}`, config.harvestMaxPage),
       },
       config,
     ).catch(() => []),
