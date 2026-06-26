@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
+import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile } from '../db/repos/profiles.js';
 import { getRecommendations, updateRecommendationState } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
@@ -24,6 +27,38 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // Catalogue size readout for the header — total titles + movie/series split.
   api.get('/stats', (c) => {
     return c.json(countTitles(db));
+  });
+
+  // Local poster cache: serve the w342 poster for a title from disk, fetching it
+  // from TMDB once on first display. Removes the runtime dependency on TMDB's CDN
+  // (and the via.placeholder.com fallback) for everything the grids render.
+  const posterDir = path.join(path.dirname(config.dbPath), 'posters');
+  // 1x1.5 dark placeholder with a film glyph, served when a title has no poster.
+  const PLACEHOLDER_SVG =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 342 513" width="342" height="513">` +
+    `<rect width="342" height="513" fill="#16213e"/>` +
+    `<g fill="none" stroke="#3a4570" stroke-width="6" stroke-linejoin="round">` +
+    `<rect x="121" y="196" width="100" height="120" rx="8"/>` +
+    `<path d="M121 226 H221 M121 286 H221 M141 196 V316 M201 196 V316"/></g>` +
+    `<text x="171" y="360" fill="#6b6b8a" font-family="system-ui,sans-serif" font-size="20" text-anchor="middle">No poster</text>` +
+    `</svg>`;
+  const placeholderResponse = () =>
+    new Response(PLACEHOLDER_SVG, {
+      status: 200,
+      headers: { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'public, max-age=86400' },
+    });
+
+  api.get('/poster/:id', async (c) => {
+    const id = Number(c.req.param('id'));
+    const t = Number.isFinite(id) ? getTitleById(db, id) : undefined;
+    if (!t?.poster_path) return placeholderResponse();
+    const file = await ensurePosterCached(t.poster_path, id, { posterDir });
+    if (!file) return placeholderResponse();
+    const buf = fs.readFileSync(file);
+    return new Response(new Uint8Array(buf), {
+      status: 200,
+      headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' },
+    });
   });
 
   // Attach display/detail fields from the joined title (the embedding Buffer is omitted).

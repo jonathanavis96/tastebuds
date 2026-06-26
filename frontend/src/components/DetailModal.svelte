@@ -105,8 +105,13 @@
     });
   });
 
-  function posterUrl(path: string | null | undefined, w = 342): string {
-    if (!path) return 'https://via.placeholder.com/342x513?text=No+Poster';
+  // Main poster comes from our local cache (w342) by title id; the lightbox zoom
+  // pulls a larger w780 straight from TMDB (we don't cache that size).
+  function cachedPoster(titleId: number): string {
+    return `/api/poster/${titleId}`;
+  }
+  function tmdbPoster(path: string | null | undefined, w = 780): string {
+    if (!path) return cachedPoster(item.title_id);
     return `https://image.tmdb.org/t/p/w${w}${path}`;
   }
 
@@ -251,7 +256,7 @@
       <button type="button" class="poster-btn" onclick={openZoom} aria-label="Zoom poster">
         <img
           class="poster"
-          src={posterUrl(item.poster_path)}
+          src={cachedPoster(item.title_id)}
           alt={item.title ?? 'Poster'}
           draggable="false"
         />
@@ -354,7 +359,7 @@
       onclick={(e) => { e.stopPropagation(); zoomed = false; }}
       onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); zoomed = false; } }}
     >
-      <img src={posterUrl(item.poster_path, 780)} alt={item.title ?? 'Poster'} />
+      <img src={tmdbPoster(item.poster_path, 780)} alt={item.title ?? 'Poster'} />
     </div>
   {/if}
 </div>

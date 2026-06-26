@@ -11,9 +11,10 @@
 
   let { recommendations = [], dismissedIds = [], onOpen = () => {} }: Props = $props();
 
-  function posterUrl(path: string | null | undefined): string {
-    if (!path) return 'https://via.placeholder.com/342x513?text=No+Poster';
-    return `https://image.tmdb.org/t/p/w342${path}`;
+  // Local poster cache (w342), served from our own backend — no TMDB CDN dependency
+  // at view-time, and the server returns a placeholder when a title has no poster.
+  function posterUrl(titleId: number): string {
+    return `/api/poster/${titleId}`;
   }
 </script>
 
@@ -35,7 +36,7 @@
       aria-label={dismissed ? `Not interested — ${rec.title ?? 'title'} (tap to undo)` : `View details for ${rec.title ?? 'title'}`}
     >
       <div class="poster-img-wrap">
-        <img src={posterUrl(rec.poster_path)} alt={rec.title ?? 'Poster'} loading="lazy" />
+        <img src={posterUrl(rec.title_id)} alt={rec.title ?? 'Poster'} loading="lazy" />
         {#if dismissed}
           <span class="badge dismissed-badge">✗ Not interested</span>
         {:else}

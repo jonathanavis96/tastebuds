@@ -8,9 +8,10 @@
 
   let { items = [], onOpen = () => {} }: Props = $props();
 
-  function posterUrl(path: string | null | undefined): string {
-    if (!path) return 'https://via.placeholder.com/342x513?text=No+Poster';
-    return `https://image.tmdb.org/t/p/w342${path}`;
+  // Local poster cache (w342) served from our own backend; the server returns a
+  // placeholder when a title has no poster.
+  function posterUrl(titleId: number): string {
+    return `/api/poster/${titleId}`;
   }
 
   function watchedDate(iso: string | null | undefined): string {
@@ -32,7 +33,7 @@
       aria-label={`View details for ${item.title ?? 'title'}`}
     >
       <div class="poster-img-wrap">
-        <img src={posterUrl(item.poster_path)} alt={item.title ?? 'Poster'} loading="lazy" />
+        <img src={posterUrl(item.title_id)} alt={item.title ?? 'Poster'} loading="lazy" />
         {#if watchedDate(item.watched_at)}
           <span class="badge">✓ Watched {watchedDate(item.watched_at)}</span>
         {/if}
