@@ -22,11 +22,13 @@ export interface ImportResult {
 
 /**
  * Seed ratings come from the source recommender on a 0–10 scale (e.g. 9.5, 8),
- * but the app stores ratings as an integer 1–5 (schema CHECK + 5-star UI).
- * Map: round(r / 2), clamped to 1–5.
+ * but the app stores ratings on a 0.5–5 star scale (half-stars allowed). Map by
+ * halving to stars and snapping to the nearest half-star, clamped to 1–5:
+ *   10 → 5,  9.5 → 5,  8 → 4,  7 → 3.5,  5 → 2.5,  2 → 1.
  */
 export function toAppRating(seedRating: number): number {
-  return Math.min(5, Math.max(1, Math.round(seedRating / 2)));
+  const stars = Math.round(seedRating) / 2; // nearest half-star
+  return Math.min(5, Math.max(1, stars));
 }
 
 /**

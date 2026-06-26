@@ -115,7 +115,7 @@ export async function refreshTasteVector(
   // vector untouched (negatives alone can't define what to recommend).
   if (likedVecs.length === 0) return;
 
-  // Collect weighted negatives: low-rated titles (1★ stronger than 2★) plus
+  // Collect weighted negatives: low-rated titles (≤1★ stronger than 2★) plus
   // "Not interested" (dismissed recs) as a mild push. Dedupe so a title that's
   // both low-rated and dismissed isn't counted twice (the rating wins).
   const negatives: Array<{ weight: number; vec: number[] }> = [];
@@ -125,7 +125,9 @@ export async function refreshTasteVector(
     if (!title) continue;
     seenNeg.add(ev.title_id);
     const text = [title.title, title.synopsis, ev.note].filter(Boolean).join(' — ');
-    negatives.push({ weight: ev.rating === 1 ? DISLIKE_1STAR_WEIGHT : DISLIKE_2STAR_WEIGHT, vec: await embedFn(text, config) });
+    // ≤1★ (incl. half-stars: 0.5/1) is a stronger negative than 1.5–2★.
+    const weight = (ev.rating ?? 0) <= 1.5 ? DISLIKE_1STAR_WEIGHT : DISLIKE_2STAR_WEIGHT;
+    negatives.push({ weight, vec: await embedFn(text, config) });
   }
   for (const rec of getRecommendations(db, profileId, 'dismissed')) {
     if (seenNeg.has(rec.title_id)) continue;

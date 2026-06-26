@@ -262,6 +262,24 @@ describe('watchEvents repo', () => {
     expect(rated).toHaveLength(1);
     expect(rated[0].title_id).toBe(1);
   });
+
+  it('stores and reads back half-star ratings (3.5) via the INTEGER-affinity column', () => {
+    const db = createTestDb();
+    upsertProfile(db, baseProfile);
+    upsertTitle(db, baseTitle);
+    upsertWatchEvent(db, {
+      profile_id: 1,
+      title_id: 1,
+      status: 'watched',
+      rating: 3.5,
+      watched_at: new Date().toISOString(),
+    });
+    const events = getWatchEvents(db, 1);
+    expect(events[0].rating).toBe(3.5);
+    // 3.5★ counts as liked at the 3-star floor but not at the 4-star floor.
+    expect(getRatedTitles(db, 1, 3)).toHaveLength(1);
+    expect(getRatedTitles(db, 1, 4)).toHaveLength(0);
+  });
 });
 
 describe('recommendations repo', () => {

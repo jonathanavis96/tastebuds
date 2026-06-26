@@ -41,7 +41,9 @@
       <div class="poster-info">
         <span class="title">{item.title ?? 'Unknown'}</span>
         <span class="year">{item.year ?? ''}</span>
-        {#if item.rating}<span class="rating">{'★'.repeat(item.rating)}</span>{/if}
+        {#if item.rating}
+          <span class="stars" style="--pct:{(item.rating / 5) * 100}%" aria-label={`${item.rating} out of 5 stars`}>★★★★★</span>
+        {/if}
       </div>
     </button>
   {/each}
@@ -86,6 +88,9 @@
   .poster-info { padding: 0.55rem; display: flex; flex-direction: column; gap: 2px; }
   .title { font-weight: 700; font-size: 0.85rem; color: #fff; line-height: 1.2; }
   .year { font-size: 0.72rem; color: #888; }
-  .rating { color: #f5c518; font-size: 0.85rem; margin-top: 2px; }
+  /* Read-only half-star display: grey base with a gold overlay clipped to --pct.
+     No letter-spacing so each star is exactly 20% (half-stars land precisely). */
+  .stars { position: relative; display: inline-block; color: #555; font-size: 0.85rem; margin-top: 2px; }
+  .stars::before { content: '★★★★★'; position: absolute; inset: 0; color: #f5c518; width: var(--pct); overflow: hidden; white-space: nowrap; }
   .empty { color: #888; text-align: center; padding: 2rem; grid-column: 1 / -1; }
 </style>

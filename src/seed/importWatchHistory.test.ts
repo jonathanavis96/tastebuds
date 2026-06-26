@@ -7,12 +7,13 @@ import { importFromSeedJson, toAppRating } from './importWatchHistory.js';
 import type { Config } from '../config.js';
 import type { SeedItem } from './parseSeedFile.js';
 
-describe('toAppRating (0–10 seed scale → 1–5 app scale)', () => {
-  it('maps boundaries and clamps', () => {
+describe('toAppRating (0–10 seed scale → 0.5-step 1–5 star scale)', () => {
+  it('maps boundaries, half-stars, and clamps', () => {
     expect(toAppRating(10)).toBe(5);
-    expect(toAppRating(9.5)).toBe(5); // round(4.75)
+    expect(toAppRating(9.5)).toBe(5); // round(9.5)=10 → 5
     expect(toAppRating(8)).toBe(4);
-    expect(toAppRating(5)).toBe(3); // round(2.5) → 3
+    expect(toAppRating(7)).toBe(3.5); // half-star
+    expect(toAppRating(5)).toBe(2.5); // half-star
     expect(toAppRating(2)).toBe(1);
     expect(toAppRating(0)).toBe(1); // clamped up to min 1
     expect(toAppRating(11)).toBe(5); // clamped down to max 5

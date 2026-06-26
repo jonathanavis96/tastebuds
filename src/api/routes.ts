@@ -249,6 +249,10 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     if (!body.profileId || !body.titleId || body.rating == null) {
       return c.json({ error: 'profileId, titleId, and rating required' }, 400);
     }
+    // Ratings are 1–5 stars with half-star steps (the column CHECK enforces 1–5).
+    if (body.rating < 1 || body.rating > 5) {
+      return c.json({ error: 'rating must be between 1 and 5' }, 400);
+    }
     upsertWatchEvent(db, {
       profile_id: body.profileId,
       title_id: body.titleId,
