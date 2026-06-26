@@ -6,7 +6,18 @@
   }
 
   let { onSubmit = () => {} }: Props = $props();
-  let text = $state('');
+
+  // Persist the in-progress (unsent) request across refreshes, so a half-typed prompt
+  // isn't lost on reload. Cleared on submit (the box empties anyway).
+  const DRAFT_KEY = 'tastebuds:requestDraft';
+  function draftGet(): string {
+    try { return typeof localStorage !== 'undefined' ? (localStorage.getItem(DRAFT_KEY) ?? '') : ''; } catch { return ''; }
+  }
+  function draftSet(v: string): void {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(DRAFT_KEY, v); } catch { /* ignore */ }
+  }
+  let text = $state(draftGet());
+  $effect(() => { draftSet(text); });
 
   // Rotating, deliberately varied example prompts so the box suggests the range
   // of things you can ask for (not one over-specific example).

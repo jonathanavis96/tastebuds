@@ -248,17 +248,14 @@
     </div>
 
     <div class="body">
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <img
-        class="poster"
-        src={posterUrl(item.poster_path)}
-        alt={item.title ?? 'Poster'}
-        draggable="false"
-        onclick={openZoom}
-        role="button"
-        tabindex="0"
-        onkeydown={(e) => e.key === 'Enter' && (zoomed = true)}
-      />
+      <button type="button" class="poster-btn" onclick={openZoom} aria-label="Zoom poster">
+        <img
+          class="poster"
+          src={posterUrl(item.poster_path)}
+          alt={item.title ?? 'Poster'}
+          draggable="false"
+        />
+      </button>
 
       <div class="head">
         <h2>{item.title ?? 'Unknown'}</h2>
@@ -349,8 +346,14 @@
   </div>
 
   {#if zoomed}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="lightbox" onclick={(e) => { e.stopPropagation(); zoomed = false; }}>
+    <div
+      class="lightbox"
+      role="button"
+      tabindex="0"
+      aria-label="Close zoomed poster"
+      onclick={(e) => { e.stopPropagation(); zoomed = false; }}
+      onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.stopPropagation(); zoomed = false; } }}
+    >
       <img src={posterUrl(item.poster_path, 780)} alt={item.title ?? 'Poster'} />
     </div>
   {/if}
@@ -420,7 +423,8 @@
   @media (min-width: 600px) {
     .body { grid-template-columns: 240px 1fr; grid-template-areas: "poster head" "poster rest"; gap: 0.5rem 1.4rem; }
   }
-  .poster { grid-area: poster; width: 100%; border-radius: 12px; user-select: none; box-shadow: 0 4px 16px rgba(0,0,0,0.45); align-self: start; cursor: zoom-in; }
+  .poster-btn { grid-area: poster; align-self: start; display: block; width: 100%; padding: 0; border: none; background: none; cursor: zoom-in; }
+  .poster { display: block; width: 100%; border-radius: 12px; user-select: none; box-shadow: 0 4px 16px rgba(0,0,0,0.45); }
   .head { grid-area: head; min-width: 0; }
   .rest { grid-area: rest; min-width: 0; }
 

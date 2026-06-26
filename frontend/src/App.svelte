@@ -17,7 +17,10 @@
   // Persist the user's place (profile + tab) across refreshes via localStorage, so
   // reloading on e.g. "second profile · Watched" stays there instead of resetting to
   // the first profile's Picks. Reads are guarded for non-browser/test contexts.
-  const LS = { profile: 'tastebuds:profileId', tab: 'tastebuds:tab', filter: 'tastebuds:mediaFilter' };
+  const LS = {
+    profile: 'tastebuds:profileId', tab: 'tastebuds:tab', filter: 'tastebuds:mediaFilter',
+    listFilter: 'tastebuds:listFilter', wlSort: 'tastebuds:wlSort', wdSort: 'tastebuds:wdSort',
+  };
   function lsGet(key: string): string | null {
     try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
   }
@@ -29,6 +32,14 @@
   const savedProfileId = (() => { const v = lsGet(LS.profile); return v != null ? Number(v) : null; })();
   const savedTab = lsGet(LS.tab);
   const savedFilter = lsGet(LS.filter);
+  const savedListFilter = lsGet(LS.listFilter);
+  const savedWlSort = lsGet(LS.wlSort);
+  const savedWdSort = lsGet(LS.wdSort);
+
+  type WatchlistSort = 'added_desc' | 'added_asc' | 'title' | 'year_desc';
+  type WatchedSort = 'watched_desc' | 'watched_asc' | 'rating_desc' | 'title' | 'year_desc';
+  const WL_SORTS: WatchlistSort[] = ['added_desc', 'added_asc', 'title', 'year_desc'];
+  const WD_SORTS: WatchedSort[] = ['watched_desc', 'watched_asc', 'rating_desc', 'title', 'year_desc'];
 
   let stats = $state<CatalogueStats | null>(null);
   let profiles = $state<Profile[]>([]);
@@ -46,6 +57,17 @@
   let mediaFilter = $state<MediaFilter>(
     savedFilter === 'movie' || savedFilter === 'tv' || savedFilter === 'all' ? savedFilter : 'all',
   );
+  // Watchlist/Watched tabs have their own media filter + sort (separate from the Picks
+  // filter, which also biases generation).
+  let listMediaFilter = $state<MediaFilter>(
+    savedListFilter === 'movie' || savedListFilter === 'tv' || savedListFilter === 'all' ? savedListFilter : 'all',
+  );
+  let watchlistSort = $state<WatchlistSort>(
+    WL_SORTS.includes(savedWlSort as WatchlistSort) ? (savedWlSort as WatchlistSort) : 'added_desc',
+  );
+  let watchedSort = $state<WatchedSort>(
+    WD_SORTS.includes(savedWdSort as WatchedSort) ? (savedWdSort as WatchedSort) : 'watched_desc',
+  );
 
   // Persist place whenever it changes. These effects only READ state + WRITE to
   // localStorage (never write component state), so they don't self-trigger. The
@@ -53,6 +75,9 @@
   $effect(() => { if (activeProfileId != null) lsSet(LS.profile, String(activeProfileId)); });
   $effect(() => { lsSet(LS.tab, tab); });
   $effect(() => { lsSet(LS.filter, mediaFilter); });
+  $effect(() => { lsSet(LS.listFilter, listMediaFilter); });
+  $effect(() => { lsSet(LS.wlSort, watchlistSort); });
+  $effect(() => { lsSet(LS.wdSort, watchedSort); });
   let loading = $state(false);
   let generating = $state(false);
   let error = $state('');
@@ -83,15 +108,41 @@
       : recommendations.filter(r => r.media_type === mediaFilter),
   );
 
+  // Watchlist / Watched: filter by media type then sort. New arrays (slice) so we never
+  // mutate the source lists in place.
+  function byMedia(items: WatchEvent[], f: MediaFilter): WatchEvent[] {
+    return f === 'all' ? items : items.filter(i => i.media_type === f);
+  }
+  const cmpStr = (a?: string | null, b?: string | null) => (a ?? '').localeCompare(b ?? '');
+  const visibleWatchlist = $derived.by(() => {
+    const list = byMedia(watchlist, listMediaFilter).slice();
+    switch (watchlistSort) {
+      case 'added_asc': return list.sort((a, b) => cmpStr(a.created_at, b.created_at));
+      case 'title': return list.sort((a, b) => cmpStr(a.title, b.title));
+      case 'year_desc': return list.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
+      default: return list.sort((a, b) => cmpStr(b.created_at, a.created_at)); // added_desc
+    }
+  });
+  const visibleWatched = $derived.by(() => {
+    const list = byMedia(watched, listMediaFilter).slice();
+    switch (watchedSort) {
+      case 'watched_asc': return list.sort((a, b) => cmpStr(a.watched_at, b.watched_at));
+      case 'rating_desc': return list.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1));
+      case 'title': return list.sort((a, b) => cmpStr(a.title, b.title));
+      case 'year_desc': return list.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
+      default: return list.sort((a, b) => cmpStr(b.watched_at, a.watched_at)); // watched_desc
+    }
+  });
+
   // Open the modal from a list, locating the clicked item by id.
   function openRec(rec: Recommendation) {
     openModal(visibleRecs, visibleRecs.findIndex(r => r.id === rec.id), 'recs');
   }
   function openWatchlistItem(item: WatchEvent) {
-    openModal(watchlist, watchlist.findIndex(w => w.id === item.id), 'watchlist');
+    openModal(visibleWatchlist, visibleWatchlist.findIndex(w => w.id === item.id), 'watchlist');
   }
   function openWatchedItem(item: WatchEvent) {
-    openModal(watched, watched.findIndex(w => w.id === item.id), 'history');
+    openModal(visibleWatched, visibleWatched.findIndex(w => w.id === item.id), 'history');
   }
 
   // Initial toggle state for the open item, by which tab it came from.
@@ -337,13 +388,40 @@
     {#if loading}
       <p class="loading">Loading…</p>
     {:else}
-      <WatchlistView items={watchlist} onOpen={openWatchlistItem} onMarkWatched={handleMarkWatched} />
+      <div class="list-controls">
+        <div class="filter-bar">
+          {#each filters as f}
+            <button class:active={listMediaFilter === f.value} onclick={() => listMediaFilter = f.value}>{f.label}</button>
+          {/each}
+        </div>
+        <select class="sort-select" bind:value={watchlistSort} aria-label="Sort watchlist">
+          <option value="added_desc">Recently added</option>
+          <option value="added_asc">Oldest added</option>
+          <option value="title">Title A–Z</option>
+          <option value="year_desc">Year (newest)</option>
+        </select>
+      </div>
+      <WatchlistView items={visibleWatchlist} onOpen={openWatchlistItem} onMarkWatched={handleMarkWatched} />
     {/if}
   {:else}
     {#if loading}
       <p class="loading">Loading…</p>
     {:else}
-      <WatchedHistory items={watched} onOpen={openWatchedItem} />
+      <div class="list-controls">
+        <div class="filter-bar">
+          {#each filters as f}
+            <button class:active={listMediaFilter === f.value} onclick={() => listMediaFilter = f.value}>{f.label}</button>
+          {/each}
+        </div>
+        <select class="sort-select" bind:value={watchedSort} aria-label="Sort watched history">
+          <option value="watched_desc">Recently watched</option>
+          <option value="watched_asc">Oldest watched</option>
+          <option value="rating_desc">Highest rated</option>
+          <option value="title">Title A–Z</option>
+          <option value="year_desc">Year (newest)</option>
+        </select>
+      </div>
+      <WatchedHistory items={visibleWatched} onOpen={openWatchedItem} />
     {/if}
   {/if}
 </div>
@@ -399,6 +477,10 @@
   .filter-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; overflow-x: auto; }
   .filter-bar button { padding: 0.35rem 0.75rem; border-radius: 20px; border: 1px solid #444; background: transparent; color: #ccc; cursor: pointer; font-size: 0.8rem; white-space: nowrap; transition: all 0.15s; }
   .filter-bar button.active { background: #e94560; border-color: #e94560; color: #fff; }
+  .list-controls { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem 0; flex-wrap: wrap; }
+  .list-controls .filter-bar { padding: 0; flex: 1; min-width: 0; }
+  .sort-select { padding: 0.35rem 0.6rem; border-radius: 20px; border: 1px solid #444; background: #16213e; color: #ccc; font-size: 0.8rem; cursor: pointer; }
+  .sort-select:focus { outline: none; border-color: #e94560; }
   .action-bar { display: flex; gap: 0.75rem; padding: 0 1rem 0.75rem; }
   .generate-btn { flex: 1; padding: 0.6rem; background: #e94560; border: none; border-radius: 8px; color: #fff; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
   .generate-btn:disabled { opacity: 0.6; cursor: default; }
