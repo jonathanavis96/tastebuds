@@ -14,6 +14,22 @@
     removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
   } from './lib/api.js';
 
+  // Persist the user's place (profile + tab) across refreshes via localStorage, so
+  // reloading on e.g. "second profile · Watched" stays there instead of resetting to
+  // the first profile's Picks. Reads are guarded for non-browser/test contexts.
+  const LS = { profile: 'tastebuds:profileId', tab: 'tastebuds:tab', filter: 'tastebuds:mediaFilter' };
+  function lsGet(key: string): string | null {
+    try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
+  }
+  function lsSet(key: string, value: string): void {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(key, value); } catch { /* ignore */ }
+  }
+  // Captured at script init, BEFORE the persist effect can run, so the saved profile
+  // isn't clobbered by the initial null while onMount fetches the profile list.
+  const savedProfileId = (() => { const v = lsGet(LS.profile); return v != null ? Number(v) : null; })();
+  const savedTab = lsGet(LS.tab);
+  const savedFilter = lsGet(LS.filter);
+
   let stats = $state<CatalogueStats | null>(null);
   let profiles = $state<Profile[]>([]);
   let activeProfileId = $state<number | null>(null);
@@ -24,8 +40,19 @@
   let dismissedRecIds = $state<number[]>([]);
   let watchlist = $state<WatchEvent[]>([]);
   let watched = $state<WatchEvent[]>([]);
-  let tab = $state<'recs' | 'watchlist' | 'history'>('recs');
-  let mediaFilter = $state<MediaFilter>('all');
+  let tab = $state<'recs' | 'watchlist' | 'history'>(
+    savedTab === 'watchlist' || savedTab === 'history' || savedTab === 'recs' ? savedTab : 'recs',
+  );
+  let mediaFilter = $state<MediaFilter>(
+    savedFilter === 'movie' || savedFilter === 'tv' || savedFilter === 'all' ? savedFilter : 'all',
+  );
+
+  // Persist place whenever it changes. These effects only READ state + WRITE to
+  // localStorage (never write component state), so they don't self-trigger. The
+  // profile guard (!= null) keeps the saved value intact until onMount restores it.
+  $effect(() => { if (activeProfileId != null) lsSet(LS.profile, String(activeProfileId)); });
+  $effect(() => { lsSet(LS.tab, tab); });
+  $effect(() => { lsSet(LS.filter, mediaFilter); });
   let loading = $state(false);
   let generating = $state(false);
   let error = $state('');
@@ -151,7 +178,8 @@
       getStats().then(s => stats = s).catch(() => {});
       profiles = await getProfiles();
       if (profiles.length > 0) {
-        activeProfileId = profiles[0].id;
+        // Restore the last-used profile if it still exists, else fall back to the first.
+        activeProfileId = profiles.some(p => p.id === savedProfileId) ? savedProfileId! : profiles[0].id;
         await loadRecs();
       }
     } catch (e) {
