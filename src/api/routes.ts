@@ -5,7 +5,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile } from '../db/repos/profiles.js';
-import { getRecommendations, updateRecommendationState } from '../db/repos/recommendations.js';
+import { getRecommendations, updateRecommendationState, getCalibration } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates } from '../retrieval/retrieve.js';
@@ -27,6 +27,13 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // Catalogue size readout for the header — total titles + movie/series split.
   api.get('/stats', (c) => {
     return c.json(countTitles(db));
+  });
+
+  // Prediction calibration for a profile (predicted vs actual ratings).
+  api.get('/calibration/:profileId', (c) => {
+    const profileId = Number(c.req.param('profileId'));
+    if (!Number.isFinite(profileId)) return c.json({ error: 'invalid profileId' }, 400);
+    return c.json(getCalibration(db, profileId));
   });
 
   // Local poster cache: serve the w342 poster for a title from disk, fetching it

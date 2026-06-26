@@ -16,6 +16,18 @@ export async function getStats(): Promise<CatalogueStats> {
   return res.json();
 }
 
+export interface Calibration {
+  count: number;
+  avgError: number | null;
+  withinOne: number | null;
+}
+
+export async function getCalibration(profileId: number): Promise<Calibration> {
+  const res = await fetch(`${BASE}/calibration/${profileId}`);
+  if (!res.ok) throw new Error(`getCalibration failed: ${res.status}`);
+  return res.json();
+}
+
 export async function getRecommendations(profileId: number): Promise<Recommendation[]> {
   const res = await fetch(`${BASE}/recommendations/${profileId}`);
   if (!res.ok) throw new Error(`getRecommendations failed: ${res.status}`);

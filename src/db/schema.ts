@@ -78,6 +78,7 @@ export const CREATE_RECOMMENDATIONS = `
     request_text TEXT,
     state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'shown', 'dismissed')),
     kind         TEXT NOT NULL DEFAULT 'core',
+    predicted_rating REAL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `;
@@ -85,6 +86,13 @@ export const CREATE_RECOMMENDATIONS = `
 export const MIGRATE_001_ADD_KIND = `
   ALTER TABLE recommendations ADD COLUMN kind TEXT NOT NULL DEFAULT 'core'
 `;
+
+// Migration 008: predicted_rating on recommendations — the star rating Sonnet
+// predicts for each pick at curation time, compared against the user's actual
+// rating to produce the calibration stat. Nullable (older recs have none).
+export const MIGRATE_008_ADD_PREDICTED_RATING = [
+  `ALTER TABLE recommendations ADD COLUMN predicted_rating REAL`,
+];
 
 // Migration 006: daily API usage budget tracking table.
 // Persists per-day counters for harvest and request-driven title ingestion so

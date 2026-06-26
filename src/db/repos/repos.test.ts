@@ -9,6 +9,7 @@ import {
   upsertRecommendation,
   getRecommendations,
   updateRecommendationState,
+  getCalibration,
 } from './recommendations.js';
 
 function createTestDb(): InstanceType<typeof Database> {
@@ -355,5 +356,48 @@ describe('recommendations repo', () => {
 
     const updated = getRecommendations(db, 1)[0];
     expect(updated.state).toBe('dismissed');
+  });
+});
+
+describe('getCalibration', () => {
+  function setup() {
+    const db = createTestDb();
+    upsertProfile(db, baseProfile);
+    for (const i of [1, 2, 3, 4]) {
+      upsertTitle(db, { ...baseTitle, tmdb_id: 1000 + i, title: `T${i}` });
+    }
+    return db;
+  }
+
+  it('returns zeroed calibration when nothing is both predicted and rated', () => {
+    const db = setup();
+    expect(getCalibration(db, 1)).toEqual({ count: 0, avgError: null, withinOne: null });
+  });
+
+  it('compares predicted vs actual over watched+rated titles only', () => {
+    const db = setup();
+    // title1: predicted 4, actual 5 → error 1 (within 1)
+    upsertRecommendation(db, { profile_id: 1, title_id: 1, category: 'c', score: 0.9, why_blurb: 'w', request_text: null, state: 'shown', predicted_rating: 4 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: 1, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+    // title2: predicted 2, actual 4 → error 2 (NOT within 1)
+    upsertRecommendation(db, { profile_id: 1, title_id: 2, category: 'c', score: 0.5, why_blurb: 'w', request_text: null, state: 'shown', predicted_rating: 2 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: 2, status: 'watched', rating: 4, watched_at: new Date().toISOString() });
+    // title3: predicted 5, actual 5 → error 0 (within 1)
+    upsertRecommendation(db, { profile_id: 1, title_id: 3, category: 'c', score: 0.9, why_blurb: 'w', request_text: null, state: 'shown', predicted_rating: 5 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: 3, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+    // title4: predicted but only watchlisted (no actual rating) → excluded
+    upsertRecommendation(db, { profile_id: 1, title_id: 4, category: 'c', score: 0.9, why_blurb: 'w', request_text: null, state: 'pending', predicted_rating: 3 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: 4, status: 'watchlist', rating: null, watched_at: null });
+
+    const cal = getCalibration(db, 1);
+    expect(cal.count).toBe(3);
+    expect(cal.avgError).toBeCloseTo((1 + 2 + 0) / 3);
+    expect(cal.withinOne).toBeCloseTo(2 / 3);
+  });
+
+  it('excludes watched titles that had no prediction', () => {
+    const db = setup();
+    upsertWatchEvent(db, { profile_id: 1, title_id: 1, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+    expect(getCalibration(db, 1).count).toBe(0);
   });
 });

@@ -122,9 +122,10 @@ Each item MUST have exactly these fields:
 - "why": string (≤120 chars, plain text — do NOT use double-quote (") characters inside it; use single quotes if needed)
 - "category": string (one of: "Top pick", "Hidden gem", "Comfort watch", "Surprise pick", "Based on your request")
 - "kind": string (one of: "core", "wildcard", "adversarial")
+- "predicted_rating": number — your honest prediction of the star rating (1–5, halves allowed e.g. 4.5) ${profile.name} will give this title after watching. Core picks should generally be high (4–5), the adversarial pick low (1–2.5). Be calibrated, not optimistic — this is checked against their real ratings.
 
 Example output:
-[{"tmdb_id":12345,"why":"Matches your love of slow-burn mystery.","category":"Top pick","kind":"core"},{"tmdb_id":67890,"why":"Off-profile sci-fi you might enjoy.","category":"Surprise pick","kind":"wildcard"},{"tmdb_id":11111,"why":"Predicted dislike — heavy gore contradicts hated themes; recalibrate if rated 3+.","category":"Surprise pick","kind":"adversarial"}]`;
+[{"tmdb_id":12345,"why":"Matches your love of slow-burn mystery.","category":"Top pick","kind":"core","predicted_rating":4.5},{"tmdb_id":67890,"why":"Off-profile sci-fi you might enjoy.","category":"Surprise pick","kind":"wildcard","predicted_rating":3.5},{"tmdb_id":11111,"why":"Predicted dislike — heavy gore contradicts hated themes; recalibrate if rated 3+.","category":"Surprise pick","kind":"adversarial","predicted_rating":2}]`;
   }
 
   // ── flat array (legacy) overload ───────────────────────────────────────────

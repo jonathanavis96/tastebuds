@@ -12,6 +12,7 @@
     getProfiles, getRecommendations, generateRecommendations,
     rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation,
     removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
+    getCalibration, type Calibration,
   } from './lib/api.js';
 
   // Persist the user's place (profile + tab) across refreshes via localStorage, so
@@ -51,6 +52,7 @@
   let dismissedRecIds = $state<number[]>([]);
   let watchlist = $state<WatchEvent[]>([]);
   let watched = $state<WatchEvent[]>([]);
+  let calibration = $state<Calibration | null>(null);
   let tab = $state<'recs' | 'watchlist' | 'history'>(
     savedTab === 'watchlist' || savedTab === 'history' || savedTab === 'recs' ? savedTab : 'recs',
   );
@@ -243,10 +245,11 @@
     if (!activeProfileId) return;
     if (!silent) loading = true;
     try {
-      [recommendations, watchlist, watched] = await Promise.all([
+      [recommendations, watchlist, watched, calibration] = await Promise.all([
         getRecommendations(activeProfileId),
         getWatchlist(activeProfileId),
         getWatched(activeProfileId),
+        getCalibration(activeProfileId),
       ]);
     } catch (e) {
       error = String(e);
@@ -263,6 +266,7 @@
     dismissedRecIds = [];
     watchlist = [];
     watched = [];
+    calibration = null;
     await loadRecs();
   }
 
@@ -407,6 +411,15 @@
     {#if loading}
       <p class="loading">Loading…</p>
     {:else}
+      {#if calibration && calibration.count > 0 && calibration.avgError != null && calibration.withinOne != null}
+        <div class="calibration" title="How close Sonnet's predicted ratings were to your actual ratings, over {calibration.count} rated pick{calibration.count === 1 ? '' : 's'}">
+          <span class="cal-label">Pick accuracy</span>
+          <span class="cal-stat">avg off by <strong>{calibration.avgError.toFixed(1)}★</strong></span>
+          <span class="cal-dot">·</span>
+          <span class="cal-stat"><strong>{Math.round(calibration.withinOne * 100)}%</strong> within 1★</span>
+          <span class="cal-n">({calibration.count})</span>
+        </div>
+      {/if}
       <div class="list-controls">
         <div class="filter-bar">
           {#each filters as f}
@@ -477,6 +490,11 @@
   .filter-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; overflow-x: auto; }
   .filter-bar button { padding: 0.35rem 0.75rem; border-radius: 20px; border: 1px solid #444; background: transparent; color: #ccc; cursor: pointer; font-size: 0.8rem; white-space: nowrap; transition: all 0.15s; }
   .filter-bar button.active { background: #e94560; border-color: #e94560; color: #fff; }
+  .calibration { display: flex; align-items: center; gap: 0.4rem; margin: 0.75rem 1rem 0; padding: 0.5rem 0.75rem; background: #14142b; border: 1px solid #2a2a4a; border-radius: 10px; font-size: 0.76rem; color: #9a9ab8; flex-wrap: wrap; cursor: default; }
+  .calibration .cal-label { font-weight: 700; color: #cdd; }
+  .calibration strong { color: #fff; font-weight: 800; }
+  .calibration .cal-dot { color: #44445f; }
+  .calibration .cal-n { margin-left: auto; color: #6b6b8a; }
   .list-controls { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem 0; flex-wrap: wrap; }
   .list-controls .filter-bar { padding: 0; flex: 1; min-width: 0; }
   .sort-select { padding: 0.35rem 0.6rem; border-radius: 20px; border: 1px solid #444; background: #16213e; color: #ccc; font-size: 0.8rem; cursor: pointer; }

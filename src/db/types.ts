@@ -53,5 +53,6 @@ export interface RecommendationRow {
   request_text: string | null;
   state: 'pending' | 'shown' | 'dismissed';
   kind: 'core' | 'wildcard' | 'adversarial'; // defaults to 'core' via DB column default
+  predicted_rating: number | null; // Sonnet's predicted star rating (1–5) for this pick
   created_at: string;
 }

@@ -12,6 +12,16 @@ export interface CurationResult {
   why: string;
   category: string;
   kind: 'core' | 'wildcard' | 'adversarial';
+  /** Sonnet's predicted star rating (1–5) for this pick; null if it omitted one. */
+  predictedRating: number | null;
+}
+
+/** Coerce a model-supplied predicted rating to a half-star value in [1,5], or null. */
+function normalizePredictedRating(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const snapped = Math.round(n * 2) / 2; // nearest half-star
+  return Math.min(5, Math.max(1, snapped));
 }
 
 export type SpawnFn = typeof nodeSpawn;
@@ -90,6 +100,7 @@ export async function curateCandidates(
             why: string;
             category: string;
             kind?: string;
+            predicted_rating?: number;
           }>;
           if (!Array.isArray(parsed)) throw new Error('Expected JSON array from claude');
           const capped = parsed.slice(0, surprise ? 5 : 10);
@@ -98,6 +109,7 @@ export async function curateCandidates(
             why: item.why,
             category: item.category,
             kind: (item.kind === 'wildcard' || item.kind === 'adversarial') ? item.kind : 'core',
+            predictedRating: normalizePredictedRating(item.predicted_rating),
           })));
         } catch (err) {
           reject(new Error(`Failed to parse claude -p output: ${(err as Error).message}\nOutput: ${stdout.slice(0, 200)}`));
@@ -135,6 +147,7 @@ export async function curateCandidates(
       request_text: request,
       state: 'pending',
       kind: result.kind,
+      predicted_rating: result.predictedRating,
     });
   }
 

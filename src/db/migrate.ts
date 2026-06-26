@@ -12,6 +12,7 @@ import {
   MIGRATE_005_DEDUP_PENDING,
   MIGRATE_006_API_USAGE,
   MIGRATE_007_HARVEST_CURSOR,
+  MIGRATE_008_ADD_PREDICTED_RATING,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -75,5 +76,15 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
 
     // Migration 007: create harvest_cursor table for per-bucket page sweeping (idempotent via IF NOT EXISTS)
     db.exec(MIGRATE_007_HARVEST_CURSOR);
+
+    // Migration 008: add predicted_rating to recommendations (idempotent)
+    const recCols2 = db.prepare("PRAGMA table_info('recommendations')").all() as Array<{ name: string }>;
+    const recColNames2 = recCols2.map(c => c.name);
+    for (const sql of MIGRATE_008_ADD_PREDICTED_RATING) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!recColNames2.includes(colName)) {
+        db.exec(sql);
+      }
+    }
   })();
 }
