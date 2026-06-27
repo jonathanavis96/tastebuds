@@ -13,6 +13,7 @@ import {
   MIGRATE_006_API_USAGE,
   MIGRATE_007_HARVEST_CURSOR,
   MIGRATE_008_ADD_PREDICTED_RATING,
+  MIGRATE_009_EMBEDDING_CACHE,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -86,5 +87,8 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
         db.exec(sql);
       }
     }
+
+    // Migration 009: content-addressed embedding cache (idempotent via IF NOT EXISTS)
+    db.exec(MIGRATE_009_EMBEDDING_CACHE);
   })();
 }

@@ -187,6 +187,38 @@ describe('refreshTasteVector', () => {
     const result = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
     expect(result[0]).toBeCloseTo(0.3); // taste vector came from the fresh embed
   });
+
+  it('caches a noted title embedding so a later refresh makes zero Ollama calls', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare('SELECT id FROM profiles WHERE name = ?').get('Alex') as any).id;
+
+    upsertTitle(db, {
+      tmdb_id: 403, media_type: 'movie', title: 'Cached', year: 2020,
+      genres: '[]', keywords: '[]', cast: '[]', synopsis: 'syn', poster_path: null,
+      embedding: Buffer.from(new Float32Array([0.7, 0.1, 0.2]).buffer), updated_at: new Date().toISOString(),
+    });
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = 403').get() as any).id;
+    upsertWatchEvent(db, { profile_id: profileId, title_id: titleId, status: 'watched', rating: 5, watched_at: new Date().toISOString(), note: 'rewatchable' });
+
+    let calls = 0;
+    const spy = async (_t: string, _c: Pick<Config, 'ollamaUrl'>) => { calls++; return [0.5, 0.5, 0.5]; };
+
+    // First refresh: cold cache → one embed; the vector is now persisted in embedding_cache.
+    await refreshTasteVector(db, profileId, mockConfig, spy);
+    expect(calls).toBe(1);
+
+    // A subsequent refresh (e.g. a "Not interested" click that recomputes the taste vector)
+    // must NOT re-embed the unchanged noted title — it reads the cached vector.
+    await refreshTasteVector(db, profileId, mockConfig, spy);
+    expect(calls).toBe(1); // still 1 — cache hit, no second Ollama call
+
+    const result = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
+    expect(result[0]).toBeCloseTo(0.5);
+  });
 });
 
 describe('retrieveJointCandidates mutual veto', () => {

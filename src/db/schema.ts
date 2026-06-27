@@ -118,6 +118,19 @@ export const MIGRATE_007_HARVEST_CURSOR = `
   )
 `;
 
+// Migration 009: content-addressed embedding cache. Keyed by a sha256 of the EXACT
+// text that was embedded, so a note-augmented title embedding ("title — synopsis — note")
+// is computed once and reused on every later taste-vector refresh — only a CHANGED note
+// (new text → new hash) triggers a fresh Ollama call. Stops a single "Not interested"
+// click from re-embedding the whole rated history (notes cover ~half the ratings).
+export const MIGRATE_009_EMBEDDING_CACHE = `
+  CREATE TABLE IF NOT EXISTS embedding_cache (
+    text_hash   TEXT PRIMARY KEY,
+    vec         BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+  )
+`;
+
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before
 // either inserted, so the read-time excludeTitleIds missed the other's picks and

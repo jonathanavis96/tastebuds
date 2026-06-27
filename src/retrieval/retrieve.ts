@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import type { TitleRow } from '../db/types.js';
 import type { Config } from '../config.js';
 import { embedText } from '../ollama/embed.js';
@@ -6,7 +7,13 @@ import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignat
 import { getRatedTitles, getDislikedTitles } from '../db/repos/watchEvents.js';
 import { getTitleById } from '../db/repos/titles.js';
 import { getRecommendations } from '../db/repos/recommendations.js';
+import { getCachedEmbedding, putCachedEmbedding } from '../db/repos/embeddingCache.js';
 import { blendVectors } from './blend.js';
+
+/** Deserialise a little-endian Float32 embedding Buffer to a number[]. */
+function bufferToVec(buf: Buffer): number[] {
+  return Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4));
+}
 
 export interface RetrieveOpts {
   mediaType?: 'movie' | 'tv';
@@ -108,18 +115,20 @@ export async function refreshTasteVector(
     note: string | null | undefined,
   ): Promise<number[]> => {
     if (!note && title.embedding) {
-      return Array.from(
-        new Float32Array(
-          title.embedding.buffer,
-          title.embedding.byteOffset,
-          title.embedding.length / 4,
-        ),
-      );
+      return bufferToVec(title.embedding);
     }
     // Fold the user's free-text note into the embedded text so the taste vector captures
     // the specifics they called out (pacing, mood, a performance…), not just the synopsis.
+    // The note-augmented text is content-addressed in embedding_cache: it's embedded once
+    // and reused on every later refresh, so a "Not interested" click no longer re-embeds
+    // the ~half of rated titles that carry notes. Only an EDITED note (new text) re-embeds.
     const text = [title.title, title.synopsis, note].filter(Boolean).join(' — ');
-    return embedFn(text, config);
+    const hash = createHash('sha256').update(text).digest('hex');
+    const cached = getCachedEmbedding(db, hash);
+    if (cached) return bufferToVec(cached);
+    const vec = await embedFn(text, config);
+    putCachedEmbedding(db, hash, Buffer.from(new Float32Array(vec).buffer));
+    return vec;
   };
 
   const embedEvents = async (events: ReturnType<typeof getRatedTitles>): Promise<number[][]> => {
