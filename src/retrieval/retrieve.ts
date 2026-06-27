@@ -97,15 +97,37 @@ export async function refreshTasteVector(
   config: Pick<Config, 'ollamaUrl'>,
   embedFn: (text: string, config: Pick<Config, 'ollamaUrl'>) => Promise<number[]> = embedText,
 ): Promise<void> {
-  // Fold the user's free-text note into the embedded text so the taste vector captures
-  // the specifics they called out (pacing, mood, a performance…), not just the synopsis.
+  // Resolve a title's taste vector. The common case — a rating with NO free-text note —
+  // reuses the title's stored embedding (computed once at harvest from "title synopsis"),
+  // so a rating spree no longer re-embeds the whole history through Ollama on every click
+  // (that was pegging the local nomic-embed-text model). Only when the user added a note
+  // — which changes the embedded text — do we round-trip to the embedder. Titles missing a
+  // stored embedding (harvest embed failed) also fall back to a fresh embed.
+  const vectorForTitle = async (
+    title: TitleRow,
+    note: string | null | undefined,
+  ): Promise<number[]> => {
+    if (!note && title.embedding) {
+      return Array.from(
+        new Float32Array(
+          title.embedding.buffer,
+          title.embedding.byteOffset,
+          title.embedding.length / 4,
+        ),
+      );
+    }
+    // Fold the user's free-text note into the embedded text so the taste vector captures
+    // the specifics they called out (pacing, mood, a performance…), not just the synopsis.
+    const text = [title.title, title.synopsis, note].filter(Boolean).join(' — ');
+    return embedFn(text, config);
+  };
+
   const embedEvents = async (events: ReturnType<typeof getRatedTitles>): Promise<number[][]> => {
     const vectors: number[][] = [];
     for (const event of events) {
       const title = getTitleById(db, event.title_id);
       if (!title) continue;
-      const text = [title.title, title.synopsis, event.note].filter(Boolean).join(' — ');
-      vectors.push(await embedFn(text, config));
+      vectors.push(await vectorForTitle(title, event.note));
     }
     return vectors;
   };
@@ -124,18 +146,17 @@ export async function refreshTasteVector(
     const title = getTitleById(db, ev.title_id);
     if (!title) continue;
     seenNeg.add(ev.title_id);
-    const text = [title.title, title.synopsis, ev.note].filter(Boolean).join(' — ');
     // ≤1★ (incl. half-stars: 0.5/1) is a stronger negative than 1.5–2★.
     const weight = (ev.rating ?? 0) <= 1.5 ? DISLIKE_1STAR_WEIGHT : DISLIKE_2STAR_WEIGHT;
-    negatives.push({ weight, vec: await embedFn(text, config) });
+    negatives.push({ weight, vec: await vectorForTitle(title, ev.note) });
   }
   for (const rec of getRecommendations(db, profileId, 'dismissed')) {
     if (seenNeg.has(rec.title_id)) continue;
     const title = getTitleById(db, rec.title_id);
     if (!title) continue;
     seenNeg.add(rec.title_id);
-    const text = [title.title, title.synopsis].filter(Boolean).join(' — ');
-    negatives.push({ weight: DISMISS_WEIGHT, vec: await embedFn(text, config) });
+    // A dismissed rec carries no note, so its stored embedding is reused (no Ollama call).
+    negatives.push({ weight: DISMISS_WEIGHT, vec: await vectorForTitle(title, null) });
   }
 
   const likedMean = meanVector(likedVecs);

@@ -71,8 +71,11 @@ describe('refreshTasteVector', () => {
     const likedId = mkTitle(201, 'Loved');
     const dislikedId = mkTitle(202, 'Hated');
 
-    upsertWatchEvent(db, { profile_id: profileId, title_id: likedId, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
-    upsertWatchEvent(db, { profile_id: profileId, title_id: dislikedId, status: 'watched', rating: 1, watched_at: new Date().toISOString() });
+    // Both carry a note so they take the FRESH-embed path (notes change the embedded
+    // text), letting the injected mock drive the vectors — exercising the Rocchio math
+    // directly rather than the stored-embedding reuse shortcut.
+    upsertWatchEvent(db, { profile_id: profileId, title_id: likedId, status: 'watched', rating: 5, watched_at: new Date().toISOString(), note: 'great' });
+    upsertWatchEvent(db, { profile_id: profileId, title_id: dislikedId, status: 'watched', rating: 1, watched_at: new Date().toISOString(), note: 'bad' });
 
     // liked → [1,0,0]; disliked → [0,1,0]. Expected: [1,0,0] − 0.6·[0,1,0] = [1,-0.6,0].
     const embedMock = async (text: string) => (text.startsWith('Loved') ? [1, 0, 0] : [0, 1, 0]);
@@ -92,23 +95,26 @@ describe('refreshTasteVector', () => {
     upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
     const profileId = (db.prepare('SELECT id FROM profiles WHERE name = ?').get('Alex') as any).id;
 
-    const mkTitle = (tmdb: number, title: string) => {
+    const mkTitle = (tmdb: number, title: string, embedding: number[] = [0, 0, 0]) => {
       upsertTitle(db, {
         tmdb_id: tmdb, media_type: 'movie', title, year: 2020,
         genres: '[]', keywords: '[]', cast: '[]', synopsis: title, poster_path: null,
-        embedding: Buffer.from(new Float32Array([0, 0, 0]).buffer), updated_at: new Date().toISOString(),
+        embedding: Buffer.from(new Float32Array(embedding).buffer), updated_at: new Date().toISOString(),
       });
       return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdb) as any).id;
     };
     const likedId = mkTitle(301, 'Loved');
-    const dismissedId = mkTitle(302, 'Meh');
+    // A dismissed rec carries no note, so refreshTasteVector reuses its STORED embedding —
+    // seed it as the negative direction [0,1,0].
+    const dismissedId = mkTitle(302, 'Meh', [0, 1, 0]);
 
-    upsertWatchEvent(db, { profile_id: profileId, title_id: likedId, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+    // Liked carries a note → fresh-embed path, so the mock controls its vector.
+    upsertWatchEvent(db, { profile_id: profileId, title_id: likedId, status: 'watched', rating: 5, watched_at: new Date().toISOString(), note: 'loved it' });
     // A dismissed recommendation (no watch_event, no rating).
     db.prepare("INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, state) VALUES (?, ?, 'core', 0, '', 'dismissed')")
       .run(profileId, dismissedId);
 
-    // liked → [1,0,0]; dismissed → [0,1,0]. Expected: [1,0,0] − 0.6·(0.3·[0,1,0])/0.3 = [1,-0.6,0]
+    // liked → [1,0,0]; dismissed (stored) → [0,1,0]. Expected: [1,0,0] − 0.6·[0,1,0] = [1,-0.6,0]
     // BUT the weight only matters relative to other negatives; with a single negative the
     // weighted mean is just its own vector, so the dismiss pushes the full NEGATIVE_WEIGHT.
     const embedMock = async (text: string) => (text.startsWith('Loved') ? [1, 0, 0] : [0, 1, 0]);
@@ -119,14 +125,67 @@ describe('refreshTasteVector', () => {
 
     // Now add a 1★ rating on a THIRD title in the same direction as the dismiss: the 1★
     // (weight 1.0) should dominate the dismiss (weight 0.3) in the blended negative.
+    // Re-seed the dismiss onto the z-axis so the 1★ (y-axis) and dismiss (z-axis) are distinct.
+    mkTitle(302, 'Meh', [0, 0, 1]);
     const oneStarId = mkTitle(303, 'Hated');
-    upsertWatchEvent(db, { profile_id: profileId, title_id: oneStarId, status: 'watched', rating: 1, watched_at: new Date().toISOString() });
+    upsertWatchEvent(db, { profile_id: profileId, title_id: oneStarId, status: 'watched', rating: 1, watched_at: new Date().toISOString(), note: 'hated it' });
     const embedMock2 = async (text: string) =>
       text.startsWith('Loved') ? [1, 0, 0] : text.startsWith('Hated') ? [0, 1, 0] : [0, 0, 1];
     await refreshTasteVector(db, profileId, mockConfig, embedMock2);
     const blended = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
     // 1★ axis (y, w=1.0) pushed harder than dismiss axis (z, w=0.3).
     expect(Math.abs(blended[1])).toBeGreaterThan(Math.abs(blended[2]));
+  });
+
+  it('reuses the stored title embedding and skips Ollama when a rating has no note', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare('SELECT id FROM profiles WHERE name = ?').get('Alex') as any).id;
+
+    // Stored embedding is the source of truth for a note-less rating.
+    upsertTitle(db, {
+      tmdb_id: 401, media_type: 'movie', title: 'Stored', year: 2020,
+      genres: '[]', keywords: '[]', cast: '[]', synopsis: 'from harvest', poster_path: null,
+      embedding: Buffer.from(new Float32Array([0.7, 0.1, 0.2]).buffer), updated_at: new Date().toISOString(),
+    });
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = 401').get() as any).id;
+    upsertWatchEvent(db, { profile_id: profileId, title_id: titleId, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+
+    let calls = 0;
+    const spy = async (_t: string, _c: Pick<Config, 'ollamaUrl'>) => { calls++; return [9, 9, 9]; };
+    await refreshTasteVector(db, profileId, mockConfig, spy);
+
+    expect(calls).toBe(0); // no Ollama round-trip for a note-less rating
+    const result = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
+    expect(result[0]).toBeCloseTo(0.7); // taste vector came from the stored embedding
+  });
+
+  it('embeds fresh (one Ollama call) when a rating carries a note', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare('SELECT id FROM profiles WHERE name = ?').get('Alex') as any).id;
+
+    upsertTitle(db, {
+      tmdb_id: 402, media_type: 'movie', title: 'Noted', year: 2020,
+      genres: '[]', keywords: '[]', cast: '[]', synopsis: 'syn', poster_path: null,
+      embedding: Buffer.from(new Float32Array([0.7, 0.1, 0.2]).buffer), updated_at: new Date().toISOString(),
+    });
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = 402').get() as any).id;
+    upsertWatchEvent(db, { profile_id: profileId, title_id: titleId, status: 'watched', rating: 5, watched_at: new Date().toISOString(), note: 'the third act lands' });
+
+    let calls = 0;
+    const spy = async (_t: string, _c: Pick<Config, 'ollamaUrl'>) => { calls++; return [0.3, 0.3, 0.3]; };
+    await refreshTasteVector(db, profileId, mockConfig, spy);
+
+    expect(calls).toBe(1); // the note changes the text, so a fresh embed is required
+    const result = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
+    expect(result[0]).toBeCloseTo(0.3); // taste vector came from the fresh embed
   });
 });
 
