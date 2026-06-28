@@ -37,6 +37,10 @@ const mockConfig: Config = {
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 500,
   harvestMaxPage: 30,
+  // Pin fan-out so the cursor-advance test is deterministic: 2 consecutive broad
+  // pages/run (asserts pages 1,2 then 3,4) and a single genre slice/run.
+  harvestPagesPerBucket: 2,
+  harvestGenresPerRun: 1,
 };
 
 const mockTmdbTitle = {

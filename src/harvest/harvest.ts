@@ -1,5 +1,10 @@
 import type Database from 'better-sqlite3';
-import { loadConfig, type Config } from '../config.js';
+import {
+  loadConfig,
+  type Config,
+  HARVEST_PAGES_PER_BUCKET_DEFAULT,
+  HARVEST_GENRES_PER_RUN_DEFAULT,
+} from '../config.js';
 import { openDb } from '../db/open.js';
 import { config as dotenvConfig } from 'dotenv';
 import { getAllProfiles } from '../db/repos/profiles.js';
@@ -48,6 +53,21 @@ function dayOfYear(): number {
   return Math.floor(diff / (1000 * 60 * 60 * 24));
 }
 
+/**
+ * Pick a window of `count` items from `arr` starting at `offset`, wrapping
+ * around the end. Used to rotate a daily slice of genre ids so every genre is
+ * swept over a full day-of-year cycle instead of only one per night.
+ */
+function rotatingWindow<T>(arr: T[], offset: number, count: number): T[] {
+  if (arr.length === 0) return [];
+  const n = Math.min(count, arr.length);
+  const out: T[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push(arr[(offset + i) % arr.length]);
+  }
+  return out;
+}
+
 export async function runHarvest(
   db: InstanceType<typeof Database>,
   config: Config,
@@ -60,6 +80,13 @@ export async function runHarvest(
   const runDay = today();
   const usageAtStart = getUsage(db, runDay);
   let remaining = Math.max(0, config.harvestDailyTarget - usageAtStart.harvest_added);
+
+  // Fan-out knobs: how wide each run casts for candidates. The nightly add ceiling
+  // is candidate fan-out (distinct not-yet-stored titles), not the budget cap, so
+  // these are the real levers on titles-added/night. loadConfig always sets them;
+  // the `??` fallbacks keep hand-built Config literals (tests) working.
+  const pagesPerBucket = Math.max(1, config.harvestPagesPerBucket ?? HARVEST_PAGES_PER_BUCKET_DEFAULT);
+  const genresPerRun = Math.max(1, config.harvestGenresPerRun ?? HARVEST_GENRES_PER_RUN_DEFAULT);
 
   if (remaining === 0) {
     return result; // already hit today's budget
@@ -180,63 +207,67 @@ export async function runHarvest(
 
   // ── Broad discovery slice (independent of loved_genres) ──────────────────
   // Ensures the DB grows across all genres every day, not just what the profiles
-  // love. Rotates by day-of-year so each daily run fetches a different page of
-  // the most-voted titles — capped to TMDB's page range 1..500.
-  // All movie genres + all TV genres for round-robin broad coverage
+  // love. The nightly add ceiling is candidate FAN-OUT (distinct not-yet-stored
+  // titles these discover pages surface), not the budget cap — so each run sweeps
+  // `pagesPerBucket` consecutive cursor pages of each global bucket PLUS a rotating
+  // window of `genresPerRun` genre slices per media type, all paged from their own
+  // cursors (capped to TMDB's 1..500 page range via harvestMaxPage).
   const allMovieGenreIds = Object.values(MOVIE_GENRE_MAP);
   const allTvGenreIds = [...new Set(Object.values(TV_GENRE_MAP))];
 
-  // dayOfYear still selects WHICH genre gets a dedicated slice today; the PAGE
-  // for every broad query now comes from that bucket's own cursor, so each
-  // recurring slice sweeps deeper instead of re-listing page 1.
-  const rrMovieGenre = allMovieGenreIds[dayOfYear() % allMovieGenreIds.length];
-  const rrTvGenre = allTvGenreIds[dayOfYear() % allTvGenreIds.length];
+  // Each fetch carries its media type so the dedup consumer never has to infer it
+  // from array position (the old i%2 parity broke as soon as counts varied).
+  const broadFetches: Array<{ mediaType: 'movie' | 'tv'; fetch: Promise<TmdbTitle[]> }> = [];
 
-  const broadFetches: Array<Promise<TmdbTitle[]>> = [
-    // Global most-voted movies (no genre filter) — two consecutive cursor pages
-    discoverTitles(
-      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: claimPage(db, 'movie:broad', config.harvestMaxPage) },
-      config,
-    ).catch(() => []),
-    // Global most-voted TV series
-    discoverTitles(
-      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: claimPage(db, 'tv:broad', config.harvestMaxPage) },
-      config,
-    ).catch(() => []),
-    // Second consecutive page of each broad bucket for variety
-    discoverTitles(
-      { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: claimPage(db, 'movie:broad', config.harvestMaxPage) },
-      config,
-    ).catch(() => []),
-    discoverTitles(
-      { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: claimPage(db, 'tv:broad', config.harvestMaxPage) },
-      config,
-    ).catch(() => []),
-    // Round-robin one movie genre for genre diversity (page from its own cursor)
-    discoverTitles(
-      {
-        mediaType: 'movie',
-        genreIds: [rrMovieGenre],
-        sortBy: 'popularity.desc',
-        page: claimPage(db, `movie:genre:${rrMovieGenre}`, config.harvestMaxPage),
-      },
-      config,
-    ).catch(() => []),
-    // Round-robin one TV genre for genre diversity (page from its own cursor)
-    discoverTitles(
-      {
-        mediaType: 'tv',
-        genreIds: [rrTvGenre],
-        sortBy: 'popularity.desc',
-        page: claimPage(db, `tv:genre:${rrTvGenre}`, config.harvestMaxPage),
-      },
-      config,
-    ).catch(() => []),
-  ];
+  // Global most-voted movies (no genre filter) — N consecutive cursor pages so
+  // each run sweeps DEEPER through the vote-ranked catalogue instead of re-listing
+  // the same top pages.
+  for (let i = 0; i < pagesPerBucket; i++) {
+    broadFetches.push({
+      mediaType: 'movie',
+      fetch: discoverTitles(
+        { mediaType: 'movie', sortBy: 'vote_count.desc', voteCountGte: 300, page: claimPage(db, 'movie:broad', config.harvestMaxPage) },
+        config,
+      ).catch(() => []),
+    });
+  }
+  // Global most-voted TV series — N consecutive cursor pages.
+  for (let i = 0; i < pagesPerBucket; i++) {
+    broadFetches.push({
+      mediaType: 'tv',
+      fetch: discoverTitles(
+        { mediaType: 'tv', sortBy: 'vote_count.desc', voteCountGte: 100, page: claimPage(db, 'tv:broad', config.harvestMaxPage) },
+        config,
+      ).catch(() => []),
+    });
+  }
 
-  const broadResults = await Promise.all(broadFetches);
+  // Round-robin a WINDOW of genres per media type (rotated by day-of-year so every
+  // genre is swept over a full cycle), each paged from its own cursor.
+  const rrMovieGenres = rotatingWindow(allMovieGenreIds, dayOfYear(), genresPerRun);
+  const rrTvGenres = rotatingWindow(allTvGenreIds, dayOfYear(), genresPerRun);
+  for (const g of rrMovieGenres) {
+    broadFetches.push({
+      mediaType: 'movie',
+      fetch: discoverTitles(
+        { mediaType: 'movie', genreIds: [g], sortBy: 'popularity.desc', page: claimPage(db, `movie:genre:${g}`, config.harvestMaxPage) },
+        config,
+      ).catch(() => []),
+    });
+  }
+  for (const g of rrTvGenres) {
+    broadFetches.push({
+      mediaType: 'tv',
+      fetch: discoverTitles(
+        { mediaType: 'tv', genreIds: [g], sortBy: 'popularity.desc', page: claimPage(db, `tv:genre:${g}`, config.harvestMaxPage) },
+        config,
+      ).catch(() => []),
+    });
+  }
+
+  const broadResults = await Promise.all(broadFetches.map((b) => b.fetch));
   for (let i = 0; i < broadResults.length; i++) {
-    const mediaType: 'movie' | 'tv' = i % 2 === 0 ? 'movie' : 'tv';
+    const mediaType = broadFetches[i].mediaType;
     for (const t of broadResults[i]) {
       const key = `${t.id}:${mediaType}`;
       if (!toHarvest.has(key)) toHarvest.set(key, { tmdbId: t.id, mediaType });
