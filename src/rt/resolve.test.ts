@@ -224,6 +224,13 @@ describe('parsePageIdentity', () => {
     expect(result.title).toBe('Heat');
     expect(result.year).toBe(1995);
   });
+
+  it('extracts title and year when extra attributes appear between property and content', () => {
+    const body = '<meta property="og:title" data-x="y" content="Heat (1995) - Rotten Tomatoes" />';
+    const result = parsePageIdentity(body);
+    expect(result.title).toBe('Heat');
+    expect(result.year).toBe(1995);
+  });
 });
 
 // ─── resolveRtUrl identity verification ──────────────────────────────────────
@@ -292,5 +299,36 @@ describe('resolveRtUrl identity verification', () => {
       score: '90%',
       verified: true,
     });
+  });
+
+  it('tries year-suffixed url2 when url1 returns 200 but identity mismatches', async () => {
+    const url1Body = '<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />';
+    const url2Body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const fetchMock = makeFetch([
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat', body: url1Body },
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: url2Body },
+    ]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/m/heat_1995',
+      score: '98%',
+      verified: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns search-URL shape when url1 is 200+mismatch and url2 is also unverified', async () => {
+    const mismatchBody = '<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />';
+    const fetchMock = makeFetch([
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat', body: mismatchBody },
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: mismatchBody },
+    ]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/search?search=Heat',
+      score: null,
+      verified: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

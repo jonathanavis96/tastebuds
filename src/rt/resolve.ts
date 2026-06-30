@@ -21,10 +21,11 @@ export function normaliseTitle(s: string): string {
  * parenthesized year if present. Falls back to JSON year patterns in the body.
  */
 export function parsePageIdentity(body: string): { title: string | null; year: number | null } {
-  // Support both attribute orderings for the og:title meta tag
+  // Support both attribute orderings for the og:title meta tag, and allow
+  // arbitrary extra attributes between property and content (e.g. data-x="y").
   const ogTitleMatch =
-    body.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i) ??
-    body.match(/<meta\s+content="([^"]+)"\s+property="og:title"/i);
+    body.match(/<meta\b[^>]*\bproperty=["']og:title["'][^>]*\bcontent=["']([^"']+)["']/i) ??
+    body.match(/<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bproperty=["']og:title["']/i);
 
   if (!ogTitleMatch) return { title: null, year: null };
 
@@ -140,14 +141,28 @@ export async function resolveRtUrl(
   // Attempt 1: bare slug
   const url1 = `https://www.rottentomatoes.com/${path}/${slug}`;
   const page1 = await tryPage(url1);
-  if (page1 !== null) return verifyPage(page1);
+  let gotAnyPage = false;
+  if (page1 !== null) {
+    gotAnyPage = true;
+    const result1 = verifyPage(page1);
+    if (result1.verified) return result1;
+    // 200 but wrong identity — fall through and try the year-suffixed URL before giving up
+  }
 
-  // Attempt 2: slug with year suffix
+  // Attempt 2: slug with year suffix.
+  // Tried whenever url1 was a 404 OR returned a 200 with a mismatched identity.
   if (year != null) {
     const url2 = `https://www.rottentomatoes.com/${path}/${slug}_${year}`;
     const page2 = await tryPage(url2);
-    if (page2 !== null) return verifyPage(page2);
+    if (page2 !== null) {
+      gotAnyPage = true;
+      const result2 = verifyPage(page2);
+      if (result2.verified) return result2;
+    }
   }
 
-  return null;
+  // Neither attempt produced a verified match.
+  // If we received at least one 200 page (wrong content), return a search-URL fallback
+  // so the caller can surface something to the user. If both 404'd, return null.
+  return gotAnyPage ? { url: searchUrl, score: null, verified: false } : null;
 }

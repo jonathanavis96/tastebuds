@@ -241,10 +241,14 @@ export function createApiRoutes(db: Database, config: Config): Hono {
           // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
           if (!t.rt_url && omdbRt == null) {
             const result = await resolveRtUrl(t.title, t.year, t.media_type);
-            updateTitleRtUrl(db, t.id, result?.url ?? null);
-            // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
-            if (result?.verified && result.score) {
-              updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+            // Only persist rt_url when the result is verified. Storing an unverified
+            // search URL would block future re-resolution (the !t.rt_url guard above).
+            if (result?.verified) {
+              updateTitleRtUrl(db, t.id, result.url);
+              // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
+              if (result.score) {
+                updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+              }
             }
           }
         } catch {

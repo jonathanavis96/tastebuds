@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
 import { Hono } from 'hono';
 import Database from 'better-sqlite3';
@@ -6,6 +6,13 @@ import { runMigrations } from '../db/migrate.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
+import { resolveRtUrl } from '../rt/resolve.js';
+import { curateCandidates } from '../curation/curate.js';
+
+// Module-level mocks: only affect tests that exercise /generate.
+// All other route tests do not call these modules so they are unaffected.
+vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
+vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
 
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
@@ -238,5 +245,77 @@ describe('GET /api/stats', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { total: number; movie: number; tv: number };
     expect(body).toEqual({ total: 3, movie: 2, tv: 1 });
+  });
+});
+
+// ─── POST /generate — rt_url enrichment: unverified result must not be persisted ─
+
+describe('POST /generate — unverified rt_url is not written to DB', () => {
+  beforeEach(() => {
+    // curateCandidates: no-op — avoids spawning claude -p in tests
+    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('leaves rt_url null when resolveRtUrl returns verified=false', async () => {
+    // Simulate RT returning a search-URL (unverified) — the DB must stay clean
+    vi.mocked(resolveRtUrl).mockResolvedValue({
+      url: 'https://www.rottentomatoes.com/search?search=Test+Film',
+      score: null,
+      verified: false,
+    });
+
+    const db = setupDb();
+    // Insert a title with no rt_url, no imdb_id (so OMDb block is skipped)
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (888, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=888').get() as any).id;
+    // Pre-insert a pending rec so the enrichment loop has something to iterate
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+    expect(res.status).toBe(200);
+
+    // rt_url must remain null — the unverified search URL must not have been written
+    const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row.rt_url).toBeNull();
+  });
+
+  it('writes rt_url when resolveRtUrl returns verified=true', async () => {
+    vi.mocked(resolveRtUrl).mockResolvedValue({
+      url: 'https://www.rottentomatoes.com/m/test_film',
+      score: '85%',
+      verified: true,
+    });
+
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (889, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=889').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+
+    const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/test_film');
   });
 });
