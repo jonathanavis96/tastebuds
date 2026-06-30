@@ -46,6 +46,7 @@
       <div class="poster-info">
         <span class="title">{rec.title ?? 'Unknown'}</span>
         <span class="year">{rec.year ?? ''}</span>
+        {#if rec.media_type}<span class="pill type">{rec.media_type === 'tv' ? 'Series' : 'Movie'}</span>{/if}
         <span class="why">{rec.why_blurb}</span>
       </div>
     </button>
@@ -98,6 +99,8 @@
   .poster-info { padding: 0.55rem; display: flex; flex-direction: column; }
   .title { font-weight: 700; font-size: 0.85rem; color: #fff; line-height: 1.2; }
   .year { font-size: 0.72rem; color: #888; margin-top: 1px; }
+  .pill { font-size: 0.68rem; background: #21213f; color: #b9b9d6; padding: 2px 7px; border-radius: 20px; margin-top: 3px; display: inline-block; }
+  .pill.type { background: #0f3460; color: #8ec5ff; }
   .why { font-size: 0.74rem; color: #aab; margin-top: 5px; line-height: 1.35;
          display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .empty { color: #888; text-align: center; padding: 2rem; grid-column: 1 / -1; }
