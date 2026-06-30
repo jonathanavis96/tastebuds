@@ -106,8 +106,10 @@ export async function curateCandidates(
             predicted_rating?: number;
           }>;
           if (!Array.isArray(parsed)) throw new Error('Expected JSON array from claude');
-          const capped = parsed.slice(0, surprise ? 5 : 10);
-          resolve(capped.map(item => ({
+          // No cap here — balance/surprise cap is applied in the outer scope after
+          // media_type lookup via titleMap. Guard against runaway LLM responses (>30
+          // candidates were never sent, so >30 picks are hallucinated).
+          resolve(parsed.slice(0, 30).map(item => ({
             tmdbId: item.tmdb_id,
             why: item.why,
             category: item.category,
@@ -136,9 +138,32 @@ export async function curateCandidates(
   }
   if (!results) throw lastErr;
 
-  // Persist as recommendations
+  // Apply surprise / balance / plain cap before persisting.
+  // titleMap is needed for media_type lookup so this block sits here (not inside runOnce).
   const titleMap = new Map(allCandidates.map(c => [c.tmdb_id, c]));
-  for (const result of results) {
+
+  let finalResults: CurationResult[];
+  if (surprise) {
+    finalResults = results.slice(0, 5);
+  } else if (balanceMedia) {
+    // Split by media_type, take top 5 of each, backfill the shortfall from the
+    // richer side up to 10 total. Ranking within each type is preserved (the LLM
+    // already returned results in ranked order).
+    const movies = results.filter(r => titleMap.get(r.tmdbId)?.media_type === 'movie');
+    const tvShows = results.filter(r => titleMap.get(r.tmdbId)?.media_type === 'tv');
+    const moviePrimary = movies.slice(0, 5);
+    const tvPrimary = tvShows.slice(0, 5);
+    const needed = 10 - moviePrimary.length - tvPrimary.length;
+    const backfill = needed > 0
+      ? [...movies.slice(5), ...tvShows.slice(5)].slice(0, needed)
+      : [];
+    finalResults = [...moviePrimary, ...tvPrimary, ...backfill];
+  } else {
+    finalResults = results.slice(0, 10);
+  }
+
+  // Persist as recommendations
+  for (const result of finalResults) {
     const title = titleMap.get(result.tmdbId);
     if (!title) continue;
     upsertRecommendation(db, {
@@ -154,5 +179,5 @@ export async function curateCandidates(
     });
   }
 
-  return results;
+  return finalResults;
 }
