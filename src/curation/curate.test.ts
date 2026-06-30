@@ -129,6 +129,17 @@ describe('curateCandidates', () => {
     expect(results[0]).toMatchObject({ tmdbId: 101, why: 'Reason 0', category: 'Top pick' });
   });
 
+  it('spawns claude with stdin ignored so it does not wait ~3s for stdin', async () => {
+    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const spawnMock = makeSpawnMock(claudeOutput);
+    await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    expect(spawnMock).toHaveBeenCalledWith(
+      'claude',
+      expect.arrayContaining(['-p']),
+      expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
+    );
+  });
+
   it('parses raw JSON array output (no outer wrapper)', async () => {
     const items = [{ tmdb_id: 101, why: 'Great drama', category: 'Hidden gem' }];
     // When outer.result is undefined, inner = stdout itself

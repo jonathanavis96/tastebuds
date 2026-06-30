@@ -76,6 +76,9 @@ export async function curateCandidates(
     new Promise<CurationResult[]>((resolve, reject) => {
       const proc: ChildProcess = spawnFn('claude', ['-p', prompt, '--output-format', 'json'], {
         env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: config.claudeToken },
+        // Ignore stdin: the prompt is passed as an arg, so claude has no stdin to read.
+        // Without this it warns and blocks ~3s ("no stdin data received in 3s") on every call.
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       let stdout = '';
