@@ -38,7 +38,16 @@ export interface Config {
    * Set via HARVEST_GENRES_PER_RUN. Always populated by loadConfig.
    */
   harvestGenresPerRun?: number;
+  /**
+   * Cron expression for the nightly harvest schedule (container TZ = UTC).
+   * Defaults to '0 3 * * *' (03:00 UTC ≈ 05:00 SAST). Set via HARVEST_CRON.
+   * Always populated by loadConfig.
+   */
+  harvestCron?: string;
 }
+
+/** Default nightly harvest cron expression (container TZ = UTC). */
+export const HARVEST_CRON_DEFAULT = '0 3 * * *';
 
 /** Default consecutive pages swept per global broad bucket per harvest run. */
 export const HARVEST_PAGES_PER_BUCKET_DEFAULT = 4;
@@ -85,5 +94,6 @@ export function loadConfig(): Config {
     harvestGenresPerRun: process.env.HARVEST_GENRES_PER_RUN
       ? parseInt(process.env.HARVEST_GENRES_PER_RUN, 10)
       : HARVEST_GENRES_PER_RUN_DEFAULT,
+    harvestCron: process.env.HARVEST_CRON ?? HARVEST_CRON_DEFAULT,
   };
 }
