@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   refreshTasteVector,
   retrieveJointCandidates,
+  retrieveColdStartPool,
 } from './retrieve.js';
 import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
@@ -218,6 +219,98 @@ describe('refreshTasteVector', () => {
 
     const result = Array.from(new Float32Array(getTasteSignature(db, profileId)!.taste_vector!.buffer));
     expect(result[0]).toBeCloseTo(0.5);
+  });
+});
+
+describe('retrieveColdStartPool (no taste vector yet)', () => {
+  const mkTitle = (db: InstanceType<typeof Database>, tmdb: number, title: string, genres: string, media: 'movie' | 'tv' = 'movie') => {
+    upsertTitle(db, {
+      tmdb_id: tmdb, media_type: media, title, year: 2020,
+      genres, keywords: '[]', cast: '[]', synopsis: title, poster_path: null,
+      embedding: Buffer.from(new Float32Array([0, 0, 0]).buffer), updated_at: new Date().toISOString(),
+    });
+    return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdb) as any).id;
+  };
+
+  it('returns loved-genre titles and vetoes hated genres when the profile has no taste vector', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
+
+    // Cold start: a signature row with prefs but NO taste_vector (never rated anything).
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: ['Drama'], hated_genres: ['Horror'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    mkTitle(db, 901, 'Loved Drama', '["Drama"]');
+    mkTitle(db, 902, 'Scary One', '["Horror"]');
+    mkTitle(db, 903, 'Random Comedy', '["Comedy"]');
+
+    const pool = await retrieveColdStartPool(db, profileId, {}, mockConfig);
+    const onTasteTitles = pool.onTaste.map(c => c.title);
+    const allTitles = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(c => c.title);
+
+    expect(onTasteTitles).toContain('Loved Drama'); // loved genre surfaces
+    expect(onTasteTitles).not.toContain('Random Comedy'); // not a loved genre → not on-taste
+    expect(allTitles).not.toContain('Scary One'); // hated genre vetoed everywhere
+  });
+
+  it('excludes watched and explicitly-excluded titles', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: ['Drama'], hated_genres: [] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    const watchedId = mkTitle(db, 911, 'Already Seen', '["Drama"]');
+    const excludedId = mkTitle(db, 912, 'Pending Rec', '["Drama"]');
+    mkTitle(db, 913, 'Fresh Pick', '["Drama"]');
+
+    upsertWatchEvent(db, { profile_id: profileId, title_id: watchedId, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+
+    const pool = await retrieveColdStartPool(db, profileId, { excludeTitleIds: [excludedId] }, mockConfig);
+    const titles = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(c => c.title);
+
+    expect(titles).toContain('Fresh Pick');
+    expect(titles).not.toContain('Already Seen');
+    expect(titles).not.toContain('Pending Rec');
+  });
+
+  it('still returns titles (as wildcards) when the profile has no loved genres', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: [], hated_genres: ['Horror'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    mkTitle(db, 921, 'Any Drama', '["Drama"]');
+    mkTitle(db, 922, 'Any Horror', '["Horror"]');
+
+    const pool = await retrieveColdStartPool(db, profileId, {}, mockConfig);
+    const titles = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(c => c.title);
+
+    expect(titles).toContain('Any Drama'); // no loved-genre filter → general pool still flows
+    expect(titles).not.toContain('Any Horror'); // hated still vetoed
   });
 });
 

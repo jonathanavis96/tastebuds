@@ -8,7 +8,7 @@ import { getAllProfiles, getProfile } from '../db/repos/profiles.js';
 import { getRecommendations, updateRecommendationState, getCalibration } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
-import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates } from '../retrieval/retrieve.js';
+import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
 import { getOmdbRatings } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
@@ -138,11 +138,21 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const profile = getProfile(db, body.profileId);
     if (!profile) return c.json({ error: 'Profile not found' }, 404);
     let sig = getTasteSignature(db, body.profileId);
+    // Cold start: a freshly seeded profile has never rated anything, so it has no
+    // taste_vector (and a Joint can't blend two missing solo vectors). Instead of
+    // 400-ing, fall back to a loved-genre/random pool so a new user can bootstrap
+    // by rating what /generate surfaces (the first ratings build the real vector).
+    let coldStart = false;
     if (profile.is_derived) {
       // A derived (Joint) profile blends the two solo vectors; it has no own taste_vector and may have no signature row.
       sig = sig ?? { profile_id: body.profileId, taste_vector: null, prefs: '{}', refreshed_at: new Date().toISOString() };
+      const [soloA, soloB] = soloProfileIds();
+      const aHasVec = soloA != null && !!getTasteSignature(db, soloA)?.taste_vector;
+      const bHasVec = soloB != null && !!getTasteSignature(db, soloB)?.taste_vector;
+      coldStart = !aHasVec || !bHasVec;
     } else if (!sig || !sig.taste_vector) {
-      return c.json({ error: 'No taste signature for profile' }, 400);
+      sig = sig ?? { profile_id: body.profileId, taste_vector: null, prefs: '{}', refreshed_at: new Date().toISOString() };
+      coldStart = true;
     }
 
     // Exclude from the candidate pool:
@@ -186,20 +196,26 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     }
 
     // For a derived (Joint) profile, blend the two solo profiles.
+    // Cold start (no taste vector to rank against) routes to the loved-genre/random
+    // fallback pool for both solo and Joint — the request path needs a vector too.
     let candidatePool;
     if (profile.is_derived) {
       const [soloA, soloB] = soloProfileIds();
       if (soloA == null || soloB == null)
         return c.json({ error: 'Two solo profiles are required for a Joint blend' }, 400);
       const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId };
-      candidatePool = hasRequest
-        ? await retrieveJointRequestCandidates(db, soloA, soloB, request!, jointOpts, config)
-        : await retrieveJointCandidatePool(db, soloA, soloB, jointOpts, config);
+      candidatePool = coldStart
+        ? await retrieveColdStartPool(db, body.profileId, jointOpts, config)
+        : hasRequest
+          ? await retrieveJointRequestCandidates(db, soloA, soloB, request!, jointOpts, config)
+          : await retrieveJointCandidatePool(db, soloA, soloB, jointOpts, config);
     } else {
       const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds };
-      candidatePool = hasRequest
-        ? await retrieveRequestCandidates(db, body.profileId, request!, soloOpts, config)
-        : await retrieveCandidatePool(db, body.profileId, soloOpts, config);
+      candidatePool = coldStart
+        ? await retrieveColdStartPool(db, body.profileId, soloOpts, config)
+        : hasRequest
+          ? await retrieveRequestCandidates(db, body.profileId, request!, soloOpts, config)
+          : await retrieveCandidatePool(db, body.profileId, soloOpts, config);
     }
 
     await curateCandidates(candidatePool, profile, sig, body.request ?? null, config, db, undefined, balanceMedia, body.surprise === true);

@@ -427,6 +427,82 @@ export async function retrieveCandidatePool(
 }
 
 /**
+ * Cold-start candidate pool for a profile that has prefs but NO taste vector yet —
+ * a freshly seeded profile that has never rated anything, so refreshTasteVector
+ * left taste_vector null. There's nothing to compute cosine distance against, so we
+ * fall back to the profile's stated loved_genres, ordered RANDOM (there's no
+ * popularity/vote column on titles to rank by), with the hated-genre veto and the
+ * watched/exclude filters still applied. This lets a brand-new user bootstrap:
+ * /generate surfaces ratable titles, the first ratings build the real taste vector,
+ * and subsequent runs use the normal vector path.
+ *
+ *   onTaste     = RANDOM titles in a loved genre (or general RANDOM when none stated)
+ *   wildcards   = general RANDOM titles (minus hated), excluding onTaste
+ *   adversarial = [] (no taste vector → no meaningful "farthest" pick)
+ */
+export async function retrieveColdStartPool(
+  db: InstanceType<typeof Database>,
+  profileId: number,
+  opts: RetrieveOpts,
+  _config: Pick<Config, 'ollamaUrl'>,
+): Promise<CandidatePool> {
+  const sig = getTasteSignature(db, profileId);
+  const prefs: PrefsJson = JSON.parse(sig?.prefs ?? '{}');
+  const lovedGenres = prefs.loved_genres ?? [];
+  const hatedGenres = prefs.hated_genres ?? [];
+  const extraExclude: number[] = opts.excludeTitleIds ?? [];
+
+  const watchedSubquery = 'SELECT title_id FROM watch_events WHERE profile_id = ?';
+
+  // genres is a JSON array string (e.g. ["Drama","Sci-Fi"]) — match the quoted
+  // genre name so "Drama" can't partial-hit a longer genre.
+  const runRandomQuery = (
+    mediaType: 'movie' | 'tv' | undefined,
+    limit: number,
+    extraIds: number[],
+    lovedOnly: boolean,
+  ): CandidateTitle[] => {
+    const [excPh, excIds] = notInClause([...extraExclude, ...extraIds]);
+    let sql = `
+      SELECT t.*, 0 AS score
+      FROM titles t
+      WHERE t.embedding IS NOT NULL
+        AND t.id NOT IN (${watchedSubquery})
+        AND t.id NOT IN (${excPh})
+    `;
+    const params: unknown[] = [profileId, ...excIds];
+    if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
+    if (lovedOnly && lovedGenres.length > 0) {
+      sql += ' AND (' + lovedGenres.map(() => 't.genres LIKE ?').join(' OR ') + ')';
+      for (const g of lovedGenres) params.push(`%"${g}"%`);
+    }
+    for (const g of hatedGenres) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%"${g}"%`); }
+    sql += ' ORDER BY RANDOM() LIMIT ?';
+    params.push(limit);
+    return db.prepare(sql).all(...params) as CandidateTitle[];
+  };
+
+  const hasLoved = lovedGenres.length > 0;
+  let onTaste: CandidateTitle[];
+  let wildcards: CandidateTitle[];
+
+  if (opts.mediaType) {
+    onTaste = runRandomQuery(opts.mediaType, 20, [], hasLoved);
+    wildcards = runRandomQuery(opts.mediaType, 12, onTaste.map(c => c.id), false);
+  } else {
+    const onTasteMovies = runRandomQuery('movie', 10, [], hasLoved);
+    const onTasteTv = runRandomQuery('tv', 10, [], hasLoved);
+    onTaste = [...onTasteMovies, ...onTasteTv];
+    const ex = onTaste.map(c => c.id);
+    const wildcardMovies = runRandomQuery('movie', 6, ex, false);
+    const wildcardTv = runRandomQuery('tv', 6, ex, false);
+    wildcards = [...wildcardMovies, ...wildcardTv];
+  }
+
+  return { onTaste, wildcards, adversarial: [] };
+}
+
+/**
  * Run a single flat request-pool query: titles ranked by cosine distance to a
  * pre-built query vector (taste ⊕ request), excluding titles in watch_events for
  * any vetoProfileIds plus opts.excludeTitleIds, optionally filtered by media type.
