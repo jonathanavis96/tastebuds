@@ -68,13 +68,21 @@ export async function backfillRatings(
 
       // RT URL: only resolve when no URL is stored yet and OMDb provided no RT.
       // This mirrors the logic in src/api/routes.ts lines ~241-253.
+      // Scoped try/catch: RT scraping is fragile, but a scrape failure must NOT
+      // skip the rating_checked_at stamp below — otherwise an OMDb-absent title
+      // whose RT resolution throws stays unstamped and re-enters the backfill
+      // pool every night (the very quota drain this column exists to stop).
       if (!t.rt_url && rt == null) {
-        const result = await resolveRtUrl(t.title, t.year, t.media_type);
-        // Only persist when verified — storing an unverified search-URL would
-        // block future re-resolution (the !t.rt_url guard above would trip).
-        if (result?.verified) {
-          updateTitleRtUrl(db, t.id, result.url);
-          if (result.score) rt = result.score;
+        try {
+          const result = await resolveRtUrl(t.title, t.year, t.media_type);
+          // Only persist when verified — storing an unverified search-URL would
+          // block future re-resolution (the !t.rt_url guard above would trip).
+          if (result?.verified) {
+            updateTitleRtUrl(db, t.id, result.url);
+            if (result.score) rt = result.score;
+          }
+        } catch {
+          // RT resolution failed — fall through and still stamp the OMDb check.
         }
       }
 

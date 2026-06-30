@@ -252,6 +252,33 @@ describe('backfillRatings', () => {
     expect(row.rating_checked_at!).toBeLessThanOrEqual(after);
   });
 
+  it('stamps rating_checked_at even when resolveRtUrl throws (RT scrape failure must not skip the stamp)', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+
+    // OMDb-absent title → triggers the RT resolution path, which throws.
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockRejectedValue(new Error('RT scrape failed'));
+
+    const result = await backfillRatings(db, mockConfig, { dailyCap: 1 });
+
+    // The title is still counted as processed and stamped, so it won't be
+    // re-queried nightly forever (the partial-drain regression).
+    expect(result.processed).toBe(1);
+    const row = db
+      .prepare('SELECT rating_checked_at FROM titles WHERE tmdb_id = 1')
+      .get() as { rating_checked_at: number | null };
+    expect(row.rating_checked_at).not.toBeNull();
+
+    // And confirm it is NOT re-selected on a second run.
+    vi.clearAllMocks();
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockRejectedValue(new Error('RT scrape failed'));
+    const second = await backfillRatings(db, mockConfig, { dailyCap: 10 });
+    expect(second.processed).toBe(0);
+    expect(vi.mocked(getOmdbRatings)).not.toHaveBeenCalled();
+  });
+
   it('does not re-query OMDb-absent titles on a second run (drain stopped)', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
