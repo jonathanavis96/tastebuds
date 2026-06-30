@@ -59,24 +59,23 @@ export async function backfillRatings(
   for (const t of candidates) {
     try {
       // OMDb is the authority for both imdb and RT ratings.
-      let omdbRt: string | null = null;
       const ratings = await getOmdbRatings(t.imdb_id, config);
-      omdbRt = ratings.rottenTomatoes;
-      updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
+      let rt = ratings.rottenTomatoes;
 
       // RT URL: only resolve when no URL is stored yet and OMDb provided no RT.
       // This mirrors the logic in src/api/routes.ts lines ~241-253.
-      if (!t.rt_url && omdbRt == null) {
+      if (!t.rt_url && rt == null) {
         const result = await resolveRtUrl(t.title, t.year, t.media_type);
         // Only persist when verified — storing an unverified search-URL would
         // block future re-resolution (the !t.rt_url guard above would trip).
         if (result?.verified) {
           updateTitleRtUrl(db, t.id, result.url);
-          if (result.score) {
-            updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: result.score });
-          }
+          if (result.score) rt = result.score;
         }
       }
+
+      // Single write per title — final rt is OMDb's value, or a verified RT scrape.
+      updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt });
 
       processed++;
     } catch {
