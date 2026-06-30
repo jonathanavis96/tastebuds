@@ -31,6 +31,7 @@ const mockCandidates: CandidateTitle[] = [
     synopsis: 'A family saga with a time-travel conspiracy.', poster_path: null,
     embedding: null, updated_at: '2026-01-01T00:00:00Z', score: 0.12,
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
+    popularity: null, vote_count: null, rating_checked_at: null,
   },
 ];
 
@@ -227,5 +228,97 @@ describe('curateCandidates', () => {
     const results = await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
     expect(results).toHaveLength(1);
     expect(runMock).not.toHaveBeenCalled();
+  });
+
+  // ── media-balance tests ────────────────────────────────────────────────────
+
+  it('balanceMedia:true inserts exactly 5 movie + 5 tv when both sides are plentiful', async () => {
+    // 10 movie candidates then 10 tv candidates; LLM returns all 20
+    const movieCandidates: CandidateTitle[] = Array.from({ length: 10 }, (_, i) => ({
+      ...mockCandidates[0],
+      id: 101 + i,
+      tmdb_id: 1001 + i,
+      media_type: 'movie' as const,
+      title: `Movie ${i + 1}`,
+    }));
+    const tvCandidates: CandidateTitle[] = Array.from({ length: 10 }, (_, i) => ({
+      ...mockCandidates[0],
+      id: 201 + i,
+      tmdb_id: 2001 + i,
+      media_type: 'tv' as const,
+      title: `TV Show ${i + 1}`,
+    }));
+    const allCands = [...movieCandidates, ...tvCandidates];
+
+    const llmItems = allCands.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+
+    const runMock = vi.fn();
+    const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
+
+    const results = await curateCandidates(allCands, mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
+
+    expect(results).toHaveLength(10);
+    expect(runMock).toHaveBeenCalledTimes(10);
+    // Verify 5 movie + 5 tv inserted by checking title_ids (movie ids 101-110, tv ids 201-210)
+    const insertedTitleIds: number[] = runMock.mock.calls.map((call: unknown[]) => (call[0] as { title_id: number }).title_id);
+    expect(insertedTitleIds.filter(id => id >= 101 && id <= 110)).toHaveLength(5);
+    expect(insertedTitleIds.filter(id => id >= 201 && id <= 210)).toHaveLength(5);
+  });
+
+  it('balanceMedia:false inserts top 10 of a single-type candidate set', async () => {
+    // 15 tv candidates; LLM returns all 15; we want exactly 10 inserted
+    const tvCandidates: CandidateTitle[] = Array.from({ length: 15 }, (_, i) => ({
+      ...mockCandidates[0],
+      id: 301 + i,
+      tmdb_id: 3001 + i,
+      media_type: 'tv' as const,
+      title: `Series ${i + 1}`,
+    }));
+
+    const llmItems = tvCandidates.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+
+    const runMock = vi.fn();
+    const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
+
+    const results = await curateCandidates(tvCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock, false);
+
+    expect(results).toHaveLength(10);
+    expect(runMock).toHaveBeenCalledTimes(10);
+  });
+
+  it('balanceMedia:true backfills from movie side when tv is short (3 tv + 10 movie = 10 total)', async () => {
+    // 10 movie candidates then 3 tv; LLM returns all 13 (movies first)
+    const movieCandidates: CandidateTitle[] = Array.from({ length: 10 }, (_, i) => ({
+      ...mockCandidates[0],
+      id: 401 + i,
+      tmdb_id: 4001 + i,
+      media_type: 'movie' as const,
+      title: `Film ${i + 1}`,
+    }));
+    const tvCandidates: CandidateTitle[] = Array.from({ length: 3 }, (_, i) => ({
+      ...mockCandidates[0],
+      id: 501 + i,
+      tmdb_id: 5001 + i,
+      media_type: 'tv' as const,
+      title: `Show ${i + 1}`,
+    }));
+    const allCands = [...movieCandidates, ...tvCandidates];
+
+    const llmItems = allCands.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+
+    const runMock = vi.fn();
+    const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
+
+    const results = await curateCandidates(allCands, mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
+
+    expect(results).toHaveLength(10);
+    expect(runMock).toHaveBeenCalledTimes(10);
+    // 3 tv (ids 501-503) + 7 movie (ids 401-407) = 10 total; rank order preserved within each type
+    const insertedTitleIds: number[] = runMock.mock.calls.map((call: unknown[]) => (call[0] as { title_id: number }).title_id);
+    expect(insertedTitleIds.filter(id => id >= 401 && id <= 410)).toHaveLength(7);
+    expect(insertedTitleIds.filter(id => id >= 501 && id <= 503)).toHaveLength(3);
   });
 });

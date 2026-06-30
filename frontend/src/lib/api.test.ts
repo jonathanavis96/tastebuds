@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getProfiles, getRecommendations, rateTitle, addToWatchlist } from './api.js';
+import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig } from './api.js';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -52,5 +52,30 @@ describe('addToWatchlist', () => {
       method: 'POST',
       body: JSON.stringify({ profileId: 2, titleId: 99 }),
     }));
+  });
+});
+
+describe('updateProfileConfig', () => {
+  it('PATCHes /api/profile-config/:profileId with the rating threshold', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+    await updateProfileConfig(1, { rating_threshold: 7 });
+    expect(fetch).toHaveBeenCalledWith('/api/profile-config/1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ rating_threshold: 7 }),
+    }));
+  });
+
+  it('sends null to clear the threshold', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+    await updateProfileConfig(1, { rating_threshold: null });
+    expect(fetch).toHaveBeenCalledWith('/api/profile-config/1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ rating_threshold: null }),
+    }));
+  });
+
+  it('throws on non-200 response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 500 }));
+    await expect(updateProfileConfig(1, { rating_threshold: 7 })).rejects.toThrow('updateProfileConfig failed: 500');
   });
 });

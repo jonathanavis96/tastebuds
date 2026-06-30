@@ -9,7 +9,8 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrate.js';
 import { getTitleByTmdbId } from '../db/repos/titles.js';
 import { getUsage, bumpRequestAdded } from '../db/repos/apiUsage.js';
-import { ensureRequestCoverage, resolveRequestToGenres, type OnDemandDeps } from './onDemand.js';
+import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
+import { ensureRequestCoverage, resolveRequestToGenres, mergeRequestGenresToProfile, type OnDemandDeps } from './onDemand.js';
 import type { Config } from '../config.js';
 import type { TmdbTitle, TmdbTitleDetail } from '../tmdb/types.js';
 
@@ -265,5 +266,151 @@ describe('ensureRequestCoverage — both media types', () => {
     const searchCalls = vi.mocked(deps.searchTitles).mock.calls.map((c) => c[1]);
     expect(searchCalls).not.toContain('movie');
     expect(searchCalls).toContain('tv');
+  });
+});
+
+// ── mergeRequestGenresToProfile ───────────────────────────────────────────────
+
+/** Insert a bare profile row and return its auto-assigned id. */
+function insertTestProfile(db: InstanceType<typeof Database>): number {
+  db.prepare(
+    `INSERT INTO profiles (name, media_weighting, is_derived, config) VALUES (?, 0.5, 0, '{}')`,
+  ).run('TestProfile_' + Math.random().toString(36).slice(2));
+  return (db.prepare('SELECT last_insert_rowid() AS id').get() as { id: number }).id;
+}
+
+describe('mergeRequestGenresToProfile', () => {
+  it('merges new genre into existing loved_genres (existing first, new appended)', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    // Pre-seed a taste signature with Drama in loved_genres
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: ['Drama'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    // "mind-bending sci-fi" resolves to ["Science Fiction"]
+    mergeRequestGenresToProfile(db, profileId, 'mind-bending sci-fi');
+
+    const sig = getTasteSignature(db, profileId);
+    const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
+    expect(prefs.loved_genres).toEqual(['Drama', 'Science Fiction']);
+  });
+
+  it('does not duplicate a genre already in loved_genres', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: ['Drama', 'Science Fiction'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    // Request resolves to Science Fiction again — should not add a second copy
+    mergeRequestGenresToProfile(db, profileId, 'mind-bending sci-fi');
+
+    const sig = getTasteSignature(db, profileId);
+    const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
+    expect(prefs.loved_genres).toEqual(['Drama', 'Science Fiction']);
+  });
+
+  it('caps loved_genres at 12, dropping the oldest when over cap', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    // 12 filler genres — all unique, not resolvable from request text
+    const fillerGenres = ['G1','G2','G3','G4','G5','G6','G7','G8','G9','G10','G11','G12'];
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: fillerGenres }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    // "scary horror" → resolves to Horror — would push to 13, cap kicks in
+    mergeRequestGenresToProfile(db, profileId, 'scary horror');
+
+    const sig = getTasteSignature(db, profileId);
+    const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
+    expect(prefs.loved_genres).toHaveLength(12);
+    // Horror (newest) must be present; G1 (oldest) must have been dropped
+    expect(prefs.loved_genres).toContain('Horror');
+    expect(prefs.loved_genres).not.toContain('G1');
+  });
+
+  it('does nothing when request resolves to no canonical genres', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ loved_genres: ['Drama'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    mergeRequestGenresToProfile(db, profileId, 'something completely unrelated xyz');
+
+    const sig = getTasteSignature(db, profileId);
+    const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
+    expect(prefs.loved_genres).toEqual(['Drama']);
+  });
+
+  it('preserves other prefs keys (hated_genres, loved_themes, etc.) unchanged', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({
+        loved_genres: [],
+        hated_genres: ['Horror'],
+        loved_themes: ['friendship'],
+        preferred_era: '2000s',
+      }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    // "dramatic emotional stories" → Drama
+    mergeRequestGenresToProfile(db, profileId, 'dramatic emotional stories');
+
+    const sig = getTasteSignature(db, profileId);
+    const prefs = JSON.parse(sig!.prefs) as {
+      loved_genres: string[];
+      hated_genres: string[];
+      loved_themes: string[];
+      preferred_era: string;
+    };
+    expect(prefs.loved_genres).toContain('Drama');
+    expect(prefs.hated_genres).toEqual(['Horror']);
+    expect(prefs.loved_themes).toEqual(['friendship']);
+    expect(prefs.preferred_era).toBe('2000s');
+  });
+
+  it('preserves existing taste_vector when updating prefs', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+
+    const fakeVec = Buffer.from(new Float32Array([0.1, 0.2, 0.3]).buffer);
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: fakeVec,
+      prefs: JSON.stringify({ loved_genres: ['Drama'] }),
+      refreshed_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    mergeRequestGenresToProfile(db, profileId, 'scary horror');
+
+    const sig = getTasteSignature(db, profileId);
+    // taste_vector must survive the prefs update
+    expect(sig!.taste_vector).toEqual(fakeVec);
+    // refreshed_at must not be bumped
+    expect(sig!.refreshed_at).toBe('2026-01-01T00:00:00.000Z');
   });
 });

@@ -124,3 +124,19 @@ export async function getWatchlist(profileId: number): Promise<WatchEvent[]> {
   if (!res.ok) throw new Error(`getWatchlist failed: ${res.status}`);
   return res.json();
 }
+
+/**
+ * Merge a partial config patch into a profile's config JSON (e.g. { rating_threshold: 7 }).
+ * Pass null for a key to clear it (e.g. { rating_threshold: null } turns off the filter).
+ */
+export async function updateProfileConfig(
+  profileId: number,
+  patch: { rating_threshold?: number | null },
+): Promise<void> {
+  const res = await fetch(`${BASE}/profile-config/${profileId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`updateProfileConfig failed: ${res.status}`);
+}

@@ -16,6 +16,9 @@ export const CREATE_TITLES = `
     imdb_rating TEXT,
     rt_rating   TEXT,
     rt_url      TEXT,
+    popularity          REAL,
+    vote_count          INTEGER,
+    rating_checked_at   INTEGER,
     UNIQUE (tmdb_id, media_type)
   )
 `;
@@ -130,6 +133,25 @@ export const MIGRATE_009_EMBEDDING_CACHE = `
     created_at  TEXT NOT NULL
   )
 `;
+
+// Migration 010: TMDB popularity score and vote count. The nightly harvest already
+// sorts discover results by vote_count.desc / popularity.desc, so the data is on
+// the wire — these columns just persist it. The backfill query is reordered to
+// vote_count DESC, popularity DESC so most-established titles get OMDb enrichment first.
+export const MIGRATE_010_ADD_POPULARITY = [
+  `ALTER TABLE titles ADD COLUMN popularity REAL`,
+  `ALTER TABLE titles ADD COLUMN vote_count INTEGER`,
+];
+
+// Migration 011: OMDb check marker. When the nightly backfill queries OMDb for a
+// title and OMDb has no rating, imdb_rating stays NULL — without a "checked" marker
+// that title would be re-selected and re-queried every night, draining the free-tier
+// quota. rating_checked_at (unix epoch seconds, set by updateTitleRatings in JS) marks
+// the last successful OMDb attempt so backfillRatings can exclude already-checked titles
+// regardless of whether OMDb returned data.
+export const MIGRATE_011_ADD_RATING_CHECKED_AT = [
+  `ALTER TABLE titles ADD COLUMN rating_checked_at INTEGER`,
+];
 
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before

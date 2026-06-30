@@ -27,6 +27,12 @@ export interface RetrieveOpts {
    * titles the couple has already watched together.
    */
   jointProfileId?: number;
+  /**
+   * Minimum IMDb rating threshold. Titles with imdb_rating < minImdbRating are
+   * excluded from all candidate pools. Titles with imdb_rating IS NULL are still
+   * included (lenient: unrated ≠ bad).
+   */
+  minImdbRating?: number;
 }
 
 /**
@@ -222,6 +228,11 @@ export async function retrieveCandidates(
     params.push(opts.mediaType);
   }
 
+  if (opts.minImdbRating != null) {
+    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+    params.push(opts.minImdbRating);
+  }
+
   sql += ' ORDER BY score ASC LIMIT ?';
   params.push(limit);
 
@@ -303,6 +314,11 @@ export async function retrieveJointCandidates(
     params.push(`%${genre}%`);
   }
 
+  if (opts.minImdbRating != null) {
+    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+    params.push(opts.minImdbRating);
+  }
+
   sql += ' ORDER BY score ASC LIMIT ?';
   params.push(limit);
 
@@ -356,6 +372,10 @@ export async function retrieveCandidatePool(
     `;
     const params: unknown[] = [tasteVec, profileId, ...excIds];
     if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
+    }
     sql += ' ORDER BY score ASC LIMIT ?';
     params.push(limit);
     return db.prepare(sql).all(...params) as CandidateTitle[];
@@ -372,6 +392,10 @@ export async function retrieveCandidatePool(
     `;
     const params: unknown[] = [tasteVec, profileId, ...excIds];
     if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
+    }
     sql += ' ORDER BY score DESC LIMIT ?';
     params.push(limit);
     return db.prepare(sql).all(...params) as CandidateTitle[];
@@ -391,6 +415,10 @@ export async function retrieveCandidatePool(
     for (const genre of hatedGenres) {
       sql += ' AND t.genres NOT LIKE ?';
       params.push(`%${genre}%`);
+    }
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
     }
     sql += ' ORDER BY RANDOM() LIMIT ?';
     params.push(limit);
@@ -528,6 +556,10 @@ function runRequestQuery(
   `;
   const params: unknown[] = [queryBuf, ...vetoIds, ...excIds];
   if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
+  if (opts.minImdbRating != null) {
+    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+    params.push(opts.minImdbRating);
+  }
   sql += ' ORDER BY score ASC LIMIT ?';
   params.push(limit);
   return db.prepare(sql).all(...params) as CandidateTitle[];
@@ -664,7 +696,7 @@ export async function retrieveJointCandidatePool(
   const buildBase = (extraExcludeIds: number[]): [string, unknown[]] => {
     const allExclude = [...extraExclude, ...extraExcludeIds];
     const [excPh, excIds] = notInClause(allExclude);
-    const sql = `
+    let sql = `
       SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
       FROM titles t
       WHERE t.embedding IS NOT NULL
@@ -672,6 +704,10 @@ export async function retrieveJointCandidatePool(
         AND t.id NOT IN (${excPh})
     `;
     const params: unknown[] = [blendedBuf, ...vetoIds, ...excIds];
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
+    }
     return [sql, params];
   };
 

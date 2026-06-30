@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   refreshTasteVector,
+  retrieveCandidates,
   retrieveJointCandidates,
+  retrieveJointCandidatePool,
   retrieveColdStartPool,
 } from './retrieve.js';
 import Database from 'better-sqlite3';
@@ -311,6 +313,117 @@ describe('retrieveColdStartPool (no taste vector yet)', () => {
 
     expect(titles).toContain('Any Drama'); // no loved-genre filter → general pool still flows
     expect(titles).not.toContain('Any Horror'); // hated still vetoed
+  });
+});
+
+describe('IMDb rating filter (minImdbRating)', () => {
+  /** Seed a title with a given imdb_rating (TEXT column; null = no value written). */
+  function mkTitleWithRating(
+    db: InstanceType<typeof Database>,
+    tmdbId: number,
+    titleStr: string,
+    imdbRating: string | null,
+    vec: number[] = [0.5, 0.5, 0],
+  ): number {
+    upsertTitle(db, {
+      tmdb_id: tmdbId,
+      media_type: 'movie',
+      title: titleStr,
+      year: 2020,
+      genres: '[]',
+      keywords: '[]',
+      cast: '[]',
+      synopsis: titleStr,
+      poster_path: null,
+      embedding: Buffer.from(new Float32Array(vec).buffer),
+      updated_at: new Date().toISOString(),
+    });
+    if (imdbRating !== null) {
+      db.prepare('UPDATE titles SET imdb_rating = ? WHERE tmdb_id = ?').run(imdbRating, tmdbId);
+    }
+    return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
+  }
+
+  it('retrieveCandidates: excludes 5.0, includes 7.5 and NULL when minImdbRating=7', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'RatingTester', media_weighting: 0.5, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='RatingTester'").get() as { id: number }).id;
+
+    const tasteVec = Buffer.from(new Float32Array([0.5, 0.5, 0]).buffer);
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: tasteVec,
+      prefs: '{}',
+      refreshed_at: new Date().toISOString(),
+    });
+
+    mkTitleWithRating(db, 3001, 'Low Rating', '5.0');   // should be excluded
+    mkTitleWithRating(db, 3002, 'High Rating', '7.5');   // should be included
+    mkTitleWithRating(db, 3003, 'Unrated Title', null);  // NULL → lenient, included
+
+    const results = await retrieveCandidates(db, profileId, { minImdbRating: 7 }, mockConfig);
+    const titles = results.map(r => r.title);
+
+    expect(titles).not.toContain('Low Rating');   // 5.0 < 7 → excluded
+    expect(titles).toContain('High Rating');        // 7.5 >= 7 → included
+    expect(titles).toContain('Unrated Title');      // NULL → included (lenient)
+  });
+
+  it('retrieveCandidates: returns all three when no minImdbRating is set', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'NoFilter', media_weighting: 0.5, is_derived: 0, config: '{}' });
+    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='NoFilter'").get() as { id: number }).id;
+
+    const tasteVec = Buffer.from(new Float32Array([0.5, 0.5, 0]).buffer);
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: tasteVec,
+      prefs: '{}',
+      refreshed_at: new Date().toISOString(),
+    });
+
+    mkTitleWithRating(db, 3101, 'Low', '5.0');
+    mkTitleWithRating(db, 3102, 'High', '7.5');
+    mkTitleWithRating(db, 3103, 'Unrated', null);
+
+    const results = await retrieveCandidates(db, profileId, {}, mockConfig);
+    const titles = results.map(r => r.title);
+
+    expect(titles).toContain('Low');
+    expect(titles).toContain('High');
+    expect(titles).toContain('Unrated');
+  });
+
+  it('retrieveJointCandidatePool: excludes 5.0, includes 7.5 and NULL when minImdbRating=7', async () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'JointA', media_weighting: 0.5, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'JointB', media_weighting: 0.5, is_derived: 0, config: '{}' });
+    const alexId = (db.prepare("SELECT id FROM profiles WHERE name='JointA'").get() as { id: number }).id;
+    const samId = (db.prepare("SELECT id FROM profiles WHERE name='JointB'").get() as { id: number }).id;
+
+    const tasteVec = Buffer.from(new Float32Array([0.5, 0.5, 0]).buffer);
+    upsertTasteSignature(db, { profile_id: alexId, taste_vector: tasteVec, prefs: '{}', refreshed_at: new Date().toISOString() });
+    upsertTasteSignature(db, { profile_id: samId, taste_vector: tasteVec, prefs: '{}', refreshed_at: new Date().toISOString() });
+
+    mkTitleWithRating(db, 3201, 'Joint Low', '5.0');
+    mkTitleWithRating(db, 3202, 'Joint High', '7.5');
+    mkTitleWithRating(db, 3203, 'Joint Unrated', null);
+
+    const pool = await retrieveJointCandidatePool(db, alexId, samId, { minImdbRating: 7 }, mockConfig);
+    const allTitles = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(r => r.title);
+
+    expect(allTitles).not.toContain('Joint Low');        // 5.0 < 7 → excluded
+    expect(allTitles.some(t => t === 'Joint High')).toBe(true);    // 7.5 >= 7 → included
+    expect(allTitles.some(t => t === 'Joint Unrated')).toBe(true); // NULL → included
   });
 });
 
