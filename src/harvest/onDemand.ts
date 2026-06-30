@@ -28,6 +28,7 @@ import {
 import { mapTmdbToTitleRow } from '../tmdb/mappers.js';
 import { embedText } from '../ollama/embed.js';
 import { resolveGenreNames } from '../tmdb/taxonomy.js';
+import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 
 // ── Synonym table ─────────────────────────────────────────────────────────────
 // Maps vibe words → canonical TMDB genre names. Matched case-insensitively on
@@ -322,4 +323,70 @@ export async function ensureRequestCoverage(
   }
 
   return result;
+}
+
+/** Maximum number of loved_genres to store per profile. */
+const MAX_LOVED_GENRES = 12;
+
+/**
+ * Persist explicit request genre affinity into the profile's taste signature.
+ *
+ * When a user makes a free-text request that resolves to ≥1 canonical genre,
+ * those genres are merged into `prefs.loved_genres` so the affinity persists
+ * into future passive browsing (retrieval reads `loved_genres` to bias the
+ * candidate pool).
+ *
+ * Merge semantics:
+ *   - Existing genres are kept in their current order (oldest first).
+ *   - New genres are appended after dedup (case-insensitive comparison).
+ *   - If the total exceeds MAX_LOVED_GENRES, the oldest entries are dropped
+ *     from the front so the most-recent 12 are kept.
+ *   - All other prefs keys (hated_genres, loved_themes, etc.) are untouched.
+ *   - The existing taste_vector and refreshed_at are preserved; only `prefs`
+ *     is written back, so a vector refresh isn't triggered.
+ *   - No-ops when resolveRequestToGenres returns [] (no recognised genre vibe).
+ */
+export function mergeRequestGenresToProfile(
+  db: InstanceType<typeof Database>,
+  profileId: number,
+  request: string,
+): void {
+  const genres = resolveRequestToGenres(request);
+  if (genres.length === 0) return;
+
+  const existing = getTasteSignature(db, profileId);
+  let prefs: Record<string, unknown> = {};
+  try {
+    prefs = existing ? (JSON.parse(existing.prefs || '{}') as Record<string, unknown>) : {};
+  } catch {
+    prefs = {};
+  }
+
+  const currentLovedGenres: string[] = Array.isArray(prefs.loved_genres)
+    ? (prefs.loved_genres as string[])
+    : [];
+
+  // Build deduplicated list: existing order preserved, new genres appended.
+  // Case-insensitive comparison guards against "horror" vs "Horror" duplicates.
+  const seen = new Set<string>(currentLovedGenres.map((g) => g.toLowerCase()));
+  const merged = [...currentLovedGenres];
+  for (const g of genres) {
+    if (!seen.has(g.toLowerCase())) {
+      seen.add(g.toLowerCase());
+      merged.push(g);
+    }
+  }
+
+  // Cap: drop from the front (oldest) to keep at most MAX_LOVED_GENRES entries.
+  const capped =
+    merged.length > MAX_LOVED_GENRES ? merged.slice(merged.length - MAX_LOVED_GENRES) : merged;
+
+  upsertTasteSignature(db, {
+    profile_id: profileId,
+    taste_vector: existing?.taste_vector ?? null,
+    prefs: JSON.stringify({ ...prefs, loved_genres: capped }),
+    // Preserve existing refreshed_at so a prefs-only update doesn't look like a
+    // fresh vector refresh to callers that read this timestamp.
+    refreshed_at: existing?.refreshed_at ?? new Date().toISOString(),
+  });
 }

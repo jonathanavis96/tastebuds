@@ -14,7 +14,7 @@ import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
-import { ensureRequestCoverage } from '../harvest/onDemand.js';
+import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
@@ -211,6 +211,13 @@ export function createApiRoutes(db: Database, config: Config): Hono {
         await ensureRequestCoverage(db, request!, mediaType, config);
       } catch {
         // swallow — coverage failure degrades quality, not correctness
+      }
+      // Persist resolved genres into the profile's loved_genres so affinity
+      // from explicit requests carries forward into future passive browsing.
+      try {
+        mergeRequestGenresToProfile(db, body.profileId, request!);
+      } catch {
+        // non-fatal — affinity persistence must not break /generate
       }
     }
 
