@@ -40,5 +40,6 @@ export function mapTmdbToTitleRow(
     rt_url: null,
     popularity: detail.popularity ?? null,
     vote_count: detail.vote_count ?? null,
+    rating_checked_at: null,
   };
 }

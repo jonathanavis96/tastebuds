@@ -98,6 +98,20 @@ describe('titles repo', () => {
     expect(updated.rt_rating).toBe('85%');
   });
 
+  it('updateTitleRatings stamps rating_checked_at with current unix seconds', () => {
+    const db = createTestDb();
+    upsertTitle(db, baseTitle);
+    const inserted = getTitleByTmdbId(db, 12345)!;
+    expect(inserted.rating_checked_at).toBeNull();
+    const before = Math.floor(Date.now() / 1000);
+    updateTitleRatings(db, inserted.id, { imdb: null, rt: null });
+    const after = Math.floor(Date.now() / 1000);
+    const updated = getTitleById(db, inserted.id)!;
+    expect(updated.rating_checked_at).not.toBeNull();
+    expect(updated.rating_checked_at!).toBeGreaterThanOrEqual(before);
+    expect(updated.rating_checked_at!).toBeLessThanOrEqual(after);
+  });
+
   it('upsert does not overwrite existing imdb_id with null', () => {
     const db = createTestDb();
     upsertTitle(db, { ...baseTitle, imdb_id: 'tt0137523' });

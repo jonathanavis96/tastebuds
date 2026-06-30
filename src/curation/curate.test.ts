@@ -31,7 +31,7 @@ const mockCandidates: CandidateTitle[] = [
     synopsis: 'A family saga with a time-travel conspiracy.', poster_path: null,
     embedding: null, updated_at: '2026-01-01T00:00:00Z', score: 0.12,
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
-    popularity: null, vote_count: null,
+    popularity: null, vote_count: null, rating_checked_at: null,
   },
 ];
 

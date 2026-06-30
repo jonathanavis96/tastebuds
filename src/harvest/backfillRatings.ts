@@ -2,11 +2,14 @@
  * Nightly backfill job: fills missing OMDb ratings for catalogue titles.
  *
  * Strategy (mirrors the OMDb-first enrichment loop in src/api/routes.ts):
- *  1. Select up to `dailyCap` titles that have an imdb_id but no imdb_rating,
- *     ordered by vote_count DESC, popularity DESC. The most-established titles
- *     (highest vote_count, then currently-trending as tiebreak) are enriched
- *     first. NULLs sort last on DESC in SQLite, so un-refreshed rows sink to
- *     the bottom during the transitional period before the next harvest run.
+ *  1. Select up to `dailyCap` titles that have an imdb_id but no imdb_rating
+ *     AND no rating_checked_at (i.e. OMDb has never been queried for this title).
+ *     Titles where OMDb returned no rating are excluded via the rating_checked_at
+ *     guard — without it those absent titles would be re-queried every night,
+ *     slowly draining the OMDb free-tier quota. Ordered by vote_count DESC,
+ *     popularity DESC so the most-established titles are enriched first. NULLs
+ *     sort last on DESC in SQLite, so un-refreshed rows sink to the bottom during
+ *     the transitional period before the next harvest run.
  *  2. For each, fetch OMDb ratings (authority for both imdb + RT).
  *  3. If OMDb provides no RT rating AND the title has no rt_url yet, attempt
  *     resolveRtUrl — persist url/score ONLY when verified === true (unverified
@@ -49,7 +52,7 @@ export async function backfillRatings(
     .prepare<[number], BackfillCandidate>(
       `SELECT id, imdb_id, title, year, media_type, rt_url
        FROM titles
-       WHERE imdb_id IS NOT NULL AND imdb_rating IS NULL
+       WHERE imdb_id IS NOT NULL AND imdb_rating IS NULL AND rating_checked_at IS NULL
        ORDER BY vote_count DESC, popularity DESC
        LIMIT ?`,
     )

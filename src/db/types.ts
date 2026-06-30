@@ -17,6 +17,7 @@ export interface TitleRow {
   rt_url: string | null;
   popularity: number | null;
   vote_count: number | null;
+  rating_checked_at: number | null;
 }
 
 export interface ProfileRow {

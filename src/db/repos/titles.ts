@@ -3,7 +3,7 @@ import type { TitleRow } from '../types.js';
 
 export function upsertTitle(
   db: InstanceType<typeof Database>,
-  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count'> & Partial<Pick<TitleRow, 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count'>>),
+  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count' | 'rating_checked_at'> & Partial<Pick<TitleRow, 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count' | 'rating_checked_at'>>),
 ): void {
   db.prepare(`
     INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, embedding, updated_at, imdb_id, imdb_rating, rt_rating, popularity, vote_count)
@@ -62,9 +62,10 @@ export function updateTitleRatings(
   titleId: number,
   ratings: { imdb: string | null; rt: string | null },
 ): void {
+  const now = Math.floor(Date.now() / 1000);
   db.prepare(`
-    UPDATE titles SET imdb_rating = ?, rt_rating = ? WHERE id = ?
-  `).run(ratings.imdb, ratings.rt, titleId);
+    UPDATE titles SET imdb_rating = ?, rt_rating = ?, rating_checked_at = ? WHERE id = ?
+  `).run(ratings.imdb, ratings.rt, now, titleId);
 }
 
 export function getTitleById(

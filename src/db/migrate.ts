@@ -15,6 +15,7 @@ import {
   MIGRATE_008_ADD_PREDICTED_RATING,
   MIGRATE_009_EMBEDDING_CACHE,
   MIGRATE_010_ADD_POPULARITY,
+  MIGRATE_011_ADD_RATING_CHECKED_AT,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -98,6 +99,18 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     for (const sql of MIGRATE_010_ADD_POPULARITY) {
       const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
       if (!titleColNames10.includes(colName)) {
+        db.exec(sql);
+      }
+    }
+
+    // Migration 011: add rating_checked_at to titles (idempotent)
+    // Marks when OMDb was last queried for a title so backfillRatings can skip
+    // already-checked titles even when OMDb returned no rating.
+    const titleCols11 = db.prepare("PRAGMA table_info('titles')").all() as Array<{ name: string }>;
+    const titleColNames11 = titleCols11.map(c => c.name);
+    for (const sql of MIGRATE_011_ADD_RATING_CHECKED_AT) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!titleColNames11.includes(colName)) {
         db.exec(sql);
       }
     }

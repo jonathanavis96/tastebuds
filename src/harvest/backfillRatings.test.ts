@@ -37,12 +37,14 @@ function insertTitle(
     imdbRating = null,
     voteCount = null,
     popularity = null,
+    ratingCheckedAt = null,
   }: {
     tmdbId: number;
     imdbId: string | null;
     imdbRating?: string | null;
     voteCount?: number | null;
     popularity?: number | null;
+    ratingCheckedAt?: number | null;
   },
 ): void {
   upsertTitle(db, {
@@ -62,6 +64,9 @@ function insertTitle(
     vote_count: voteCount,
     popularity,
   });
+  if (ratingCheckedAt !== null) {
+    db.prepare('UPDATE titles SET rating_checked_at = ? WHERE tmdb_id = ?').run(ratingCheckedAt, tmdbId);
+  }
 }
 
 describe('backfillRatings', () => {
@@ -227,5 +232,56 @@ describe('backfillRatings', () => {
     expect(calledIds).toContain('tt0000011');    // Y — highest popularity
     expect(calledIds).not.toContain('tt0000010'); // X — not reached within cap
     expect(calledIds).not.toContain('tt0000012'); // Z — not reached within cap
+  });
+
+  it('stamps rating_checked_at even when OMDb returns no ratings', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+
+    const before = Math.floor(Date.now() / 1000);
+    await backfillRatings(db, mockConfig, { dailyCap: 1 });
+    const after = Math.floor(Date.now() / 1000);
+
+    const row = db
+      .prepare('SELECT rating_checked_at FROM titles WHERE tmdb_id = 1')
+      .get() as { rating_checked_at: number | null };
+    expect(row.rating_checked_at).not.toBeNull();
+    expect(row.rating_checked_at!).toBeGreaterThanOrEqual(before);
+    expect(row.rating_checked_at!).toBeLessThanOrEqual(after);
+  });
+
+  it('does not re-query OMDb-absent titles on a second run (drain stopped)', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+
+    // First run: OMDb is queried, finds nothing, stamps rating_checked_at
+    const first = await backfillRatings(db, mockConfig, { dailyCap: 10 });
+    expect(first.processed).toBe(1);
+    expect(vi.mocked(getOmdbRatings)).toHaveBeenCalledTimes(1);
+
+    vi.clearAllMocks();
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+
+    // Second run: title has rating_checked_at set → excluded, NOT queried again
+    const second = await backfillRatings(db, mockConfig, { dailyCap: 10 });
+    expect(second.processed).toBe(0);
+    expect(vi.mocked(getOmdbRatings)).not.toHaveBeenCalled();
+  });
+
+  it('excludes titles with rating_checked_at already set from candidate selection', async () => {
+    const db = createTestDb();
+    const pastTimestamp = Math.floor(Date.now() / 1000) - 86400; // checked 1 day ago
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001', ratingCheckedAt: pastTimestamp });
+    insertTitle(db, { tmdbId: 2, imdbId: 'tt0000002' }); // never checked
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const calledIds = vi.mocked(getOmdbRatings).mock.calls.map((c) => c[0]);
+    expect(calledIds).toContain('tt0000002');     // never checked → processed
+    expect(calledIds).not.toContain('tt0000001'); // already checked → skipped
   });
 });
