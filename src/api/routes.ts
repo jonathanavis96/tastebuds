@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
-import { getAllProfiles, getProfile } from '../db/repos/profiles.js';
+import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
 import { getRecommendations, updateRecommendationState, getCalibration } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
@@ -27,6 +27,17 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // Catalogue size readout for the header — total titles + movie/series split.
   api.get('/stats', (c) => {
     return c.json(countTitles(db));
+  });
+
+  // Update arbitrary keys in a profile's config JSON (partial merge — existing keys preserved).
+  // Used by the frontend to persist per-profile preferences (e.g. rating_threshold).
+  api.patch('/profile-config/:profileId', async (c) => {
+    const profileId = Number(c.req.param('profileId'));
+    if (!Number.isFinite(profileId)) return c.json({ error: 'invalid profileId' }, 400);
+    const body = await c.req.json<Record<string, unknown>>();
+    const ok = patchProfileConfig(db, profileId, body);
+    if (!ok) return c.json({ error: 'Profile not found' }, 404);
+    return c.json({ ok: true });
   });
 
   // Prediction calibration for a profile (predicted vs actual ratings).
@@ -174,6 +185,14 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const balanceMedia = !body.mediaType;
     const mediaType = body.mediaType as 'movie' | 'tv' | undefined;
 
+    // Per-profile IMDb rating threshold: read from the active profile's config JSON.
+    // A missing or malformed config is silently treated as "no threshold" (undefined).
+    let minImdbRating: number | undefined;
+    try {
+      const cfg = JSON.parse(profile.config ?? '{}') as Record<string, unknown>;
+      if (typeof cfg.rating_threshold === 'number') minImdbRating = cfg.rating_threshold;
+    } catch { /* malformed config → no filter */ }
+
     // A free-text request ("mind-bending sci-fi") is EMBEDDED and retrieved against
     // (blended with taste), returning a flat request-relevant list — so the pool
     // actually matches the ask instead of the model picking the least-wrong titles
@@ -203,14 +222,14 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       const [soloA, soloB] = soloProfileIds();
       if (soloA == null || soloB == null)
         return c.json({ error: 'Two solo profiles are required for a Joint blend' }, 400);
-      const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId };
+      const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId, minImdbRating };
       candidatePool = coldStart
         ? await retrieveColdStartPool(db, body.profileId, jointOpts, config)
         : hasRequest
           ? await retrieveJointRequestCandidates(db, soloA, soloB, request!, jointOpts, config)
           : await retrieveJointCandidatePool(db, soloA, soloB, jointOpts, config);
     } else {
-      const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds };
+      const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, minImdbRating };
       candidatePool = coldStart
         ? await retrieveColdStartPool(db, body.profileId, soloOpts, config)
         : hasRequest

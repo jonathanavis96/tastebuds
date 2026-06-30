@@ -12,7 +12,7 @@
     getProfiles, getRecommendations, generateRecommendations,
     rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation,
     removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
-    getCalibration, type Calibration,
+    getCalibration, type Calibration, updateProfileConfig,
   } from './lib/api.js';
 
   // Persist the user's place (profile + tab) across refreshes via localStorage, so
@@ -37,11 +37,22 @@
   const savedWlSort = lsGet(LS.wlSort);
   const savedWdSort = lsGet(LS.wdSort);
 
+  /** Parse the rating_threshold from a profile's config JSON string. */
+  function parseProfileMinRating(config: string | undefined): number | null {
+    try {
+      const cfg = JSON.parse(config ?? '{}') as Record<string, unknown>;
+      return typeof cfg.rating_threshold === 'number' ? cfg.rating_threshold : null;
+    } catch {
+      return null;
+    }
+  }
+
   type WatchlistSort = 'added_desc' | 'added_asc' | 'title' | 'year_desc';
   type WatchedSort = 'watched_desc' | 'watched_asc' | 'rating_desc' | 'title' | 'year_desc';
   const WL_SORTS: WatchlistSort[] = ['added_desc', 'added_asc', 'title', 'year_desc'];
   const WD_SORTS: WatchedSort[] = ['watched_desc', 'watched_asc', 'rating_desc', 'title', 'year_desc'];
 
+  let minRating = $state<number | null>(null);
   let stats = $state<CatalogueStats | null>(null);
   let profiles = $state<Profile[]>([]);
   let activeProfileId = $state<number | null>(null);
@@ -233,6 +244,7 @@
       if (profiles.length > 0) {
         // Restore the last-used profile if it still exists, else fall back to the first.
         activeProfileId = profiles.some(p => p.id === savedProfileId) ? savedProfileId! : profiles[0].id;
+        minRating = parseProfileMinRating(profiles.find(p => p.id === activeProfileId)?.config);
         await loadRecs();
       }
     } catch (e) {
@@ -267,6 +279,7 @@
     watchlist = [];
     watched = [];
     calibration = null;
+    minRating = parseProfileMinRating(profiles.find(p => p.id === id)?.config);
     await loadRecs();
   }
 
@@ -313,6 +326,25 @@
     await markWatched(activeProfileId, titleId);
     await loadRecs();
   }
+
+  /** Write the chosen min-rating to the active profile's config and update local state. */
+  async function handleMinRatingChange(raw: string) {
+    if (!activeProfileId) return;
+    const value = raw === '' ? null : Number(raw);
+    minRating = value;
+    try {
+      await updateProfileConfig(activeProfileId, { rating_threshold: value });
+    } catch {
+      // non-fatal — local state is updated; filter applies on the next generate
+    }
+  }
+
+  const MIN_RATING_OPTIONS: { value: string; label: string }[] = [
+    { value: '', label: 'Off' },
+    { value: '6', label: '6+' },
+    { value: '7', label: '7+' },
+    { value: '8', label: '8+' },
+  ];
 
   const filters: { value: MediaFilter; label: string }[] = [
     { value: 'all', label: 'All' },
@@ -365,6 +397,20 @@
       <button class="surprise-btn" onclick={handleSurpriseMe} disabled={generating}>
         Surprise Me
       </button>
+      <div class="rating-filter">
+        <label class="rating-filter-label" for="min-rating">IMDb</label>
+        <select
+          id="min-rating"
+          class="sort-select rating-select"
+          value={minRating == null ? '' : String(minRating)}
+          onchange={(e) => handleMinRatingChange((e.target as HTMLSelectElement).value)}
+          aria-label="Minimum IMDb rating"
+        >
+          {#each MIN_RATING_OPTIONS as opt}
+            <option value={opt.value}>{opt.label}</option>
+          {/each}
+        </select>
+      </div>
     </div>
 
     <CategoryLegend />
@@ -499,11 +545,14 @@
   .list-controls .filter-bar { padding: 0; flex: 1; min-width: 0; }
   .sort-select { padding: 0.35rem 0.6rem; border-radius: 20px; border: 1px solid #444; background: #16213e; color: #ccc; font-size: 0.8rem; cursor: pointer; }
   .sort-select:focus { outline: none; border-color: #e94560; }
-  .action-bar { display: flex; gap: 0.75rem; padding: 0 1rem 0.75rem; }
+  .action-bar { display: flex; gap: 0.75rem; padding: 0 1rem 0.75rem; align-items: center; }
   .generate-btn { flex: 1; padding: 0.6rem; background: #e94560; border: none; border-radius: 8px; color: #fff; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
   .generate-btn:disabled { opacity: 0.6; cursor: default; }
   .surprise-btn { padding: 0.6rem 1rem; background: #0f3460; border: none; border-radius: 8px; color: #fff; cursor: pointer; font-weight: 500; transition: opacity 0.15s; }
   .surprise-btn:disabled { opacity: 0.6; cursor: default; }
+  .rating-filter { display: flex; align-items: center; gap: 0.35rem; flex-shrink: 0; }
+  .rating-filter-label { font-size: 0.75rem; color: #8a8ab0; white-space: nowrap; }
+  .rating-select { padding: 0.35rem 0.5rem; }
   .error { color: #e94560; padding: 1rem; text-align: center; font-size: 0.9rem; }
   .loading { color: #888; padding: 1rem; text-align: center; font-size: 0.9rem; }
 
