@@ -220,39 +220,35 @@ export function createApiRoutes(db: Database, config: Config): Hono {
 
     await curateCandidates(candidatePool, profile, sig, body.request ?? null, config, db, undefined, balanceMedia, body.surprise === true);
 
-    // OMDb enrichment — non-fatal; only for titles that have an imdb_id and no cached rating
-    if (config.omdbApiKey) {
-      const pendingRecs = getRecommendations(db, body.profileId, 'pending');
-      for (const rec of pendingRecs) {
-        try {
-          const t = getTitleById(db, rec.title_id);
-          if (t?.imdb_id && t.imdb_rating == null) {
-            const ratings = await getOmdbRatings(t.imdb_id, config);
-            updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
-          }
-        } catch {
-          // enrichment failure must never break /generate
-        }
-      }
-    }
-
-    // RT URL resolution — non-fatal; resolve and store the real RT URL (and scraped
-    // tomatometer score) for any pending rec whose title doesn't yet have one.
+    // OMDb enrichment + RT URL/score resolution — non-fatal; OMDb is the authority
+    // for both imdb and rt ratings. resolveRtUrl is only called when OMDb supplies
+    // no RT value this pass, and a scraped score is never persisted unless verified.
     {
       const pendingRecs = getRecommendations(db, body.profileId, 'pending');
       for (const rec of pendingRecs) {
         try {
           const t = getTitleById(db, rec.title_id);
-          if (t && !t.rt_url) {
+          if (!t) continue;
+
+          // OMDb: authority for both imdb and rt ratings; fetch when either is missing
+          let omdbRt: string | null = null;
+          if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
+            const ratings = await getOmdbRatings(t.imdb_id, config);
+            omdbRt = ratings.rottenTomatoes;
+            updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
+          }
+
+          // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
+          if (!t.rt_url && omdbRt == null) {
             const result = await resolveRtUrl(t.title, t.year, t.media_type);
             updateTitleRtUrl(db, t.id, result?.url ?? null);
-            // Only store the scraped RT score when OMDb hasn't already provided one
-            if (result?.score && t.rt_rating == null) {
+            // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
+            if (result?.verified && result.score) {
               updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
             }
           }
         } catch {
-          // RT resolution failure must never break /generate
+          // enrichment failure must never break /generate
         }
       }
     }

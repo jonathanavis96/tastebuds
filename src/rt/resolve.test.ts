@@ -3,7 +3,7 @@
  * Network is never hit — fetch is injected as a mock.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { slugifyRtTitle, parseTomatometer, resolveRtUrl } from './resolve.js';
+import { slugifyRtTitle, parseTomatometer, resolveRtUrl, parsePageIdentity, normaliseTitle } from './resolve.js';
 
 // ─── slugifyRtTitle ───────────────────────────────────────────────────────────
 
@@ -91,12 +91,13 @@ describe('resolveRtUrl', () => {
     const fetchMock = makeFetch([{
       status: 200,
       url: 'https://www.rottentomatoes.com/m/they_cloned_tyrone',
-      body: 'data "tomatometer":91 more',
+      body: '<meta property="og:title" content="They Cloned Tyrone (2023) - Rotten Tomatoes" /> data "tomatometer":91 more',
     }]);
     const result = await resolveRtUrl('They Cloned Tyrone', 2023, 'movie', fetchMock);
     expect(result).toEqual({
       url: 'https://www.rottentomatoes.com/m/they_cloned_tyrone',
       score: '91%',
+      verified: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -105,12 +106,13 @@ describe('resolveRtUrl', () => {
     const fetchMock = makeFetch([{
       status: 200,
       url: 'https://www.rottentomatoes.com/m/some_film',
-      body: '<html>no score</html>',
+      body: '<meta property="og:title" content="Some Film (2020) - Rotten Tomatoes" /><html>no score</html>',
     }]);
     const result = await resolveRtUrl('Some Film', 2020, 'movie', fetchMock);
     expect(result).toEqual({
       url: 'https://www.rottentomatoes.com/m/some_film',
       score: null,
+      verified: true,
     });
   });
 
@@ -127,12 +129,13 @@ describe('resolveRtUrl', () => {
   it('returns year-suffixed url when first is 404 and second is 200', async () => {
     const fetchMock = makeFetch([
       { status: 404, url: '' },
-      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: '"tomatometer":98' },
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98' },
     ]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({
       url: 'https://www.rottentomatoes.com/m/heat_1995',
       score: '98%',
+      verified: true,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -166,5 +169,128 @@ describe('resolveRtUrl', () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('Network error')) as unknown as typeof fetch;
     const result = await resolveRtUrl('Some Film', 2020, 'movie', fetchMock);
     expect(result).toBeNull();
+  });
+});
+
+// ─── normaliseTitle ──────────────────────────────────────────────────────────
+
+describe('normaliseTitle', () => {
+  it('lowercases and trims', () => {
+    expect(normaliseTitle('  HEAT  ')).toBe('heat');
+  });
+
+  it('replaces punctuation with spaces and collapses whitespace', () => {
+    expect(normaliseTitle('Spider-Man: No Way Home')).toBe('spider man no way home');
+  });
+
+  it('preserves numbers', () => {
+    expect(normaliseTitle('The 100')).toBe('the 100');
+  });
+});
+
+// ─── parsePageIdentity ───────────────────────────────────────────────────────
+
+describe('parsePageIdentity', () => {
+  it('extracts title from og:title and strips RT suffix', () => {
+    const body = '<meta property="og:title" content="Heat - Rotten Tomatoes" />';
+    expect(parsePageIdentity(body).title).toBe('Heat');
+  });
+
+  it('extracts title and year when parenthesized year is in og:title', () => {
+    const body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />';
+    const result = parsePageIdentity(body);
+    expect(result.title).toBe('Heat');
+    expect(result.year).toBe(1995);
+  });
+
+  it('falls back to releaseYear JSON when og:title has no year', () => {
+    const body = '<meta property="og:title" content="Heat - Rotten Tomatoes" /> "releaseYear":"1995"';
+    const result = parsePageIdentity(body);
+    expect(result.year).toBe(1995);
+  });
+
+  it('returns null title when no og:title present', () => {
+    expect(parsePageIdentity('<html>no meta</html>').title).toBeNull();
+  });
+
+  it('returns null year when no year source is found', () => {
+    const body = '<meta property="og:title" content="Heat - Rotten Tomatoes" />';
+    expect(parsePageIdentity(body).year).toBeNull();
+  });
+
+  it('handles content attribute before property attribute', () => {
+    const body = '<meta content="Heat (1995) - Rotten Tomatoes" property="og:title" />';
+    const result = parsePageIdentity(body);
+    expect(result.title).toBe('Heat');
+    expect(result.year).toBe(1995);
+  });
+});
+
+// ─── resolveRtUrl identity verification ──────────────────────────────────────
+
+describe('resolveRtUrl identity verification', () => {
+  it('returns verified=true when og:title matches input title and year', async () => {
+    const body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
+  });
+
+  it('returns verified=false with search URL when page title does not match input', async () => {
+    const body = '<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />"tomatometer":60';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/search?search=Heat',
+      score: null,
+      verified: false,
+    });
+  });
+
+  it('returns verified=false when page year differs from input by more than 1', async () => {
+    const body = '<meta property="og:title" content="Heat (2010) - Rotten Tomatoes" />"tomatometer":60';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/search?search=Heat',
+      score: null,
+      verified: false,
+    });
+  });
+
+  it('returns verified=true when year is within ±1 tolerance', async () => {
+    const body = '<meta property="og:title" content="Heat (1996) - Rotten Tomatoes" />"tomatometer":98';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
+  });
+
+  it('returns verified=false with search URL when no og:title in page', async () => {
+    const body = '"tomatometer":98';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/search?search=Heat',
+      score: null,
+      verified: false,
+    });
+  });
+
+  it('verifies by title only when input year is null (any page year accepted)', async () => {
+    const body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
+    const result = await resolveRtUrl('Heat', null, 'movie', fetchMock);
+    expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
+  });
+
+  it('verifies case-insensitively and ignores punctuation differences', async () => {
+    const body = '<meta property="og:title" content="Spider-Man: No Way Home (2021) - Rotten Tomatoes" />"tomatometer":90';
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/spider_man_no_way_home', body }]);
+    const result = await resolveRtUrl('Spider-Man: No Way Home', 2021, 'movie', fetchMock);
+    expect(result).toEqual({
+      url: 'https://www.rottentomatoes.com/m/spider_man_no_way_home',
+      score: '90%',
+      verified: true,
+    });
   });
 });
