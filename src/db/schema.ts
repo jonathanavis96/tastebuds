@@ -16,6 +16,8 @@ export const CREATE_TITLES = `
     imdb_rating TEXT,
     rt_rating   TEXT,
     rt_url      TEXT,
+    popularity  REAL,
+    vote_count  INTEGER,
     UNIQUE (tmdb_id, media_type)
   )
 `;
@@ -130,6 +132,15 @@ export const MIGRATE_009_EMBEDDING_CACHE = `
     created_at  TEXT NOT NULL
   )
 `;
+
+// Migration 010: TMDB popularity score and vote count. The nightly harvest already
+// sorts discover results by vote_count.desc / popularity.desc, so the data is on
+// the wire — these columns just persist it. The backfill query is reordered to
+// vote_count DESC, popularity DESC so most-established titles get OMDb enrichment first.
+export const MIGRATE_010_ADD_POPULARITY = [
+  `ALTER TABLE titles ADD COLUMN popularity REAL`,
+  `ALTER TABLE titles ADD COLUMN vote_count INTEGER`,
+];
 
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before

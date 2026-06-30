@@ -7,6 +7,8 @@ export interface TmdbTitle {
   genre_ids: number[];
   overview: string;
   poster_path: string | null;
+  popularity?: number;
+  vote_count?: number;
 }
 
 export interface TmdbTitleDetail extends TmdbTitle {

@@ -3,9 +3,10 @@
  *
  * Strategy (mirrors the OMDb-first enrichment loop in src/api/routes.ts):
  *  1. Select up to `dailyCap` titles that have an imdb_id but no imdb_rating,
- *     ordered by id ASC (insertion order). The titles table has no popularity
- *     column; insertion order is a reasonable proxy since the harvest sweeps
- *     popular titles from TMDB first.
+ *     ordered by vote_count DESC, popularity DESC. The most-established titles
+ *     (highest vote_count, then currently-trending as tiebreak) are enriched
+ *     first. NULLs sort last on DESC in SQLite, so un-refreshed rows sink to
+ *     the bottom during the transitional period before the next harvest run.
  *  2. For each, fetch OMDb ratings (authority for both imdb + RT).
  *  3. If OMDb provides no RT rating AND the title has no rt_url yet, attempt
  *     resolveRtUrl — persist url/score ONLY when verified === true (unverified
@@ -49,7 +50,7 @@ export async function backfillRatings(
       `SELECT id, imdb_id, title, year, media_type, rt_url
        FROM titles
        WHERE imdb_id IS NOT NULL AND imdb_rating IS NULL
-       ORDER BY id ASC
+       ORDER BY vote_count DESC, popularity DESC
        LIMIT ?`,
     )
     .all(dailyCap);

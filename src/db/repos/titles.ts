@@ -3,11 +3,11 @@ import type { TitleRow } from '../types.js';
 
 export function upsertTitle(
   db: InstanceType<typeof Database>,
-  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url'> & Partial<Pick<TitleRow, 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url'>>),
+  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count'> & Partial<Pick<TitleRow, 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count'>>),
 ): void {
   db.prepare(`
-    INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, embedding, updated_at, imdb_id, imdb_rating, rt_rating)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, embedding, updated_at, imdb_id, imdb_rating, rt_rating, popularity, vote_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (tmdb_id, media_type) DO UPDATE SET
       title       = excluded.title,
       year        = excluded.year,
@@ -18,7 +18,9 @@ export function upsertTitle(
       poster_path = excluded.poster_path,
       embedding   = excluded.embedding,
       updated_at  = excluded.updated_at,
-      imdb_id     = COALESCE(excluded.imdb_id, titles.imdb_id)
+      imdb_id     = COALESCE(excluded.imdb_id, titles.imdb_id),
+      popularity  = excluded.popularity,
+      vote_count  = excluded.vote_count
   `).run(
     title.tmdb_id,
     title.media_type,
@@ -34,6 +36,8 @@ export function upsertTitle(
     (title as Partial<TitleRow>).imdb_id ?? null,
     (title as Partial<TitleRow>).imdb_rating ?? null,
     (title as Partial<TitleRow>).rt_rating ?? null,
+    (title as Partial<TitleRow>).popularity ?? null,
+    (title as Partial<TitleRow>).vote_count ?? null,
   );
 }
 

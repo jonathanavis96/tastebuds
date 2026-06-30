@@ -14,6 +14,7 @@ import {
   MIGRATE_007_HARVEST_CURSOR,
   MIGRATE_008_ADD_PREDICTED_RATING,
   MIGRATE_009_EMBEDDING_CACHE,
+  MIGRATE_010_ADD_POPULARITY,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -90,5 +91,15 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
 
     // Migration 009: content-addressed embedding cache (idempotent via IF NOT EXISTS)
     db.exec(MIGRATE_009_EMBEDDING_CACHE);
+
+    // Migration 010: add popularity and vote_count to titles (idempotent)
+    const titleCols10 = db.prepare("PRAGMA table_info('titles')").all() as Array<{ name: string }>;
+    const titleColNames10 = titleCols10.map(c => c.name);
+    for (const sql of MIGRATE_010_ADD_POPULARITY) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!titleColNames10.includes(colName)) {
+        db.exec(sql);
+      }
+    }
   })();
 }

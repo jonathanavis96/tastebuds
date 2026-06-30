@@ -31,7 +31,19 @@ function createTestDb(): InstanceType<typeof Database> {
 
 function insertTitle(
   db: InstanceType<typeof Database>,
-  { tmdbId, imdbId, imdbRating = null }: { tmdbId: number; imdbId: string | null; imdbRating?: string | null },
+  {
+    tmdbId,
+    imdbId,
+    imdbRating = null,
+    voteCount = null,
+    popularity = null,
+  }: {
+    tmdbId: number;
+    imdbId: string | null;
+    imdbRating?: string | null;
+    voteCount?: number | null;
+    popularity?: number | null;
+  },
 ): void {
   upsertTitle(db, {
     tmdb_id: tmdbId,
@@ -47,6 +59,8 @@ function insertTitle(
     updated_at: new Date().toISOString(),
     imdb_id: imdbId,
     imdb_rating: imdbRating,
+    vote_count: voteCount,
+    popularity,
   });
 }
 
@@ -180,5 +194,38 @@ describe('backfillRatings', () => {
 
     expect(result.processed).toBe(0);
     expect(vi.mocked(getOmdbRatings)).not.toHaveBeenCalled();
+  });
+
+  it('processes candidates ordered by vote_count DESC when cap < total candidates', async () => {
+    const db = createTestDb();
+    // Insert in ascending id order — id 1, 2, 3.
+    // ORDER BY id ASC (old) would pick ids 1 and 2 (A and B).
+    // ORDER BY vote_count DESC (new) should pick B (9000) and C (500), skipping A (100).
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001', voteCount: 100, popularity: 99.0 });   // A — low votes, high pop
+    insertTitle(db, { tmdbId: 2, imdbId: 'tt0000002', voteCount: 9000, popularity: 10.0 });  // B — highest votes
+    insertTitle(db, { tmdbId: 3, imdbId: 'tt0000003', voteCount: 500, popularity: 50.0 });   // C — medium votes
+
+    await backfillRatings(db, mockConfig, { dailyCap: 2 });
+
+    const calledIds = vi.mocked(getOmdbRatings).mock.calls.map((c) => c[0]);
+    expect(calledIds).toContain('tt0000002'); // B — highest vote_count → first
+    expect(calledIds).toContain('tt0000003'); // C — second highest vote_count → second
+    expect(calledIds).not.toContain('tt0000001'); // A — lowest vote_count → excluded by cap
+  });
+
+  it('breaks vote_count ties by popularity DESC', async () => {
+    const db = createTestDb();
+    // X and Y share vote_count=500; Y has higher popularity → Y should be picked first.
+    insertTitle(db, { tmdbId: 10, imdbId: 'tt0000010', voteCount: 500, popularity: 20.0 }); // X — lower pop
+    insertTitle(db, { tmdbId: 11, imdbId: 'tt0000011', voteCount: 500, popularity: 80.0 }); // Y — higher pop
+    insertTitle(db, { tmdbId: 12, imdbId: 'tt0000012', voteCount: 500, popularity: 5.0 });  // Z — lowest pop
+
+    // Cap of 1 → only Y should be processed
+    await backfillRatings(db, mockConfig, { dailyCap: 1 });
+
+    const calledIds = vi.mocked(getOmdbRatings).mock.calls.map((c) => c[0]);
+    expect(calledIds).toContain('tt0000011');    // Y — highest popularity
+    expect(calledIds).not.toContain('tt0000010'); // X — not reached within cap
+    expect(calledIds).not.toContain('tt0000012'); // Z — not reached within cap
   });
 });

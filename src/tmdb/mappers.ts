@@ -38,5 +38,7 @@ export function mapTmdbToTitleRow(
     imdb_rating: null,
     rt_rating: null,
     rt_url: null,
+    popularity: detail.popularity ?? null,
+    vote_count: detail.vote_count ?? null,
   };
 }

@@ -35,6 +35,7 @@ function makeCandidate(id: number, tmdb_id: number, title: string): CandidateTit
     synopsis: `Synopsis of ${title}`, poster_path: null,
     embedding: null, updated_at: '2026-01-01T00:00:00Z', score: 0.1 * id,
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
+    popularity: null, vote_count: null,
   };
 }
 

@@ -15,6 +15,8 @@ export interface TitleRow {
   imdb_rating: string | null;
   rt_rating: string | null;
   rt_url: string | null;
+  popularity: number | null;
+  vote_count: number | null;
 }
 
 export interface ProfileRow {

@@ -49,6 +49,21 @@ describe('runMigrations', () => {
     expect(colNames).toContain('embedding');
   });
 
+  it('migration 010 adds popularity and vote_count to titles and is idempotent', () => {
+    const db = createTestDb();
+    runMigrations(db);
+
+    const columns = db
+      .prepare("PRAGMA table_info('titles')")
+      .all() as Array<{ name: string }>;
+    const colNames = columns.map((c) => c.name);
+    expect(colNames).toContain('popularity');
+    expect(colNames).toContain('vote_count');
+
+    // Re-running migrations must not throw (idempotent)
+    expect(() => runMigrations(db)).not.toThrow();
+  });
+
   it('watch_events table has status column with correct default check', () => {
     const db = createTestDb();
     runMigrations(db);

@@ -108,6 +108,31 @@ describe('titles repo', () => {
     expect(found.title).toBe('Updated');
   });
 
+  it('upsertTitle persists popularity and vote_count', () => {
+    const db = createTestDb();
+    upsertTitle(db, { ...baseTitle, popularity: 123.45, vote_count: 5000 });
+    const found = getTitleByTmdbId(db, 12345)!;
+    expect(found.popularity).toBeCloseTo(123.45);
+    expect(found.vote_count).toBe(5000);
+  });
+
+  it('upsertTitle ON CONFLICT refreshes popularity and vote_count', () => {
+    const db = createTestDb();
+    upsertTitle(db, { ...baseTitle, popularity: 50.0, vote_count: 1000 });
+    upsertTitle(db, { ...baseTitle, popularity: 99.9, vote_count: 9999 });
+    const found = getTitleByTmdbId(db, 12345)!;
+    expect(found.popularity).toBeCloseTo(99.9);
+    expect(found.vote_count).toBe(9999);
+  });
+
+  it('upsertTitle stores null for popularity and vote_count when not provided', () => {
+    const db = createTestDb();
+    upsertTitle(db, baseTitle);
+    const found = getTitleByTmdbId(db, 12345)!;
+    expect(found.popularity).toBeNull();
+    expect(found.vote_count).toBeNull();
+  });
+
   it('getUnwatchedTitles excludes titles in watch_events for profile', () => {
     const db = createTestDb();
     upsertProfile(db, baseProfile);
