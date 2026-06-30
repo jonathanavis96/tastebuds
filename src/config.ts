@@ -44,10 +44,18 @@ export interface Config {
    * Always populated by loadConfig.
    */
   harvestCron?: string;
+  /**
+   * Maximum titles to enrich with OMDb ratings during the nightly backfill run.
+   * Defaults to 800. Set via RATINGS_BACKFILL_CAP env var.
+   * Rationale: OMDb free tier allows ~1 000 calls/day; leave ~200 for live /generate.
+   */
+  ratingsBackfillCap?: number;
 }
 
 /** Default nightly harvest cron expression (container TZ = UTC). */
 export const HARVEST_CRON_DEFAULT = '0 3 * * *';
+/** Default OMDb ratings backfill cap per nightly run. */
+export const RATINGS_BACKFILL_CAP_DEFAULT = 800;
 
 /** Default consecutive pages swept per global broad bucket per harvest run. */
 export const HARVEST_PAGES_PER_BUCKET_DEFAULT = 4;
@@ -95,5 +103,8 @@ export function loadConfig(): Config {
       ? parseInt(process.env.HARVEST_GENRES_PER_RUN, 10)
       : HARVEST_GENRES_PER_RUN_DEFAULT,
     harvestCron: process.env.HARVEST_CRON ?? HARVEST_CRON_DEFAULT,
+    ratingsBackfillCap: process.env.RATINGS_BACKFILL_CAP
+      ? parseInt(process.env.RATINGS_BACKFILL_CAP, 10)
+      : RATINGS_BACKFILL_CAP_DEFAULT,
   };
 }
