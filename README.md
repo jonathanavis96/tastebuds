@@ -50,10 +50,16 @@ the Claude OAuth step itself.
 >    write it into `CLAUDE_CODE_OAUTH_TOKEN` — don't ask me to copy/paste it manually.
 > 5. **Configure.** Copy `.env.example` to `.env` and fill in `TMDB_API_KEY`, the OAuth token,
 >    and `OMDB_API_KEY` if I provided one. Leave `OLLAMA_URL` as
->    `http://host.docker.internal:11434` for the Docker path.
+>    `http://host.docker.internal:11434` for the Docker path. Generate `TASTEBUDS_TOKEN`
+>    yourself with `openssl rand -hex 32` and write it in — this is a required shared
+>    secret that gates the whole API (see the **Security** section), so don't skip it or
+>    leave it blank.
 > 6. **Build and start:** `docker compose up -d --build`.
 > 7. **Seed and verify:** seed the profiles, run a harvest, then confirm
->    `curl http://localhost:8094/api/profiles` responds.
+>    `curl -H "Authorization: Bearer <TASTEBUDS_TOKEN value>" http://localhost:8094/api/profiles`
+>    responds (note the port is bound to `127.0.0.1` only by default — run curl from the
+>    same host). Tell me to open `http://localhost:8094/?token=<TASTEBUDS_TOKEN value>` once
+>    in the browser so it remembers the token.
 >
 > If anything fails along the way, diagnose and fix it before moving on, and tell me what you
 > changed.
@@ -125,7 +131,8 @@ Get a free key (1000 req/day) at <https://www.omdbapi.com/apikey.aspx> and put i
 ```bash
 # 1. Configure
 cp .env.example .env
-nano .env            # fill in TMDB_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
+nano .env            # fill in TMDB_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, and TASTEBUDS_TOKEN
+                     # (generate the token with: openssl rand -hex 32)
                      # OLLAMA_URL should be http://host.docker.internal:11434 (default)
 
 # 2. Make sure Ollama is running on the host with the embed model:
@@ -134,9 +141,12 @@ ollama pull nomic-embed-text
 # 3. Build and start
 docker compose up -d --build
 
-# 4. Verify
-curl http://localhost:8094/api/profiles
+# 4. Verify (port is bound to 127.0.0.1 by default, so run this on the same host)
+curl -H "Authorization: Bearer <TASTEBUDS_TOKEN value>" http://localhost:8094/api/profiles
 ```
+
+Then open `http://localhost:8094/?token=<TASTEBUDS_TOKEN value>` once in the browser — it
+saves the token to `localStorage` and strips it from the URL. See **Security** below.
 
 Then **seed profiles, harvest titles, and import your watch history**:
 
@@ -219,10 +229,38 @@ just ignore the profiles you don't use.
 |-----|----------|---------|---------|
 | `TMDB_API_KEY` | ✅ | — | TMDB v3 API key |
 | `CLAUDE_CODE_OAUTH_TOKEN` | ✅ (for Generate) | — | `claude setup-token` output |
+| `TASTEBUDS_TOKEN` | ✅ | — | Shared-secret bearer token gating every API request — see **Security** below |
 | `OLLAMA_URL` | — | `http://host.docker.internal:11434` | Ollama endpoint |
 | `OMDB_API_KEY` | — | — | IMDb/RT ratings |
 | `PORT` | — | `8094` | HTTP port |
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
+
+---
+
+## Security
+
+**This app has no built-in TLS and only a single shared-secret token — it is not
+safe to expose directly to the public internet.** `docker-compose.yml` binds the
+port to `127.0.0.1` on the host for exactly this reason; if you widen it (e.g. to
+`0.0.0.0` for LAN access, or put it behind a reverse proxy), put it behind a VPN
+(Tailscale, WireGuard) or a proxy that adds its own auth — don't rely on the app
+alone facing the open internet.
+
+Every `/api/*` route requires `Authorization: Bearer <TASTEBUDS_TOKEN>` — without
+it, requests are rejected with `401` (this closes an IDOR: `profileId` is a small
+sequential integer, so an unauthenticated caller could otherwise read/write any
+profile). Generate a token with `openssl rand -hex 32` and set it as
+`TASTEBUDS_TOKEN` in `.env`.
+
+The frontend picks the token up from a one-time `?token=` URL parameter (e.g.
+`http://localhost:8094/?token=<TASTEBUDS_TOKEN value>`), saves it to
+`localStorage`, and strips it from the URL bar. If it's ever missing or wrong
+you'll be prompted for it again.
+
+`POST /generate` additionally has a stricter rate limit (a handful of requests
+per few minutes per caller) on top of a general per-minute cap on all other
+mutating endpoints — it spawns a paid `claude -p` subprocess per call, so this
+limits both cost and DoS exposure even from a caller that has the token.
 
 ---
 

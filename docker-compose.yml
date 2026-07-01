@@ -2,7 +2,12 @@ services:
   tastebuds:
     build: .
     ports:
-      - "8094:8094"
+      # Bind to the host loopback only — this app has no built-in TLS and is
+      # protected by a single shared-secret token (TASTEBUDS_TOKEN), not a full
+      # auth system. Do NOT change this to "8094:8094" / "0.0.0.0:8094:8094"
+      # unless it's sitting behind a trusted reverse proxy/VPN (e.g. Tailscale
+      # Serve) — the API must never be reachable directly from the public internet.
+      - "127.0.0.1:8094:8094"
     volumes:
       - ./data:/app/data
     env_file:

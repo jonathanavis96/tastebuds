@@ -15,9 +15,29 @@ import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
+import { createAuthMiddleware, createRateLimiter } from './auth.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
+
+  // Auth gate — every /api/* route requires the shared-secret bearer token.
+  // Without this, profileId is enumerable and /generate (which spawns a paid
+  // `claude -p` subprocess) is callable by anyone who can reach the port.
+  api.use('*', createAuthMiddleware(config.tastebudsToken));
+
+  // Rate limiting (defense against cost/DoS once past the auth gate — a leaked
+  // or brute-forced token, or a misbehaving authorised client, still shouldn't
+  // be able to hammer the DB or spawn unlimited `claude -p` processes).
+  // General cap on all mutating (non-GET) endpoints.
+  const mutationLimiter = createRateLimiter({ windowMs: 60_000, max: 30, keyPrefix: 'mutate' });
+  api.use('*', async (c, next) => {
+    if (c.req.method === 'GET') return next();
+    return mutationLimiter(c, next);
+  });
+  // Tighter, dedicated cap on /generate specifically — it's the expensive one
+  // (spawns `claude -p`), so it gets its own stricter budget on top.
+  const generateLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5, keyPrefix: 'generate' });
+  api.use('/generate', generateLimiter);
 
   api.get('/profiles', (c) => {
     const profiles = getAllProfiles(db);
@@ -29,13 +49,23 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     return c.json(countTitles(db));
   });
 
-  // Update arbitrary keys in a profile's config JSON (partial merge — existing keys preserved).
-  // Used by the frontend to persist per-profile preferences (e.g. rating_threshold).
+  // Update known keys in a profile's config JSON (partial merge — existing keys preserved).
+  // Used by the frontend to persist per-profile preferences (currently just rating_threshold).
+  // The patch is allowlisted + type-checked rather than merged verbatim: an unvalidated
+  // merge would let a caller inject arbitrary keys/oversized blobs into the stored config.
+  const PROFILE_CONFIG_ALLOWED_KEYS = new Set(['rating_threshold']);
   api.patch('/profile-config/:profileId', async (c) => {
     const profileId = Number(c.req.param('profileId'));
     if (!Number.isFinite(profileId)) return c.json({ error: 'invalid profileId' }, 400);
     const body = await c.req.json<Record<string, unknown>>();
-    const ok = patchProfileConfig(db, profileId, body);
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body ?? {})) {
+      if (!PROFILE_CONFIG_ALLOWED_KEYS.has(key)) continue;
+      if (key === 'rating_threshold' && value !== null && typeof value !== 'number') continue;
+      patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) return c.json({ error: 'no valid config keys in patch' }, 400);
+    const ok = patchProfileConfig(db, profileId, patch);
     if (!ok) return c.json({ error: 'Profile not found' }, 404);
     return c.json({ ok: true });
   });

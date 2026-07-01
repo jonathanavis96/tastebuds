@@ -14,9 +14,12 @@ import { curateCandidates } from '../curation/curate.js';
 vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
 
+const AUTH_TOKEN = 'test-tastebuds-token';
+const AUTH_HEADER = { Authorization: `Bearer ${AUTH_TOKEN}` };
+
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
-  claudeToken: 'test-token', port: 8094, dbPath: ':memory:',
+  claudeToken: 'test-token', tastebudsToken: AUTH_TOKEN, port: 8094, dbPath: ':memory:',
   omdbApiKey: undefined,
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 500,
@@ -38,10 +41,76 @@ describe('GET /api/profiles', () => {
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/profiles');
+    const res = await app.request('/api/profiles', { headers: AUTH_HEADER });
     expect(res.status).toBe(200);
     const body = await res.json() as Array<{name: string}>;
     expect(body.map(p => p.name)).toEqual(expect.arrayContaining(['Alex', 'Sam', 'Joint']));
+  });
+});
+
+describe('auth gate', () => {
+  it('rejects a request with no Authorization header', async () => {
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/profiles');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a request with the wrong token', async () => {
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/profiles', { headers: { Authorization: 'Bearer wrong-token' } });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a malformed Authorization header (missing Bearer prefix)', async () => {
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/profiles', { headers: { Authorization: AUTH_TOKEN } });
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts a request with the correct token', async () => {
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/profiles', { headers: AUTH_HEADER });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('rate limiting', () => {
+  it('returns 429 after exceeding the /generate limit, but leaves other endpoints unaffected', async () => {
+    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const generateOnce = () => app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const res = await generateOnce();
+      statuses.push(res.status);
+    }
+    // The 6th call in the window should be throttled.
+    expect(statuses.at(-1)).toBe(429);
+    expect(statuses.slice(0, 5).every(s => s === 200)).toBe(true);
+
+    // A GET (not rate-limited) still works fine while /generate is throttled.
+    const profilesRes = await app.request('/api/profiles', { headers: AUTH_HEADER });
+    expect(profilesRes.status).toBe(200);
   });
 });
 
@@ -51,7 +120,7 @@ describe('GET /api/recommendations/:profileId', () => {
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/1');
+    const res = await app.request('/api/recommendations/1', { headers: AUTH_HEADER });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body)).toBe(true);
@@ -63,7 +132,7 @@ describe('GET /api/recommendations/:profileId', () => {
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/not-a-number');
+    const res = await app.request('/api/recommendations/not-a-number', { headers: AUTH_HEADER });
     expect(res.status).toBe(400);
   });
 });
@@ -81,7 +150,7 @@ describe('POST /api/watchlist', () => {
 
     const res = await app.request('/api/watchlist', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
       body: JSON.stringify({ profileId: 1, titleId }),
     });
     expect(res.status).toBe(200);
@@ -102,7 +171,7 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/1');
+    const res = await app.request('/api/recommendations/1', { headers: AUTH_HEADER });
     expect(res.status).toBe(200);
     const body = await res.json() as Array<Record<string, unknown>>;
     expect(body[0].imdb_rating).toBe('8.5');
@@ -120,7 +189,7 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/1');
+    const res = await app.request('/api/recommendations/1', { headers: AUTH_HEADER });
     const body = await res.json() as Array<Record<string, unknown>>;
     expect(body[0].imdb_rating).toBeNull();
     expect(body[0].rt_rating).toBeNull();
@@ -150,7 +219,7 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/1');
+    const res = await app.request('/api/recommendations/1', { headers: AUTH_HEADER });
     expect(res.status).toBe(200);
     const body = await res.json() as Array<Record<string, unknown>>;
     // Only the unwatched film should appear
@@ -173,7 +242,7 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/recommendations/1');
+    const res = await app.request('/api/recommendations/1', { headers: AUTH_HEADER });
     const body = await res.json() as Array<Record<string, unknown>>;
     // A watchlisted title is already chosen — it must not remain in Picks.
     expect(body).toHaveLength(0);
@@ -195,7 +264,7 @@ describe('POST /api/dismiss', () => {
 
     const res = await app.request('/api/dismiss', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
       body: JSON.stringify({ profileId: 1, recommendationId: recId }),
     });
     expect(res.status).toBe(200);
@@ -219,7 +288,7 @@ describe('POST /api/undismiss', () => {
 
     const res = await app.request('/api/undismiss', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
       body: JSON.stringify({ profileId: 1, recommendationId: recId }),
     });
     expect(res.status).toBe(200);
@@ -241,7 +310,7 @@ describe('GET /api/stats', () => {
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
 
-    const res = await app.request('/api/stats');
+    const res = await app.request('/api/stats', { headers: AUTH_HEADER });
     expect(res.status).toBe(200);
     const body = await res.json() as { total: number; movie: number; tv: number };
     expect(body).toEqual({ total: 3, movie: 2, tv: 1 });
@@ -282,7 +351,7 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
 
     const res = await app.request('/api/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
       body: JSON.stringify({ profileId: 1 }),
     });
     expect(res.status).toBe(200);
@@ -311,7 +380,7 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
 
     await app.request('/api/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH_HEADER },
       body: JSON.stringify({ profileId: 1 }),
     });
 

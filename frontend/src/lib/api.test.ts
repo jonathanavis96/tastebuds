@@ -13,7 +13,7 @@ describe('getProfiles', () => {
     const mockProfiles = [{ id: 1, name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' }];
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(mockProfiles), { status: 200 }));
     const result = await getProfiles();
-    expect(fetch).toHaveBeenCalledWith('/api/profiles');
+    expect(fetch).toHaveBeenCalledWith('/api/profiles', expect.objectContaining({ headers: expect.any(Object) }));
     expect(result).toEqual(mockProfiles);
   });
 
@@ -28,7 +28,7 @@ describe('getRecommendations', () => {
     const mockRecs = [{ id: 1, profile_id: 1, title_id: 2, category: 'Top pick', score: 0.9, why_blurb: 'Great', request_text: null, state: 'pending', created_at: '2026-06-22T00:00:00.000Z' }];
     vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(mockRecs), { status: 200 }));
     const result = await getRecommendations(1);
-    expect(fetch).toHaveBeenCalledWith('/api/recommendations/1');
+    expect(fetch).toHaveBeenCalledWith('/api/recommendations/1', expect.objectContaining({ headers: expect.any(Object) }));
     expect(result).toEqual(mockRecs);
   });
 });
