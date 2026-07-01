@@ -1,42 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { Context, MiddlewareHandler, Next } from 'hono';
-
-/**
- * Constant-time string comparison (avoids leaking the secret via response-time
- * side channels). `timingSafeEqual` throws on mismatched lengths, so a length
- * mismatch is handled separately — but we still perform a dummy compare first
- * so the overall timing doesn't trivially reveal "wrong length" vs "wrong value".
- */
-function constantTimeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) {
-    // Compare bufB against itself so the call takes comparable time either way,
-    // then report the real (false) result.
-    timingSafeEqual(bufB, bufB);
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
-}
-
-/**
- * Requires `Authorization: Bearer <token>` matching the configured shared
- * secret (`TASTEBUDS_TOKEN`). This is the only gate in front of every /api
- * route — without it any caller who can reach the port can read/write any
- * profileId (IDOR) and trigger the paid `claude -p` subprocess via /generate.
- * Since this repo is also distributed publicly, a self-hosted deployment
- * exposed to a LAN/the internet must not be reachable without this token.
- */
-export function createAuthMiddleware(token: string): MiddlewareHandler {
-  return async (c: Context, next: Next) => {
-    const header = c.req.header('Authorization') ?? '';
-    const provided = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
-    if (!provided || !constantTimeEqual(provided, token)) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
-    return next();
-  };
-}
 
 interface RateLimiterOptions {
   /** Rolling window length in milliseconds. */

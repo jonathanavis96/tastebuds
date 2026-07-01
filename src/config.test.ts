@@ -10,7 +10,6 @@ describe('loadConfig', () => {
       TMDB_API_KEY: 'test-tmdb-key',
       OLLAMA_URL: 'http://localhost:11434',
       CLAUDE_CODE_OAUTH_TOKEN: 'test-claude-token',
-      TASTEBUDS_TOKEN: 'test-tastebuds-token',
       PORT: '8094',
       DB_PATH: './data/tastebuds.db',
     };
@@ -25,7 +24,6 @@ describe('loadConfig', () => {
     expect(config.tmdbApiKey).toBe('test-tmdb-key');
     expect(config.ollamaUrl).toBe('http://localhost:11434');
     expect(config.claudeToken).toBe('test-claude-token');
-    expect(config.tastebudsToken).toBe('test-tastebuds-token');
     expect(config.port).toBe(8094);
     expect(config.dbPath).toBe('./data/tastebuds.db');
   });
@@ -52,12 +50,6 @@ describe('loadConfig', () => {
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     expect(() => loadConfig()).toThrow(ConfigError);
     expect(() => loadConfig()).toThrow('CLAUDE_CODE_OAUTH_TOKEN');
-  });
-
-  it('throws ConfigError when TASTEBUDS_TOKEN missing', () => {
-    delete process.env.TASTEBUDS_TOKEN;
-    expect(() => loadConfig()).toThrow(ConfigError);
-    expect(() => loadConfig()).toThrow('TASTEBUDS_TOKEN');
   });
 
   it('omdbApiKey is undefined when OMDB_API_KEY not set', () => {

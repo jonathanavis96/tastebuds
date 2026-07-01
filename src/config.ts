@@ -5,13 +5,12 @@ export interface Config {
   ollamaUrl: string;
   claudeToken: string;
   /**
-   * Shared-secret bearer token required (as `Authorization: Bearer <token>`) on
-   * every /api/* route. Without this, any caller who can reach the port can read
-   * or mutate any profileId (IDOR) and trigger the paid `claude -p` subprocess
-   * behind /generate. Required — set via TASTEBUDS_TOKEN env var. Generate one
-   * with e.g. `openssl rand -hex 32`.
+   * Unused — TasteBuds is a single-user LAN/Tailscale-only tool (no public
+   * internet exposure), so there is no bearer-token gate on the API. Kept as
+   * an optional field for backwards compatibility with existing .env files
+   * that still set TASTEBUDS_TOKEN; harmless if present, not required.
    */
-  tastebudsToken: string;
+  tastebudsToken?: string;
   port: number;
   dbPath: string;
   omdbApiKey: string | undefined;
@@ -89,9 +88,6 @@ export function loadConfig(): Config {
   }
 
   const tastebudsToken = process.env.TASTEBUDS_TOKEN;
-  if (!tastebudsToken) {
-    throw new ConfigError('Missing required env var: TASTEBUDS_TOKEN');
-  }
 
   return {
     tmdbApiKey,

@@ -37,7 +37,6 @@ const tinyBudgetConfig: Config = {
   tmdbApiKey: 'test-key',
   ollamaUrl: 'http://localhost:11434',
   claudeToken: 'test-token',
-  tastebudsToken: 'test-tastebuds-token',
   port: 8094,
   dbPath: ':memory:',
   omdbApiKey: undefined,

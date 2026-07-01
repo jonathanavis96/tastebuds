@@ -15,19 +15,15 @@ import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
-import { createAuthMiddleware, createRateLimiter } from './auth.js';
+import { createRateLimiter } from './auth.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
 
-  // Auth gate — every /api/* route requires the shared-secret bearer token.
-  // Without this, profileId is enumerable and /generate (which spawns a paid
-  // `claude -p` subprocess) is callable by anyone who can reach the port.
-  api.use('*', createAuthMiddleware(config.tastebudsToken));
-
-  // Rate limiting (defense against cost/DoS once past the auth gate — a leaked
-  // or brute-forced token, or a misbehaving authorised client, still shouldn't
-  // be able to hammer the DB or spawn unlimited `claude -p` processes).
+  // Rate limiting — this is a single-user LAN/Tailscale-only tool (no public
+  // internet exposure, no per-caller auth token), but /generate spawns a paid
+  // `claude -p` subprocess per call, so a runaway/misbehaving client still
+  // shouldn't be able to hammer the DB or rack up unlimited API cost.
   // General cap on all mutating (non-GET) endpoints.
   const mutationLimiter = createRateLimiter({ windowMs: 60_000, max: 30, keyPrefix: 'mutate' });
   api.use('*', async (c, next) => {

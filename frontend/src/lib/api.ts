@@ -1,34 +1,9 @@
 import type { Profile, Recommendation, WatchEvent } from './types.js';
-import { authHeaders, clearToken, promptForToken } from './authToken.js';
 
 const BASE = '/api';
 
-/**
- * fetch() wrapper that attaches the shared-secret bearer token (see
- * authToken.ts) to every /api request. On a 401 (missing/stale/wrong token)
- * it clears the bad token, prompts once for a fresh one, and retries —
- * so a first-time visitor (or a rotated token) gets a single prompt instead
- * of every call silently failing.
- */
-async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const withAuth = (extra?: HeadersInit): RequestInit => ({
-    ...init,
-    headers: { ...(init.headers ?? {}), ...(extra ?? authHeaders()) },
-  });
-
-  let res = await fetch(`${BASE}${path}`, withAuth());
-  if (res.status === 401) {
-    clearToken();
-    const token = promptForToken();
-    if (token) {
-      res = await fetch(`${BASE}${path}`, withAuth({ Authorization: `Bearer ${token}` }));
-    }
-  }
-  return res;
-}
-
 export async function getProfiles(): Promise<Profile[]> {
-  const res = await apiFetch('/profiles');
+  const res = await fetch(`${BASE}/profiles`);
   if (!res.ok) throw new Error(`getProfiles failed: ${res.status}`);
   return res.json();
 }
@@ -36,7 +11,7 @@ export async function getProfiles(): Promise<Profile[]> {
 export interface CatalogueStats { total: number; movie: number; tv: number; }
 
 export async function getStats(): Promise<CatalogueStats> {
-  const res = await apiFetch('/stats');
+  const res = await fetch(`${BASE}/stats`);
   if (!res.ok) throw new Error(`getStats failed: ${res.status}`);
   return res.json();
 }
@@ -48,13 +23,13 @@ export interface Calibration {
 }
 
 export async function getCalibration(profileId: number): Promise<Calibration> {
-  const res = await apiFetch(`/calibration/${profileId}`);
+  const res = await fetch(`${BASE}/calibration/${profileId}`);
   if (!res.ok) throw new Error(`getCalibration failed: ${res.status}`);
   return res.json();
 }
 
 export async function getRecommendations(profileId: number): Promise<Recommendation[]> {
-  const res = await apiFetch(`/recommendations/${profileId}`);
+  const res = await fetch(`${BASE}/recommendations/${profileId}`);
   if (!res.ok) throw new Error(`getRecommendations failed: ${res.status}`);
   return res.json();
 }
@@ -66,7 +41,7 @@ export async function generateRecommendations(opts: {
   request?: string;
   surprise?: boolean;
 }): Promise<Recommendation[]> {
-  const res = await apiFetch('/generate', {
+  const res = await fetch(`${BASE}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts),
@@ -76,7 +51,7 @@ export async function generateRecommendations(opts: {
 }
 
 export async function rateTitle(profileId: number, titleId: number, rating: number, note?: string): Promise<void> {
-  const res = await apiFetch('/rate', {
+  const res = await fetch(`${BASE}/rate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, titleId, rating, note }),
@@ -85,7 +60,7 @@ export async function rateTitle(profileId: number, titleId: number, rating: numb
 }
 
 export async function saveNote(profileId: number, titleId: number, note: string): Promise<void> {
-  const res = await apiFetch('/note', {
+  const res = await fetch(`${BASE}/note`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, titleId, note: note || null }),
@@ -94,7 +69,7 @@ export async function saveNote(profileId: number, titleId: number, note: string)
 }
 
 export async function addToWatchlist(profileId: number, titleId: number): Promise<void> {
-  const res = await apiFetch('/watchlist', {
+  const res = await fetch(`${BASE}/watchlist`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, titleId }),
@@ -103,7 +78,7 @@ export async function addToWatchlist(profileId: number, titleId: number): Promis
 }
 
 export async function markWatched(profileId: number, titleId: number, rating?: number): Promise<void> {
-  const res = await apiFetch('/mark-watched', {
+  const res = await fetch(`${BASE}/mark-watched`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, titleId, rating }),
@@ -112,7 +87,7 @@ export async function markWatched(profileId: number, titleId: number, rating?: n
 }
 
 export async function dismissRecommendation(profileId: number, recommendationId: number): Promise<void> {
-  const res = await apiFetch('/dismiss', {
+  const res = await fetch(`${BASE}/dismiss`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, recommendationId }),
@@ -121,7 +96,7 @@ export async function dismissRecommendation(profileId: number, recommendationId:
 }
 
 export async function undismissRecommendation(profileId: number, recommendationId: number): Promise<void> {
-  const res = await apiFetch('/undismiss', {
+  const res = await fetch(`${BASE}/undismiss`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, recommendationId }),
@@ -130,7 +105,7 @@ export async function undismissRecommendation(profileId: number, recommendationI
 }
 
 export async function removeWatch(profileId: number, titleId: number): Promise<void> {
-  const res = await apiFetch('/remove-watch', {
+  const res = await fetch(`${BASE}/remove-watch`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profileId, titleId }),
@@ -139,13 +114,13 @@ export async function removeWatch(profileId: number, titleId: number): Promise<v
 }
 
 export async function getWatched(profileId: number): Promise<WatchEvent[]> {
-  const res = await apiFetch(`/watched/${profileId}`);
+  const res = await fetch(`${BASE}/watched/${profileId}`);
   if (!res.ok) throw new Error(`getWatched failed: ${res.status}`);
   return res.json();
 }
 
 export async function getWatchlist(profileId: number): Promise<WatchEvent[]> {
-  const res = await apiFetch(`/watchlist/${profileId}`);
+  const res = await fetch(`${BASE}/watchlist/${profileId}`);
   if (!res.ok) throw new Error(`getWatchlist failed: ${res.status}`);
   return res.json();
 }
@@ -158,7 +133,7 @@ export async function updateProfileConfig(
   profileId: number,
   patch: { rating_threshold?: number | null },
 ): Promise<void> {
-  const res = await apiFetch(`/profile-config/${profileId}`, {
+  const res = await fetch(`${BASE}/profile-config/${profileId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
