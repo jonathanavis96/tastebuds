@@ -282,24 +282,34 @@ export function createApiRoutes(db: Database, config: Config): Hono {
           const t = getTitleById(db, rec.title_id);
           if (!t) continue;
 
-          // OMDb: authority for both imdb and rt ratings; fetch when either is missing
-          let omdbRt: string | null = null;
-          if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
-            const ratings = await getOmdbRatings(t.imdb_id, config);
-            omdbRt = ratings.rottenTomatoes;
-            updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
-          }
+          // Whole-block gate on rating_checked_at (mirrors backfillRatings.ts's SELECT
+          // filter): once this title has been through an OMDb check pass, don't re-run
+          // OMDb *or* RT resolution for it forever just because ratings came back empty.
+          // Pending recs accumulate across many /generate calls (nothing ever clears
+          // them — see clearPendingRecommendations, which is unused), so without this
+          // guard an OMDb-absent title sitting in Picks would burn a fresh OMDb call
+          // AND a fresh RT scrape on every single /generate, draining the OMDb free-tier
+          // quota reserved for genuinely new titles and hammering RT for no benefit.
+          if (t.rating_checked_at == null) {
+            // OMDb: authority for both imdb and rt ratings; fetch when either is missing
+            let omdbRt: string | null = null;
+            if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
+              const ratings = await getOmdbRatings(t.imdb_id, config);
+              omdbRt = ratings.rottenTomatoes;
+              updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
+            }
 
-          // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
-          if (!t.rt_url && omdbRt == null) {
-            const result = await resolveRtUrl(t.title, t.year, t.media_type);
-            // Only persist rt_url when the result is verified. Storing an unverified
-            // search URL would block future re-resolution (the !t.rt_url guard above).
-            if (result?.verified) {
-              updateTitleRtUrl(db, t.id, result.url);
-              // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
-              if (result.score) {
-                updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+            // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
+            if (!t.rt_url && omdbRt == null) {
+              const result = await resolveRtUrl(t.title, t.year, t.media_type);
+              // Only persist rt_url when the result is verified. Storing an unverified
+              // search URL would block future re-resolution (the !t.rt_url guard above).
+              if (result?.verified) {
+                updateTitleRtUrl(db, t.id, result.url);
+                // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
+                if (result.score) {
+                  updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+                }
               }
             }
           }

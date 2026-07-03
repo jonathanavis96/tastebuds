@@ -8,11 +8,13 @@ import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { curateCandidates } from '../curation/curate.js';
+import { getOmdbRatings } from '../omdb/client.js';
 
 // Module-level mocks: only affect tests that exercise /generate.
 // All other route tests do not call these modules so they are unaffected.
 vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
+vi.mock('../omdb/client.js', () => ({ getOmdbRatings: vi.fn() }));
 
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
@@ -345,5 +347,72 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
 
     const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
     expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/test_film');
+  });
+});
+
+// ─── POST /generate — rating_checked_at gates re-enrichment ─────────────────
+// Regression test: pending recs are never cleared (clearPendingRecommendations
+// is unused), so the same title can sit in Picks across many /generate calls.
+// Once OMDb has been queried once for a title (rating_checked_at stamped), the
+// enrichment loop must not re-query OMDb or re-scrape RT for it forever just
+// because the ratings came back empty — that would drain the OMDb free-tier
+// quota reserved for genuinely new titles on every single /generate call.
+
+describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () => {
+  const omdbConfig: Config = { ...mockConfig, omdbApiKey: 'test-omdb-key' };
+
+  beforeEach(() => {
+    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('does not call OMDb or resolveRtUrl for a title already checked (rating_checked_at set) with no ratings', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id, rating_checked_at)
+      VALUES (990, 'movie', 'Already Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9990000', 1700000000)`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, omdbConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+    expect(res.status).toBe(200);
+
+    expect(getOmdbRatings).not.toHaveBeenCalled();
+    expect(resolveRtUrl).not.toHaveBeenCalled();
+  });
+
+  it('calls OMDb once for a title never checked before (rating_checked_at null), then stamps it', async () => {
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockResolvedValue(null);
+
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id)
+      VALUES (991, 'movie', 'Never Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9910000')`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, omdbConfig);
+    const app = new Hono().route('/api', api);
+
+    await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+
+    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
+    const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row.rating_checked_at).not.toBeNull();
   });
 });
