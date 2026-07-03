@@ -9,7 +9,6 @@ import { openDb } from '../db/open.js';
 import { config as dotenvConfig } from 'dotenv';
 import { getAllProfiles } from '../db/repos/profiles.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
-import { getWatchEvents } from '../db/repos/watchEvents.js';
 import { upsertTitle, getTitleByTmdbId } from '../db/repos/titles.js';
 import { getUsage, bumpHarvestAdded, today } from '../db/repos/apiUsage.js';
 import { claimPage } from '../db/repos/harvestCursor.js';
@@ -278,19 +277,15 @@ export async function runHarvest(
   // If a tmdb_id appears in any watch_event for a profile, skip ALL media_type
   // variants — in practice TMDB IDs don't overlap between movies and TV, so this
   // is safe and makes the skip logic clean.
+  // One JOIN query per profile instead of one query per watch_event (was N+1 —
+  // harmless at today's per-profile event counts, but needless as history grows).
+  const watchedTmdbIdsStmt = db.prepare(
+    'SELECT t.tmdb_id AS tmdb_id FROM watch_events we JOIN titles t ON t.id = we.title_id WHERE we.profile_id = ?',
+  );
   const watchedTmdbIds = new Map<number, Set<number>>();
   for (const profile of nonDerivedProfiles) {
-    const events = getWatchEvents(db, profile.id);
-    const profileWatched = new Set<number>();
-    for (const ev of events) {
-      const titleRow = db
-        .prepare('SELECT tmdb_id FROM titles WHERE id = ?')
-        .get(ev.title_id) as { tmdb_id: number } | undefined;
-      if (titleRow) {
-        profileWatched.add(titleRow.tmdb_id);
-      }
-    }
-    watchedTmdbIds.set(profile.id, profileWatched);
+    const rows = watchedTmdbIdsStmt.all(profile.id) as Array<{ tmdb_id: number }>;
+    watchedTmdbIds.set(profile.id, new Set(rows.map((r) => r.tmdb_id)));
   }
 
   for (const [, { tmdbId, mediaType }] of toHarvest.entries()) {
