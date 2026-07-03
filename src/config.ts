@@ -12,6 +12,23 @@ export interface Config {
    */
   tastebudsToken?: string;
   port: number;
+  /**
+   * Hostname the Node HTTP server itself binds to. Defaults to '0.0.0.0' (all
+   * interfaces) — required inside Docker for docker-compose's port publishing
+   * to reach the container at all (BIND_HOST in .env/docker-compose.yml controls
+   * the HOST-side interface for that case, not this).
+   *
+   * For a BARE NODE deploy (no Docker), BIND_HOST is not consulted anywhere —
+   * this is the only knob that controls what the process listens on, and the
+   * '0.0.0.0' default means it listens on every interface on the host,
+   * including any public one, with no auth in front of it. Set HOST=127.0.0.1
+   * in .env for a bare-Node, this-machine-only deploy.
+   *
+   * Optional (with a `??` fallback at the one call site in server.ts) so
+   * hand-built Config literals in tests don't all need updating — mirrors the
+   * pattern used for harvestPagesPerBucket/harvestGenresPerRun/harvestCron below.
+   */
+  bindHost?: string;
   dbPath: string;
   omdbApiKey: string | undefined;
   /**
@@ -95,6 +112,7 @@ export function loadConfig(): Config {
     claudeToken,
     tastebudsToken,
     port: process.env.PORT ? parseInt(process.env.PORT, 10) : 8094,
+    bindHost: process.env.HOST ?? '0.0.0.0',
     dbPath: process.env.DB_PATH ?? './data/tastebuds.db',
     omdbApiKey: process.env.OMDB_API_KEY,
     harvestDailyTarget: process.env.HARVEST_DAILY_TARGET

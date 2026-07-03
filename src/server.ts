@@ -19,6 +19,7 @@ app.route('/api', createApiRoutes(db, config));
 app.use('/*', serveStatic({ root: './dist/frontend' }));
 app.get('*', serveStatic({ path: './dist/frontend/index.html' }));
 
-serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
-  console.log(`TasteBuds running on http://0.0.0.0:${info.port}`);
+const bindHost = config.bindHost ?? '0.0.0.0';
+serve({ fetch: app.fetch, port: config.port, hostname: bindHost }, (info) => {
+  console.log(`TasteBuds running on http://${bindHost}:${info.port}`);
 });

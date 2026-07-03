@@ -230,7 +230,8 @@ just ignore the profiles you don't use.
 | `OMDB_API_KEY` | — | — | IMDb/RT ratings |
 | `PORT` | — | `8094` | HTTP port |
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
-| `BIND_HOST` | — | `127.0.0.1` | Host bind address for docker-compose's port mapping — see **Security** below |
+| `BIND_HOST` | — | `127.0.0.1` | **Docker only** — host bind address for docker-compose's port mapping — see **Security** below |
+| `HOST` | — | `0.0.0.0` | **Bare Node only** — hostname the server process itself binds to (no effect inside Docker; `BIND_HOST` covers that path) — see **Security** below |
 
 ---
 
@@ -248,6 +249,13 @@ only from your own LAN/Tailscale network, never the public internet.**
   (e.g. `192.168.x.x`) for plain local-network access.
 - **Never set `BIND_HOST=0.0.0.0`** — that binds every interface, including any
   public one, with no auth in front of it at all.
+
+**Running bare Node instead of Docker?** `BIND_HOST` above has no effect on that
+path — it's consumed by docker-compose, not the app. The bare-Node server binds
+to the `HOST` env var instead (defaults to `0.0.0.0` — every interface, same
+public-exposure risk as above). If you're running `node dist/server/server.js`
+directly on a machine with a public or shared-LAN interface and only want it
+reachable from that machine, set `HOST=127.0.0.1` in `.env`.
 
 There is no per-request auth token: `profileId` enumeration and the `/generate`
 endpoint are only a concern if the app is reachable by untrusted callers, which
