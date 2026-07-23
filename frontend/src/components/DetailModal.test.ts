@@ -117,4 +117,56 @@ describe('DetailModal dismiss-reason tiles', () => {
     await fireEvent.click(getByText('Not interested'));
     expect(queryByText('Not my genre')).toBeNull();
   });
+
+  it('disables the reason tiles while the dismiss request is still in flight', async () => {
+    let resolveDismiss!: () => void;
+    const dismissPromise = new Promise<void>((resolve) => { resolveDismiss = resolve; });
+    const onDismiss = vi.fn(() => dismissPromise);
+    const { getByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss,
+      onUndismiss: () => {},
+      onDismissReason: () => {},
+    });
+
+    await fireEvent.click(getByText('Not interested'));
+    const tile = getByText('Not my genre') as HTMLButtonElement;
+    expect(tile.disabled).toBe(true);
+
+    resolveDismiss();
+    await dismissPromise;
+    await Promise.resolve(); // flush the component's .finally()
+
+    expect(tile.disabled).toBe(false);
+  });
+
+  it('waits for an in-flight dismiss to resolve before firing the reason request (no race)', async () => {
+    let resolveDismiss!: () => void;
+    const dismissPromise = new Promise<void>((resolve) => { resolveDismiss = resolve; });
+    const onDismiss = vi.fn(() => dismissPromise);
+    const onDismissReason = vi.fn();
+    const { getByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss,
+      onUndismiss: () => {},
+      onDismissReason,
+    });
+
+    await fireEvent.click(getByText('Not interested')); // dismiss is now in flight
+    // The tile is disabled while in flight (asserted above), so a real tap can't
+    // fire yet — but even if one slipped through, doDismissReason itself must
+    // still chain after the dismiss rather than racing it.
+    const tile = getByText('Not my genre') as HTMLButtonElement;
+    expect(tile.disabled).toBe(true);
+    expect(onDismissReason).not.toHaveBeenCalled();
+
+    resolveDismiss();
+    await dismissPromise;
+    await Promise.resolve();
+    expect(tile.disabled).toBe(false);
+
+    await fireEvent.click(tile);
+    expect(onDismissReason).toHaveBeenCalledTimes(1);
+    expect(onDismissReason.mock.calls[0][1]).toBe('not_my_genre');
+  });
 });
