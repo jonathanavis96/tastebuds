@@ -67,3 +67,54 @@ describe('DetailModal "Not interested" — immediate commit + undo', () => {
     expect(getByText('Not interested')).toBeTruthy();
   });
 });
+
+describe('DetailModal dismiss-reason tiles', () => {
+  it('does not show reason tiles before a dismiss', () => {
+    const { queryByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onDismissReason: () => {},
+    });
+    expect(queryByText('Not my genre')).toBeNull();
+  });
+
+  it('shows the 5 reason tiles after dismissing, and tapping one fires onDismissReason', async () => {
+    const onDismissReason = vi.fn();
+    const { getByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onUndismiss: () => {},
+      onDismissReason,
+    });
+    await fireEvent.click(getByText('Not interested'));
+    for (const label of ['Not my genre', 'Too dark/violent', 'Seen enough like it', 'Cast/vibe', 'Not in the mood']) {
+      expect(getByText(label)).toBeTruthy();
+    }
+    await fireEvent.click(getByText('Too dark/violent'));
+    expect(onDismissReason).toHaveBeenCalledTimes(1);
+    expect(onDismissReason.mock.calls[0][0]).toMatchObject({ title_id: 1 });
+    expect(onDismissReason.mock.calls[0][1]).toBe('too_dark');
+  });
+
+  it('hides the reason tiles again after undoing the dismiss', async () => {
+    const { getByText, queryByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onUndismiss: () => {},
+      onDismissReason: () => {},
+    });
+    await fireEvent.click(getByText('Not interested'));                  // commit
+    await fireEvent.click(getByText('✗ Not interested — tap to undo'));  // undo
+    expect(queryByText('Not my genre')).toBeNull();
+  });
+
+  it('does not render the reason tiles when onDismissReason is not provided', async () => {
+    const { getByText, queryByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onUndismiss: () => {},
+    });
+    await fireEvent.click(getByText('Not interested'));
+    expect(queryByText('Not my genre')).toBeNull();
+  });
+});

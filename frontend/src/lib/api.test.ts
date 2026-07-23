@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig } from './api.js';
+import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig, dismissReason } from './api.js';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -52,6 +52,22 @@ describe('addToWatchlist', () => {
       method: 'POST',
       body: JSON.stringify({ profileId: 2, titleId: 99 }),
     }));
+  });
+});
+
+describe('dismissReason', () => {
+  it('POSTs to /api/dismiss-reason with correct body', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }));
+    await dismissReason(1, 42, 'not_my_genre');
+    expect(fetch).toHaveBeenCalledWith('/api/dismiss-reason', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ profileId: 1, recommendationId: 42, reason: 'not_my_genre' }),
+    }));
+  });
+
+  it('throws on non-200 response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 500 }));
+    await expect(dismissReason(1, 42, 'not_my_genre')).rejects.toThrow('dismiss-reason failed: 500');
   });
 });
 

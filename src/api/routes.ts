@@ -5,7 +5,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
-import { getRecommendations, updateRecommendationState, getCalibration } from '../db/repos/recommendations.js';
+import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
@@ -15,6 +15,7 @@ import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
+import { applyDismissReasonToPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
@@ -395,6 +396,29 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     updateRecommendationState(db, body.recommendationId, 'dismissed');
     // "Not interested" is a mild negative signal — fold it into the taste vector.
     await refreshTasteVector(db, body.profileId, config);
+    return c.json({ ok: true });
+  });
+
+  // Optional follow-up to /dismiss: the user tapped a "why" reason tile. Stores
+  // the chosen reason on the rec row and — for the tiles that map to a durable
+  // taste signal (not_my_genre / seen_enough → hated_genres, too_dark →
+  // hated_themes) — merges it into the profile's prefs so future retrieval
+  // steers away from it (Phase-1.5 step 3). cast_vibe / not_in_mood store the
+  // reason but write back nothing (see applyDismissReasonToPrefs).
+  const dismissReasonKeys = new Set(DISMISS_REASON_TILES.map(t => t.key));
+  api.post('/dismiss-reason', async (c) => {
+    const body = await c.req.json<{ profileId: number; recommendationId: number; reason: DismissReason }>();
+    if (!body.profileId || !body.recommendationId || !dismissReasonKeys.has(body.reason)) {
+      return c.json({ error: 'profileId, recommendationId and a valid reason are required' }, 400);
+    }
+    const rec = getRecommendationById(db, body.recommendationId);
+    if (!rec) return c.json({ error: 'recommendation not found' }, 404);
+    setDismissReason(db, body.recommendationId, body.reason);
+    try {
+      applyDismissReasonToPrefs(db, body.profileId, rec.title_id, body.reason);
+    } catch {
+      // non-fatal — affinity persistence must not break the dismiss flow
+    }
     return c.json({ ok: true });
   });
 

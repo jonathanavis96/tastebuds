@@ -7,10 +7,10 @@
   import WatchedHistory from './components/WatchedHistory.svelte';
   import DetailModal from './components/DetailModal.svelte';
   import CategoryLegend from './components/CategoryLegend.svelte';
-  import type { Profile, Recommendation, WatchEvent, MediaFilter } from './lib/types.js';
+  import type { Profile, Recommendation, WatchEvent, MediaFilter, DismissReason } from './lib/types.js';
   import {
     getProfiles, getRecommendations, generateRecommendations,
-    rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation,
+    rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation, dismissReason,
     removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
     getCalibration, type Calibration, updateProfileConfig,
   } from './lib/api.js';
@@ -226,6 +226,15 @@
     if (recId == null || dismissedRecIds.includes(recId)) return;
     dismissedRecIds = [...dismissedRecIds, recId];
     await dismissRecommendation(activeProfileId, recId);
+  }
+
+  // "Why" reason tile tapped after a dismiss (Phase-1.5 step 3 write-back).
+  // Optional and fire-and-forget — never blocks or reverses the dismiss itself.
+  async function modalDismissReason(item: Recommendation | WatchEvent, reason: DismissReason) {
+    if (!activeProfileId) return;
+    const recId = (item as Recommendation).id;
+    if (recId == null) return;
+    await dismissReason(activeProfileId, recId, reason);
   }
 
   // Undo "Not interested": restore the rec to pending on the server and un-mark it.
@@ -503,6 +512,7 @@
     dismissed={modalItemDismissed}
     onDismiss={modalContext === 'recs' ? modalDismiss : undefined}
     onUndismiss={modalContext === 'recs' ? modalUndismiss : undefined}
+    onDismissReason={modalContext === 'recs' ? modalDismissReason : undefined}
   />
 {/if}
 

@@ -234,6 +234,54 @@ describe('POST /api/dismiss', () => {
   });
 });
 
+describe('POST /api/dismiss-reason', () => {
+  it('stores the reason on the rec and writes back to hated_genres for not_my_genre', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (997, 'movie', 'Horror Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(200);
+
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBe('not_my_genre');
+
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sig.prefs).hated_genres).toEqual(['Horror']);
+  });
+
+  it('rejects an unrecognised reason', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (996, 'movie', 'Some Flick', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'bogus' }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /api/undismiss', () => {
   it('restores a dismissed recommendation to pending', async () => {
     const db = setupDb();

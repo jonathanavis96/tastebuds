@@ -57,5 +57,6 @@ export interface RecommendationRow {
   state: 'pending' | 'shown' | 'dismissed';
   kind: 'core' | 'wildcard' | 'adversarial'; // defaults to 'core' via DB column default
   predicted_rating: number | null; // Sonnet's predicted star rating (1–5) for this pick
+  dismiss_reason: string | null; // tile key chosen on dismiss (see DismissReason), null if none/not dismissed
   created_at: string;
 }

@@ -2,7 +2,7 @@
   import { onDestroy, untrack } from 'svelte';
   import RatingBar from './RatingBar.svelte';
   import { kindMeta, parseList, CATEGORY_BLURBS } from '../lib/categories.js';
-  import type { RecKind } from '../lib/types.js';
+  import { DISMISS_REASON_TILES, type RecKind, type DismissReason } from '../lib/types.js';
 
   interface DetailItem {
     title_id: number;
@@ -47,13 +47,15 @@
     /** Mark / un-mark "Not interested". Both commit immediately in the parent. */
     onDismiss?: (item: DetailItem) => void;
     onUndismiss?: (item: DetailItem) => void;
+    /** Optional "why" reason tile tapped after dismissing (Phase-1.5 step 3 write-back). */
+    onDismissReason?: (item: DetailItem, reason: DismissReason) => void | Promise<void>;
   }
 
   let {
     item, onClose, position, onPrev, onNext,
     inWatchlist = false, watched = false,
     onRate, onWatchlist, onRemoveWatchlist, onMarkWatched, onUnwatch, onSaveNote,
-    dismissed = false, onDismiss, onUndismiss,
+    dismissed = false, onDismiss, onUndismiss, onDismissReason,
   }: Props = $props();
 
   const meta = $derived(item.kind ? kindMeta(item) : null);
@@ -77,6 +79,9 @@
   // Optimistic local copy of the parent's "Not interested" flag for THIS title, so
   // the button flips instantly on tap; reconciled from the prop on every nav.
   let isDismissed = $state(false);
+  // Which "why" reason tile (if any) was tapped for the currently-armed dismiss.
+  // Local-only (no dismiss_reason prop comes back down) — resets on nav/undo.
+  let chosenReason = $state<DismissReason | null>(null);
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -102,6 +107,7 @@
       noteSaved = false;
       zoomed = false;
       isDismissed = dismissed; // reconcile the armed state from the parent for this title
+      chosenReason = null; // reason tiles are local-only, always start fresh per title/nav
     });
   });
 
@@ -205,8 +211,14 @@
   // tap. Tapping again genuinely undoes it (restores to pending). The modal stays open.
   function doDismiss() {
     const target = item;
-    if (isDismissed) { isDismissed = false; onUndismiss?.(target); }
+    if (isDismissed) { isDismissed = false; chosenReason = null; onUndismiss?.(target); }
     else { isDismissed = true; onDismiss?.(target); }
+  }
+  // Tapping a "why" tile after dismissing persists the reason (Phase-1.5 step 3).
+  // Optional and re-selectable — never blocks or reverses the dismiss itself.
+  function doDismissReason(reason: DismissReason) {
+    chosenReason = reason;
+    void onDismissReason?.(item, reason);
   }
 </script>
 
@@ -325,6 +337,24 @@
                 </button>
               {/if}
             </div>
+
+            {#if onDismissReason && isDismissed}
+              <div class="reason-block">
+                <span class="reason-label">Why? <span class="reason-hint">(optional — helps pick better)</span></span>
+                <div class="reason-tiles">
+                  {#each DISMISS_REASON_TILES as tile (tile.key)}
+                    <button
+                      type="button"
+                      class="reason-tile"
+                      class:chosen={chosenReason === tile.key}
+                      onclick={() => doDismissReason(tile.key)}
+                    >
+                      {tile.label}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
 
             {#if onSaveNote && (seen || inList)}
               <div class="note-block">
@@ -470,6 +500,18 @@
   .act.dismiss:hover { background: #2a1620; border-color: #e94560; color: #e94560; }
   /* Armed: solid red during the grace window — still tappable to undo. */
   .act.dismiss.dismissing, .act.dismiss.dismissing:hover { background: #e94560; border-color: #e94560; color: #fff; cursor: pointer; opacity: 1; }
+
+  .reason-block { margin-top: 0.7rem; }
+  .reason-label { display: block; font-size: 0.78rem; color: #b9b9d0; margin-bottom: 0.4rem; }
+  .reason-hint { color: #7a7a98; font-weight: 400; }
+  .reason-tiles { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .reason-tile {
+    padding: 0.4rem 0.7rem; border-radius: 20px; border: 1px solid #3a3a5a;
+    background: #1c1c38; color: #b9b9d0; font-size: 0.78rem; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .reason-tile:hover { border-color: #5a5a7a; color: #ddd; }
+  .reason-tile.chosen { background: #e94560; border-color: #e94560; color: #fff; }
 
   /* scroll-margin keeps the field clear of the sheet edge when scrolled into view
      above the mobile keyboard; padding-bottom gives the last element breathing room. */
