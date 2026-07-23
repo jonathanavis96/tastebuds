@@ -82,6 +82,7 @@ export const CREATE_RECOMMENDATIONS = `
     state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'shown', 'dismissed')),
     kind         TEXT NOT NULL DEFAULT 'core',
     predicted_rating REAL,
+    dismiss_reason TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `;
@@ -151,6 +152,16 @@ export const MIGRATE_010_ADD_POPULARITY = [
 // regardless of whether OMDb returned data.
 export const MIGRATE_011_ADD_RATING_CHECKED_AT = [
   `ALTER TABLE titles ADD COLUMN rating_checked_at INTEGER`,
+];
+
+// Migration 012: dismiss reason tiles. Stores which reason
+// tile the user tapped when dismissing a rec ("not_my_genre" / "too_dark" /
+// "seen_enough" / "cast_vibe" / "not_in_mood") so the choice is auditable
+// alongside the rec row. Nullable — most historical/dismissed-without-reason
+// rows have none, and picking a reason is optional (dismiss itself already
+// commits without one).
+export const MIGRATE_012_ADD_DISMISS_REASON = [
+  `ALTER TABLE recommendations ADD COLUMN dismiss_reason TEXT`,
 ];
 
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).

@@ -68,4 +68,16 @@ describe('loadConfig', () => {
     delete process.env.OMDB_API_KEY;
     expect(() => loadConfig()).not.toThrow();
   });
+
+  it('defaults bindHost to 0.0.0.0 when HOST not set (required for Docker port publishing)', () => {
+    delete process.env.HOST;
+    const config = loadConfig();
+    expect(config.bindHost).toBe('0.0.0.0');
+  });
+
+  it('uses HOST for bindHost when set (bare-Node local-only opt-in)', () => {
+    process.env.HOST = '127.0.0.1';
+    const config = loadConfig();
+    expect(config.bindHost).toBe('127.0.0.1');
+  });
 });

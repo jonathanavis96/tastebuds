@@ -8,11 +8,13 @@ import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { curateCandidates } from '../curation/curate.js';
+import { getOmdbRatings } from '../omdb/client.js';
 
 // Module-level mocks: only affect tests that exercise /generate.
 // All other route tests do not call these modules so they are unaffected.
 vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
+vi.mock('../omdb/client.js', () => ({ getOmdbRatings: vi.fn() }));
 
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
@@ -42,6 +44,34 @@ describe('GET /api/profiles', () => {
     expect(res.status).toBe(200);
     const body = await res.json() as Array<{name: string}>;
     expect(body.map(p => p.name)).toEqual(expect.arrayContaining(['Alex', 'Sam', 'Joint']));
+  });
+});
+
+describe('rate limiting', () => {
+  it('returns 429 after exceeding the /generate limit, but leaves other endpoints unaffected', async () => {
+    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
+    const db = setupDb();
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const generateOnce = () => app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const res = await generateOnce();
+      statuses.push(res.status);
+    }
+    // The 6th call in the window should be throttled.
+    expect(statuses.at(-1)).toBe(429);
+    expect(statuses.slice(0, 5).every(s => s === 200)).toBe(true);
+
+    // A GET (not rate-limited) still works fine while /generate is throttled.
+    const profilesRes = await app.request('/api/profiles');
+    expect(profilesRes.status).toBe(200);
   });
 });
 
@@ -204,7 +234,223 @@ describe('POST /api/dismiss', () => {
   });
 });
 
+describe('POST /api/dismiss-reason', () => {
+  it('stores the reason on the rec and writes back to hated_genres for not_my_genre', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (997, 'movie', 'Horror Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(200);
+
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBe('not_my_genre');
+
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sig.prefs).hated_genres).toEqual(['Horror']);
+  });
+
+  it('switching tiles reverses the old reason\'s write-back before applying the new one', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (992, 'movie', 'Switch Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+    const pick = (reason: string) => app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason }),
+    });
+
+    // First tile: not_my_genre → hated_genres gets Horror.
+    expect((await pick('not_my_genre')).status).toBe(200);
+    let sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual(['Horror']);
+    expect(sig.hated_themes ?? []).toEqual([]);
+
+    // Switch to too_dark → the earlier hated_genres addition must be reversed,
+    // not left stacked alongside the new hated_themes entry.
+    expect((await pick('too_dark')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual(['dark/violent']);
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBe('too_dark');
+
+    // Switch to a no-write-back reason (cast_vibe) → the hated_themes entry
+    // from too_dark must also be reversed, leaving nothing behind.
+    expect((await pick('cast_vibe')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual([]);
+
+    // Re-selecting the SAME tile again is a harmless no-op — no duplication.
+    expect((await pick('cast_vibe')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual([]);
+  });
+
+  it('rejects a reason for a recommendation owned by a different profile (IDOR)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (991, 'movie', 'Owned By Alex', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
+    // Owned by profile 1 (Alex).
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Posted as profile 2 (Sam) — must be rejected, not applied to either profile's prefs.
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 2, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(404);
+
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBeNull();
+    const sigAlex = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(sigAlex).toBeUndefined();
+    const sigSam = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=2').get() as any;
+    expect(sigSam).toBeUndefined();
+  });
+
+  it('rejects a reason for a recommendation that is not dismissed (still pending)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (995, 'movie', 'Pending Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=995').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'pending', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(409);
+
+    // No write-back happened for the never-dismissed rec.
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(sig).toBeUndefined();
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBeNull();
+  });
+
+  it('rejects an unrecognised reason', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (996, 'movie', 'Some Flick', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'bogus' }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe('POST /api/undismiss', () => {
+  it('rejects undismissing a recommendation owned by a different profile (IDOR)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (990, 'movie', 'Owned By Alex Undismiss', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
+    // Owned by profile 1 (Alex), already dismissed with a reason.
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, dismiss_reason, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', 'not_my_genre', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+    db.prepare(`INSERT INTO taste_signatures (profile_id, prefs, refreshed_at) VALUES (1, ?, datetime('now'))`)
+      .run(JSON.stringify({ hated_genres: ['Horror'] }));
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Posted as profile 2 (Sam) — must be rejected: rec stays dismissed, its
+    // reason stays intact, and Alex's hated_genres is not reversed by Sam's call.
+    const res = await app.request('/api/undismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 2, recommendationId: recId }),
+    });
+    expect(res.status).toBe(404);
+
+    const rec = db.prepare('SELECT state, dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.state).toBe('dismissed');
+    expect(rec.dismiss_reason).toBe('not_my_genre');
+    const sigAlex = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sigAlex.prefs).hated_genres).toEqual(['Horror']);
+  });
+
+  it('reverses the reason-derived prefs write-back and clears dismiss_reason', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (993, 'movie', 'Undo Reason Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Dismiss with a reason first — this is the write-back /undismiss must reverse.
+    await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs).hated_genres)
+      .toEqual(['Horror']);
+
+    const res = await app.request('/api/undismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId }),
+    });
+    expect(res.status).toBe(200);
+
+    const rec = db.prepare('SELECT state, dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.state).toBe('pending');
+    expect(rec.dismiss_reason).toBeNull();
+
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sig.prefs).hated_genres).toEqual([]);
+  });
+
   it('restores a dismissed recommendation to pending', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
@@ -317,5 +563,72 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
 
     const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
     expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/test_film');
+  });
+});
+
+// ─── POST /generate — rating_checked_at gates re-enrichment ─────────────────
+// Regression test: pending recs are never cleared (clearPendingRecommendations
+// is unused), so the same title can sit in Picks across many /generate calls.
+// Once OMDb has been queried once for a title (rating_checked_at stamped), the
+// enrichment loop must not re-query OMDb or re-scrape RT for it forever just
+// because the ratings came back empty — that would drain the OMDb free-tier
+// quota reserved for genuinely new titles on every single /generate call.
+
+describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () => {
+  const omdbConfig: Config = { ...mockConfig, omdbApiKey: 'test-omdb-key' };
+
+  beforeEach(() => {
+    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('does not call OMDb or resolveRtUrl for a title already checked (rating_checked_at set) with no ratings', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id, rating_checked_at)
+      VALUES (990, 'movie', 'Already Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9990000', 1700000000)`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, omdbConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+    expect(res.status).toBe(200);
+
+    expect(getOmdbRatings).not.toHaveBeenCalled();
+    expect(resolveRtUrl).not.toHaveBeenCalled();
+  });
+
+  it('calls OMDb once for a title never checked before (rating_checked_at null), then stamps it', async () => {
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockResolvedValue(null);
+
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id)
+      VALUES (991, 'movie', 'Never Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9910000')`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+
+    const api = createApiRoutes(db, omdbConfig);
+    const app = new Hono().route('/api', api);
+
+    await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+
+    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
+    const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row.rating_checked_at).not.toBeNull();
   });
 });

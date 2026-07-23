@@ -78,6 +78,20 @@ describe('runMigrations', () => {
     expect(() => runMigrations(db)).not.toThrow();
   });
 
+  it('migration 012 adds dismiss_reason to recommendations and is idempotent', () => {
+    const db = createTestDb();
+    runMigrations(db);
+
+    const columns = db
+      .prepare("PRAGMA table_info('recommendations')")
+      .all() as Array<{ name: string }>;
+    const colNames = columns.map((c) => c.name);
+    expect(colNames).toContain('dismiss_reason');
+
+    // Re-running migrations must not throw (idempotent)
+    expect(() => runMigrations(db)).not.toThrow();
+  });
+
   it('watch_events table has status column with correct default check', () => {
     const db = createTestDb();
     runMigrations(db);

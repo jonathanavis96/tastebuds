@@ -473,4 +473,148 @@ describe('retrieveJointCandidates mutual veto', () => {
     expect(titles).not.toContain('Horror Film'); // excluded by Alex's hated_genres
     expect(titles).toContain('Good Film');
   });
+
+  it('also excludes titles hated via the JOINT profile\'s OWN hated_genres', async () => {
+    // Regression test: a dismiss-reason tile picked in Joint view writes back
+    // to the Joint profile's own taste_signatures row, not Alex's or Sam's —
+    // that write must actually be consulted here, or it's silently inert.
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Sam', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Joint', media_weighting: 0.5, is_derived: 1, config: '{}' });
+    const alexId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
+    const samId = (db.prepare("SELECT id FROM profiles WHERE name='Sam'").get() as any).id;
+    const jointId = (db.prepare("SELECT id FROM profiles WHERE name='Joint'").get() as any).id;
+
+    const alexVec = Buffer.from(new Float32Array([1, 0, 0]).buffer);
+    const samVec = Buffer.from(new Float32Array([0, 1, 0]).buffer);
+
+    // Neither Alex nor Sam has Horror in their OWN hated_genres — only the
+    // Joint profile's own row does (as applyDismissReasonToPrefs would write).
+    upsertTasteSignature(db, {
+      profile_id: alexId, taste_vector: alexVec,
+      prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
+    });
+    upsertTasteSignature(db, {
+      profile_id: samId, taste_vector: samVec,
+      prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
+    });
+    upsertTasteSignature(db, {
+      profile_id: jointId, taste_vector: null,
+      prefs: JSON.stringify({ hated_genres: ['Horror'] }), refreshed_at: new Date().toISOString(),
+    });
+
+    const titleVec = Buffer.from(new Float32Array([0.5, 0.5, 0]).buffer);
+    upsertTitle(db, {
+      tmdb_id: 202, media_type: 'movie', title: 'Horror Film 2', year: 2020,
+      genres: '["Horror"]', keywords: '[]', cast: '[]',
+      synopsis: 'Scary movie', poster_path: null,
+      embedding: titleVec, updated_at: new Date().toISOString(),
+    });
+    upsertTitle(db, {
+      tmdb_id: 203, media_type: 'movie', title: 'Good Film 2', year: 2021,
+      genres: '["Drama"]', keywords: '[]', cast: '[]',
+      synopsis: 'Good movie', poster_path: null,
+      embedding: titleVec, updated_at: new Date().toISOString(),
+    });
+
+    const results = await retrieveJointCandidates(
+      db, alexId, samId, { limit: 10, jointProfileId: jointId }, mockConfig,
+    );
+    const titles = results.map(r => r.title);
+    expect(titles).not.toContain('Horror Film 2'); // excluded by the JOINT row's own hated_genres
+    expect(titles).toContain('Good Film 2');
+  });
+});
+
+describe('retrieveJointCandidatePool mutual veto (Joint profile\'s own hated_genres)', () => {
+  it('excludes titles hated via the JOINT profile\'s own hated_genres, not just Alex/Sam\'s', async () => {
+    // Same regression as retrieveJointCandidates above, for the pool variant
+    // that /generate actually calls for Joint browsing (no free-text request).
+    //
+    // NOTE on setup: the hated-genre veto (hatedFilters) is only applied to the
+    // `wildcards` bucket here (onTaste/adversarial rank purely by cosine
+    // distance, unfiltered — a pre-existing scope limit of this filter,
+    // unrelated to this fix, and identical for Alex/Sam's own hated_genres
+    // too). So the test candidates must rank OUTSIDE onTaste's nearest-10 and
+    // adversarial's farthest-4 to actually reach the wildcards query — hence
+    // the near/far filler titles below to push them into the middle.
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+
+    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Sam', media_weighting: 0.3, is_derived: 0, config: '{}' });
+    upsertProfile(db, { name: 'Joint', media_weighting: 0.5, is_derived: 1, config: '{}' });
+    const alexId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
+    const samId = (db.prepare("SELECT id FROM profiles WHERE name='Sam'").get() as any).id;
+    const jointId = (db.prepare("SELECT id FROM profiles WHERE name='Joint'").get() as any).id;
+
+    const tasteVec = Buffer.from(new Float32Array([0.5, 0.5, 0]).buffer);
+    upsertTasteSignature(db, {
+      profile_id: alexId, taste_vector: tasteVec,
+      prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
+    });
+    upsertTasteSignature(db, {
+      profile_id: samId, taste_vector: tasteVec,
+      prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
+    });
+    // The Joint profile's own row carries the hated_genres from a Joint-view
+    // dismiss reason — no taste_vector of its own yet (still cold on ratings
+    // together), which also exercises the individual-blend fallback path.
+    upsertTasteSignature(db, {
+      profile_id: jointId, taste_vector: null,
+      prefs: JSON.stringify({ hated_genres: ['Horror'] }), refreshed_at: new Date().toISOString(),
+    });
+
+    // 10 "near" fillers (identical direction to the blended taste vector) fill
+    // onTaste's nearest-10 movie slot ahead of our two test titles.
+    for (let i = 0; i < 10; i++) {
+      upsertTitle(db, {
+        tmdb_id: 3400 + i, media_type: 'movie', title: `Filler Near ${i}`, year: 2020,
+        genres: '["Filler"]', keywords: '[]', cast: '[]', synopsis: null, poster_path: null,
+        embedding: tasteVec, updated_at: new Date().toISOString(),
+      });
+    }
+    // 4 "far" fillers (opposite direction) fill adversarial's farthest-4 slot.
+    const farVec = Buffer.from(new Float32Array([-0.5, -0.5, 0]).buffer);
+    for (let i = 0; i < 4; i++) {
+      upsertTitle(db, {
+        tmdb_id: 3500 + i, media_type: 'movie', title: `Filler Far ${i}`, year: 2020,
+        genres: '["Filler"]', keywords: '[]', cast: '[]', synopsis: null, poster_path: null,
+        embedding: farVec, updated_at: new Date().toISOString(),
+      });
+    }
+    // Our two test titles sit in the MIDDLE (orthogonal direction) — closer
+    // than the far fillers, farther than the near fillers — so with the near
+    // fillers occupying onTaste and the far fillers occupying adversarial,
+    // these two are exactly what's left for the wildcards query to consider.
+    const midVec = Buffer.from(new Float32Array([0, 0, 1]).buffer);
+    upsertTitle(db, {
+      tmdb_id: 3301, media_type: 'movie', title: 'Joint Horror', year: 2020,
+      genres: '["Horror"]', keywords: '[]', cast: '[]',
+      synopsis: 'Scary movie', poster_path: null,
+      embedding: midVec, updated_at: new Date().toISOString(),
+    });
+    upsertTitle(db, {
+      tmdb_id: 3302, media_type: 'movie', title: 'Joint Drama', year: 2021,
+      genres: '["Drama"]', keywords: '[]', cast: '[]',
+      synopsis: 'Good movie', poster_path: null,
+      embedding: midVec, updated_at: new Date().toISOString(),
+    });
+
+    const pool = await retrieveJointCandidatePool(
+      db, alexId, samId, { jointProfileId: jointId }, mockConfig,
+    );
+    expect(pool.onTaste.map(r => r.title)).not.toContain('Joint Horror');
+    expect(pool.adversarial.map(r => r.title)).not.toContain('Joint Horror');
+    // Confirms the middle titles actually reached the wildcards query (proving
+    // the setup isolates it correctly) AND that the JOINT row's own
+    // hated_genres excluded Horror from it while Drama came through.
+    expect(pool.wildcards.map(r => r.title)).not.toContain('Joint Horror');
+    expect(pool.wildcards.map(r => r.title)).toContain('Joint Drama');
+  });
 });

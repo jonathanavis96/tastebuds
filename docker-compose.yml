@@ -2,7 +2,13 @@ services:
   tastebuds:
     build: .
     ports:
-      - "8094:8094"
+      # Host bind address is configurable via BIND_HOST (defaults to loopback-only,
+      # 127.0.0.1). This app has no auth/TLS of its own — it relies entirely on
+      # being unreachable from outside your LAN/Tailscale. To reach it from your
+      # phone over Tailscale, set BIND_HOST to your Tailscale IP (100.x.x.x) in
+      # .env — never set it to 0.0.0.0, which would expose it on every interface
+      # (including any public one) with zero auth in front of it.
+      - "${BIND_HOST:-127.0.0.1}:8094:8094"
     volumes:
       - ./data:/app/data
     env_file:

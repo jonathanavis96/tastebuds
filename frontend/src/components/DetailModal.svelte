@@ -2,7 +2,7 @@
   import { onDestroy, untrack } from 'svelte';
   import RatingBar from './RatingBar.svelte';
   import { kindMeta, parseList, CATEGORY_BLURBS } from '../lib/categories.js';
-  import type { RecKind } from '../lib/types.js';
+  import { DISMISS_REASON_TILES, type RecKind, type DismissReason } from '../lib/types.js';
 
   interface DetailItem {
     title_id: number;
@@ -45,15 +45,17 @@
     /** Whether THIS title is currently marked "Not interested" (parent-owned truth). */
     dismissed?: boolean;
     /** Mark / un-mark "Not interested". Both commit immediately in the parent. */
-    onDismiss?: (item: DetailItem) => void;
+    onDismiss?: (item: DetailItem) => void | Promise<void>;
     onUndismiss?: (item: DetailItem) => void;
+    /** Optional "why" reason tile tapped after dismissing (feeds back into prefs). */
+    onDismissReason?: (item: DetailItem, reason: DismissReason) => void | Promise<void>;
   }
 
   let {
     item, onClose, position, onPrev, onNext,
     inWatchlist = false, watched = false,
     onRate, onWatchlist, onRemoveWatchlist, onMarkWatched, onUnwatch, onSaveNote,
-    dismissed = false, onDismiss, onUndismiss,
+    dismissed = false, onDismiss, onUndismiss, onDismissReason,
   }: Props = $props();
 
   const meta = $derived(item.kind ? kindMeta(item) : null);
@@ -77,6 +79,28 @@
   // Optimistic local copy of the parent's "Not interested" flag for THIS title, so
   // the button flips instantly on tap; reconciled from the prop on every nav.
   let isDismissed = $state(false);
+  // Which "why" reason tile (if any) was tapped for the currently-armed dismiss.
+  // Local-only (no dismiss_reason prop comes back down) — resets on nav/undo.
+  let chosenReason = $state<DismissReason | null>(null);
+  // True from the moment "Not interested" is tapped until the dismiss request
+  // resolves. The reason tiles need the rec to already be in the 'dismissed'
+  // state server-side, so a tile tapped while this is true must wait rather
+  // than fire in parallel (it would race the dismiss and could be rejected).
+  // Also drives disabling the tiles visually so a fast double-tap can't skip
+  // ahead of the dismiss it depends on.
+  let dismissInFlight = $state(false);
+  // The in-flight dismiss commit, so a reason tap can await it before posting.
+  let pendingDismiss: Promise<unknown> | null = null;
+  // True while a /dismiss-reason request (from a tile tap) is outstanding.
+  // Disables ALL tiles so the user can't fire a second one before the first
+  // settles — the server reverses-the-old-reason-then-applies-the-new, so two
+  // requests in flight together could interleave and corrupt the stored reason.
+  let reasonInFlight = $state(false);
+  // Serializes reason-tile taps: each call chains onto this so requests are
+  // never concurrent even if a tap somehow slips past the disabled tiles above
+  // (belt-and-braces, same pattern as pendingDismiss). Rapid A→B→A taps still
+  // fire in tap order, one at a time, so the last tile chosen always wins.
+  let reasonChain: Promise<unknown> = Promise.resolve();
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -102,6 +126,13 @@
       noteSaved = false;
       zoomed = false;
       isDismissed = dismissed; // reconcile the armed state from the parent for this title
+      chosenReason = null; // reason tiles are local-only, always start fresh per title/nav
+      // The previous title's dismiss/reason (if any) keeps running in the
+      // background; this title's tiles just shouldn't show as blocked by it.
+      dismissInFlight = false;
+      pendingDismiss = null;
+      reasonInFlight = false;
+      reasonChain = Promise.resolve();
     });
   });
 
@@ -205,8 +236,42 @@
   // tap. Tapping again genuinely undoes it (restores to pending). The modal stays open.
   function doDismiss() {
     const target = item;
-    if (isDismissed) { isDismissed = false; onUndismiss?.(target); }
-    else { isDismissed = true; onDismiss?.(target); }
+    if (isDismissed) { isDismissed = false; chosenReason = null; onUndismiss?.(target); return; }
+    isDismissed = true;
+    dismissInFlight = true;
+    // Track completion so a reason tile tapped in the same instant can wait for
+    // it — /dismiss-reason requires the rec to already be 'dismissed' server-side,
+    // so firing it before this resolves would race the dismiss (409/no-op).
+    const p = Promise.resolve(onDismiss?.(target)).finally(() => { dismissInFlight = false; });
+    pendingDismiss = p;
+  }
+  // Tapping a "why" tile after dismissing persists the reason. If the dismiss
+  // commit for this title is still in flight (tile tapped immediately after
+  // "Not interested"), wait for it to finish first — chained, not parallel —
+  // so the reason request always lands after the rec is actually dismissed.
+  // The tiles are also disabled while in flight (below) as a belt-and-braces
+  // guard against a tap slipping in before the disabled state renders.
+  async function doDismissReason(reason: DismissReason) {
+    const target = item;
+    chosenReason = reason;
+    if (pendingDismiss) await pendingDismiss;
+    // Chain onto whatever reason request is already outstanding so requests
+    // are strictly serialized (tap order == request order == request
+    // completion order) — never concurrent, even if a tap slips past the
+    // disabled tiles below. Swallow a prior rejection so it can't abort this
+    // one's turn in the chain.
+    reasonInFlight = true;
+    const myTurn = reasonChain.catch(() => {}).then(() => onDismissReason?.(target, reason));
+    reasonChain = myTurn;
+    try {
+      await myTurn;
+    } finally {
+      // Only the request that's still the LATEST one in the chain clears the
+      // in-flight flag — an earlier, already-superseded turn finishing late
+      // (it can't, since we await our own predecessor above, but just in
+      // case) must not re-enable the tiles out from under a newer request.
+      if (reasonChain === myTurn) reasonInFlight = false;
+    }
   }
 </script>
 
@@ -325,6 +390,25 @@
                 </button>
               {/if}
             </div>
+
+            {#if onDismissReason && isDismissed}
+              <div class="reason-block">
+                <span class="reason-label">Why? <span class="reason-hint">(optional — helps pick better)</span></span>
+                <div class="reason-tiles">
+                  {#each DISMISS_REASON_TILES as tile (tile.key)}
+                    <button
+                      type="button"
+                      class="reason-tile"
+                      class:chosen={chosenReason === tile.key}
+                      disabled={dismissInFlight || reasonInFlight}
+                      onclick={() => doDismissReason(tile.key)}
+                    >
+                      {tile.label}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
 
             {#if onSaveNote && (seen || inList)}
               <div class="note-block">
@@ -470,6 +554,20 @@
   .act.dismiss:hover { background: #2a1620; border-color: #e94560; color: #e94560; }
   /* Armed: solid red during the grace window — still tappable to undo. */
   .act.dismiss.dismissing, .act.dismiss.dismissing:hover { background: #e94560; border-color: #e94560; color: #fff; cursor: pointer; opacity: 1; }
+
+  .reason-block { margin-top: 0.7rem; }
+  .reason-label { display: block; font-size: 0.78rem; color: #b9b9d0; margin-bottom: 0.4rem; }
+  .reason-hint { color: #7a7a98; font-weight: 400; }
+  .reason-tiles { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .reason-tile {
+    padding: 0.4rem 0.7rem; border-radius: 20px; border: 1px solid #3a3a5a;
+    background: #1c1c38; color: #b9b9d0; font-size: 0.78rem; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .reason-tile:hover { border-color: #5a5a7a; color: #ddd; }
+  .reason-tile.chosen { background: #e94560; border-color: #e94560; color: #fff; }
+  .reason-tile:disabled { opacity: 0.5; cursor: default; }
+  .reason-tile:disabled:hover { border-color: #3a3a5a; color: #b9b9d0; }
 
   /* scroll-margin keeps the field clear of the sheet edge when scrolled into view
      above the mobile keyboard; padding-bottom gives the last element breathing room. */

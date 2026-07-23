@@ -1,4 +1,4 @@
-import type { Profile, Recommendation, WatchEvent } from './types.js';
+import type { Profile, Recommendation, WatchEvent, DismissReason } from './types.js';
 
 const BASE = '/api';
 
@@ -93,6 +93,16 @@ export async function dismissRecommendation(profileId: number, recommendationId:
     body: JSON.stringify({ profileId, recommendationId }),
   });
   if (!res.ok) throw new Error(`dismiss failed: ${res.status}`);
+}
+
+/** Optional follow-up to dismissRecommendation: which reason tile the user tapped (Phase-1.5 step 3 write-back). */
+export async function dismissReason(profileId: number, recommendationId: number, reason: DismissReason): Promise<void> {
+  const res = await fetch(`${BASE}/dismiss-reason`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId, recommendationId, reason }),
+  });
+  if (!res.ok) throw new Error(`dismiss-reason failed: ${res.status}`);
 }
 
 export async function undismissRecommendation(profileId: number, recommendationId: number): Promise<void> {

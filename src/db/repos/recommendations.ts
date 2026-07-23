@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { RecommendationRow } from '../types.js';
 
-type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating'> & {
+type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating' | 'dismiss_reason'> & {
   kind?: 'core' | 'wildcard' | 'adversarial';
   predicted_rating?: number | null;
 };
@@ -93,4 +93,26 @@ export function updateRecommendationState(
   state: 'pending' | 'shown' | 'dismissed',
 ): void {
   db.prepare('UPDATE recommendations SET state = ? WHERE id = ?').run(state, id);
+}
+
+export function getRecommendationById(
+  db: InstanceType<typeof Database>,
+  id: number,
+): RecommendationRow | null {
+  return (
+    (db.prepare('SELECT * FROM recommendations WHERE id = ?').get(id) as RecommendationRow | undefined) ?? null
+  );
+}
+
+/**
+ * Record which reason tile the user picked for a dismissed rec (optional follow-up
+ * to /dismiss), or clear it (pass null — used on /undismiss so a restored rec
+ * doesn't keep a stale reason from a previous dismissal).
+ */
+export function setDismissReason(
+  db: InstanceType<typeof Database>,
+  id: number,
+  reason: string | null,
+): void {
+  db.prepare('UPDATE recommendations SET dismiss_reason = ? WHERE id = ?').run(reason, id);
 }

@@ -16,6 +16,7 @@ import {
   MIGRATE_009_EMBEDDING_CACHE,
   MIGRATE_010_ADD_POPULARITY,
   MIGRATE_011_ADD_RATING_CHECKED_AT,
+  MIGRATE_012_ADD_DISMISS_REASON,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -111,6 +112,16 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     for (const sql of MIGRATE_011_ADD_RATING_CHECKED_AT) {
       const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
       if (!titleColNames11.includes(colName)) {
+        db.exec(sql);
+      }
+    }
+
+    // Migration 012: add dismiss_reason to recommendations (idempotent)
+    const recCols12 = db.prepare("PRAGMA table_info('recommendations')").all() as Array<{ name: string }>;
+    const recColNames12 = recCols12.map(c => c.name);
+    for (const sql of MIGRATE_012_ADD_DISMISS_REASON) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!recColNames12.includes(colName)) {
         db.exec(sql);
       }
     }

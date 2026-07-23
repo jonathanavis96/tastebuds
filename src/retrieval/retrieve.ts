@@ -258,7 +258,11 @@ interface PrefsJson {
  * Retrieve candidates for the Joint profile.
  * Blends Alex + Sam vectors (equal weights) and applies mutual veto:
  *   - exclude titles in watch_events for EITHER profile
- *   - exclude titles whose genres overlap with EITHER profile's hated_genres
+ *   - exclude titles whose genres overlap with EITHER profile's hated_genres,
+ *     OR the Joint profile's own hated_genres (e.g. from a dismiss-reason tile
+ *     picked while browsing in Joint view — that write lands on the Joint
+ *     profile's own taste_signatures row, not Alex's or Sam's, so it must be
+ *     read from here too or it's silently inert for future joint recs).
  */
 export async function retrieveJointCandidates(
   db: InstanceType<typeof Database>,
@@ -285,10 +289,14 @@ export async function retrieveJointCandidates(
 
   const alexPrefs: PrefsJson = JSON.parse(alexSig.prefs ?? '{}');
   const samPrefs: PrefsJson = JSON.parse(samSig.prefs ?? '{}');
+  const jointId = opts.jointProfileId;
+  const jointSig = jointId != null ? getTasteSignature(db, jointId) : undefined;
+  const jointPrefs: PrefsJson = jointSig ? JSON.parse(jointSig.prefs ?? '{}') : {};
 
   const alexHated: string[] = alexPrefs.hated_genres ?? [];
   const samHated: string[] = samPrefs.hated_genres ?? [];
-  const allHated = [...new Set([...alexHated, ...samHated])];
+  const jointHated: string[] = jointPrefs.hated_genres ?? [];
+  const allHated = [...new Set([...alexHated, ...samHated, ...jointHated])];
 
   const limit = opts.limit ?? 20;
 
@@ -685,7 +693,16 @@ export async function retrieveJointCandidatePool(
 
   const alexPrefs: PrefsJson = JSON.parse(alexSig.prefs ?? '{}');
   const samPrefs: PrefsJson = JSON.parse(samSig.prefs ?? '{}');
-  const allHated = [...new Set([...(alexPrefs.hated_genres ?? []), ...(samPrefs.hated_genres ?? [])])];
+  // Also honor the Joint profile's OWN hated_genres — a dismiss-reason tile
+  // picked while browsing in Joint view writes back to the Joint profile's own
+  // taste_signatures row (not Alex's or Sam's), so it must be read from here
+  // too or it's silently inert for future joint recs.
+  const jointPrefs: PrefsJson = jointSig ? JSON.parse(jointSig.prefs ?? '{}') : {};
+  const allHated = [...new Set([
+    ...(alexPrefs.hated_genres ?? []),
+    ...(samPrefs.hated_genres ?? []),
+    ...(jointPrefs.hated_genres ?? []),
+  ])];
 
   const extraExclude: number[] = opts.excludeTitleIds ?? [];
 

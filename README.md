@@ -50,10 +50,14 @@ the Claude OAuth step itself.
 >    write it into `CLAUDE_CODE_OAUTH_TOKEN` — don't ask me to copy/paste it manually.
 > 5. **Configure.** Copy `.env.example` to `.env` and fill in `TMDB_API_KEY`, the OAuth token,
 >    and `OMDB_API_KEY` if I provided one. Leave `OLLAMA_URL` as
->    `http://host.docker.internal:11434` for the Docker path.
+>    `http://host.docker.internal:11434` for the Docker path. Leave `BIND_HOST` at its
+>    default (`127.0.0.1`) unless I want to reach this from another device on my LAN or
+>    Tailscale (see the **Security** section) — never set it to `0.0.0.0`.
 > 6. **Build and start:** `docker compose up -d --build`.
 > 7. **Seed and verify:** seed the profiles, run a harvest, then confirm
->    `curl http://localhost:8094/api/profiles` responds.
+>    `curl http://localhost:8094/api/profiles` responds (note the port is bound to
+>    `127.0.0.1` only by default — run curl from the same host, or from wherever
+>    `BIND_HOST` is reachable).
 >
 > If anything fails along the way, diagnose and fix it before moving on, and tell me what you
 > changed.
@@ -127,6 +131,7 @@ Get a free key (1000 req/day) at <https://www.omdbapi.com/apikey.aspx> and put i
 cp .env.example .env
 nano .env            # fill in TMDB_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
                      # OLLAMA_URL should be http://host.docker.internal:11434 (default)
+                     # BIND_HOST defaults to 127.0.0.1 — see Security below before changing it
 
 # 2. Make sure Ollama is running on the host with the embed model:
 ollama pull nomic-embed-text
@@ -134,9 +139,11 @@ ollama pull nomic-embed-text
 # 3. Build and start
 docker compose up -d --build
 
-# 4. Verify
+# 4. Verify (port is bound to 127.0.0.1 by default, so run this on the same host)
 curl http://localhost:8094/api/profiles
 ```
+
+See **Security** below for how to reach the app from another device.
 
 Then **seed profiles, harvest titles, and import your watch history**:
 
@@ -223,6 +230,41 @@ just ignore the profiles you don't use.
 | `OMDB_API_KEY` | — | — | IMDb/RT ratings |
 | `PORT` | — | `8094` | HTTP port |
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
+| `BIND_HOST` | — | `127.0.0.1` | **Docker only** — host bind address for docker-compose's port mapping — see **Security** below |
+| `HOST` | — | `0.0.0.0` | **Bare Node only** — hostname the server process itself binds to (no effect inside Docker; `BIND_HOST` covers that path) — see **Security** below |
+
+---
+
+## Security
+
+**This app has no built-in TLS or auth token — it is designed to be reachable
+only from your own LAN/Tailscale network, never the public internet.**
+`docker-compose.yml` binds the container port to `BIND_HOST` on the host
+(defaults to `127.0.0.1`, i.e. not reachable off the host at all):
+
+- Leave it at `127.0.0.1` if you only ever use the app from the same machine
+  it's running on.
+- Set `BIND_HOST` in `.env` to your **Tailscale IP** (`100.x.x.x`) to reach it
+  from your phone/other devices over Tailscale, or to your **LAN IP**
+  (e.g. `192.168.x.x`) for plain local-network access.
+- **Never set `BIND_HOST=0.0.0.0`** — that binds every interface, including any
+  public one, with no auth in front of it at all.
+
+**Running bare Node instead of Docker?** `BIND_HOST` above has no effect on that
+path — it's consumed by docker-compose, not the app. The bare-Node server binds
+to the `HOST` env var instead (defaults to `0.0.0.0` — every interface, same
+public-exposure risk as above). If you're running `node dist/server/server.js`
+directly on a machine with a public or shared-LAN interface and only want it
+reachable from that machine, set `HOST=127.0.0.1` in `.env`.
+
+There is no per-request auth token: `profileId` enumeration and the `/generate`
+endpoint are only a concern if the app is reachable by untrusted callers, which
+the `BIND_HOST` guidance above is meant to prevent.
+
+`POST /generate` has a stricter rate limit (a handful of requests per few
+minutes per caller) on top of a general per-minute cap on all other mutating
+endpoints — it spawns a paid `claude -p` subprocess per call, so this limits
+runaway cost even from a misbehaving client on your own network.
 
 ---
 

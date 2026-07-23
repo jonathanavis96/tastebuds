@@ -5,7 +5,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
-import { getRecommendations, updateRecommendationState, getCalibration } from '../db/repos/recommendations.js';
+import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
@@ -15,9 +15,26 @@ import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
+import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
+import { createRateLimiter } from './auth.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
+
+  // Rate limiting — this is a single-user LAN/Tailscale-only tool (no public
+  // internet exposure, no per-caller auth token), but /generate spawns a paid
+  // `claude -p` subprocess per call, so a runaway/misbehaving client still
+  // shouldn't be able to hammer the DB or rack up unlimited API cost.
+  // General cap on all mutating (non-GET) endpoints.
+  const mutationLimiter = createRateLimiter({ windowMs: 60_000, max: 30, keyPrefix: 'mutate' });
+  api.use('*', async (c, next) => {
+    if (c.req.method === 'GET') return next();
+    return mutationLimiter(c, next);
+  });
+  // Tighter, dedicated cap on /generate specifically — it's the expensive one
+  // (spawns `claude -p`), so it gets its own stricter budget on top.
+  const generateLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5, keyPrefix: 'generate' });
+  api.use('/generate', generateLimiter);
 
   api.get('/profiles', (c) => {
     const profiles = getAllProfiles(db);
@@ -29,13 +46,23 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     return c.json(countTitles(db));
   });
 
-  // Update arbitrary keys in a profile's config JSON (partial merge — existing keys preserved).
-  // Used by the frontend to persist per-profile preferences (e.g. rating_threshold).
+  // Update known keys in a profile's config JSON (partial merge — existing keys preserved).
+  // Used by the frontend to persist per-profile preferences (currently just rating_threshold).
+  // The patch is allowlisted + type-checked rather than merged verbatim: an unvalidated
+  // merge would let a caller inject arbitrary keys/oversized blobs into the stored config.
+  const PROFILE_CONFIG_ALLOWED_KEYS = new Set(['rating_threshold']);
   api.patch('/profile-config/:profileId', async (c) => {
     const profileId = Number(c.req.param('profileId'));
     if (!Number.isFinite(profileId)) return c.json({ error: 'invalid profileId' }, 400);
     const body = await c.req.json<Record<string, unknown>>();
-    const ok = patchProfileConfig(db, profileId, body);
+    const patch: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body ?? {})) {
+      if (!PROFILE_CONFIG_ALLOWED_KEYS.has(key)) continue;
+      if (key === 'rating_threshold' && value !== null && typeof value !== 'number') continue;
+      patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) return c.json({ error: 'no valid config keys in patch' }, 400);
+    const ok = patchProfileConfig(db, profileId, patch);
     if (!ok) return c.json({ error: 'Profile not found' }, 404);
     return c.json({ ok: true });
   });
@@ -256,24 +283,34 @@ export function createApiRoutes(db: Database, config: Config): Hono {
           const t = getTitleById(db, rec.title_id);
           if (!t) continue;
 
-          // OMDb: authority for both imdb and rt ratings; fetch when either is missing
-          let omdbRt: string | null = null;
-          if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
-            const ratings = await getOmdbRatings(t.imdb_id, config);
-            omdbRt = ratings.rottenTomatoes;
-            updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
-          }
+          // Whole-block gate on rating_checked_at (mirrors backfillRatings.ts's SELECT
+          // filter): once this title has been through an OMDb check pass, don't re-run
+          // OMDb *or* RT resolution for it forever just because ratings came back empty.
+          // Pending recs accumulate across many /generate calls (nothing ever clears
+          // them — see clearPendingRecommendations, which is unused), so without this
+          // guard an OMDb-absent title sitting in Picks would burn a fresh OMDb call
+          // AND a fresh RT scrape on every single /generate, draining the OMDb free-tier
+          // quota reserved for genuinely new titles and hammering RT for no benefit.
+          if (t.rating_checked_at == null) {
+            // OMDb: authority for both imdb and rt ratings; fetch when either is missing
+            let omdbRt: string | null = null;
+            if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
+              const ratings = await getOmdbRatings(t.imdb_id, config);
+              omdbRt = ratings.rottenTomatoes;
+              updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
+            }
 
-          // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
-          if (!t.rt_url && omdbRt == null) {
-            const result = await resolveRtUrl(t.title, t.year, t.media_type);
-            // Only persist rt_url when the result is verified. Storing an unverified
-            // search URL would block future re-resolution (the !t.rt_url guard above).
-            if (result?.verified) {
-              updateTitleRtUrl(db, t.id, result.url);
-              // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
-              if (result.score) {
-                updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+            // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
+            if (!t.rt_url && omdbRt == null) {
+              const result = await resolveRtUrl(t.title, t.year, t.media_type);
+              // Only persist rt_url when the result is verified. Storing an unverified
+              // search URL would block future re-resolution (the !t.rt_url guard above).
+              if (result?.verified) {
+                updateTitleRtUrl(db, t.id, result.url);
+                // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
+                if (result.score) {
+                  updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
+                }
               }
             }
           }
@@ -362,6 +399,56 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     return c.json({ ok: true });
   });
 
+  // Optional follow-up to /dismiss: the user tapped a "why" reason tile. Stores
+  // the chosen reason on the rec row and — for the tiles that map to a durable
+  // taste signal (not_my_genre / seen_enough → hated_genres, too_dark →
+  // hated_themes) — merges it into the profile's prefs so future retrieval
+  // steers away from it. cast_vibe / not_in_mood store the
+  // reason but write back nothing (see applyDismissReasonToPrefs).
+  const dismissReasonKeys = new Set(DISMISS_REASON_TILES.map(t => t.key));
+  api.post('/dismiss-reason', async (c) => {
+    const body = await c.req.json<{ profileId: number; recommendationId: number; reason: DismissReason }>();
+    if (!body.profileId || !body.recommendationId || !dismissReasonKeys.has(body.reason)) {
+      return c.json({ error: 'profileId, recommendationId and a valid reason are required' }, 400);
+    }
+    const rec = getRecommendationById(db, body.recommendationId);
+    // Ownership check folded into the same 404 as a genuinely missing rec, so a
+    // caller can't distinguish "doesn't exist" from "belongs to another profile"
+    // (an IDOR — profile B posting profile A's rec must not write into A's prefs
+    // or B's, and must not reveal that the rec exists at all).
+    if (!rec || rec.profile_id !== body.profileId) {
+      return c.json({ error: 'recommendation not found' }, 404);
+    }
+    // A reason only makes sense for a rec that was actually dismissed — otherwise
+    // a caller could write reason-derived hated_genres/hated_themes for a title
+    // the user never rejected.
+    if (rec.state !== 'dismissed') {
+      return c.json({ error: 'recommendation is not dismissed' }, 409);
+    }
+    // Re-selecting the same tile is a harmless no-op (the merge is idempotent).
+    if (rec.dismiss_reason === body.reason) {
+      return c.json({ ok: true });
+    }
+    // The user is switching tiles (e.g. "not my genre" → "too dark"). Reverse
+    // whatever the PREVIOUS reason wrote back before applying the new one —
+    // otherwise both reasons' signals accumulate (stale hated_genres left
+    // behind after switching to a reason that writes to hated_themes instead).
+    if (rec.dismiss_reason) {
+      try {
+        removeDismissReasonFromPrefs(db, body.profileId, rec.title_id, rec.dismiss_reason as DismissReason);
+      } catch {
+        // non-fatal — affinity persistence must not break the dismiss flow
+      }
+    }
+    setDismissReason(db, body.recommendationId, body.reason);
+    try {
+      applyDismissReasonToPrefs(db, body.profileId, rec.title_id, body.reason);
+    } catch {
+      // non-fatal — affinity persistence must not break the dismiss flow
+    }
+    return c.json({ ok: true });
+  });
+
   // Undo a dismiss — restore the rec to pending so it shows in Picks again, and
   // recompute the taste vector so the (now-removed) negative signal stops biasing it.
   api.post('/undismiss', async (c) => {
@@ -369,7 +456,24 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     if (!body.profileId || !body.recommendationId) {
       return c.json({ error: 'profileId and recommendationId required' }, 400);
     }
+    const rec = getRecommendationById(db, body.recommendationId);
+    // Same ownership check as /dismiss-reason: a rec that belongs to a different
+    // profile must not be touched (state flipped, or its reason reversed into
+    // the wrong profile's prefs) by this call.
+    if (rec && rec.profile_id !== body.profileId) {
+      return c.json({ error: 'recommendation not found' }, 404);
+    }
     updateRecommendationState(db, body.recommendationId, 'pending');
+    // Reverse any reason-tile write-back so the negative signal doesn't outlive
+    // the dismissal it came from, then clear the stored reason itself.
+    if (rec?.dismiss_reason) {
+      try {
+        removeDismissReasonFromPrefs(db, body.profileId, rec.title_id, rec.dismiss_reason as DismissReason);
+      } catch {
+        // non-fatal — undo must not be blocked by a failed prefs cleanup
+      }
+      setDismissReason(db, body.recommendationId, null);
+    }
     await refreshTasteVector(db, body.profileId, config);
     return c.json({ ok: true });
   });
