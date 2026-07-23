@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, fireEvent, cleanup } from '@testing-library/svelte';
+import { render, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 import DetailModal from './DetailModal.svelte';
 
 const baseProps = (title_id: number, title: string) => ({
@@ -168,5 +168,80 @@ describe('DetailModal dismiss-reason tiles', () => {
     await fireEvent.click(tile);
     expect(onDismissReason).toHaveBeenCalledTimes(1);
     expect(onDismissReason.mock.calls[0][1]).toBe('not_my_genre');
+  });
+
+  it('serializes rapid successive reason taps — no overlapping requests, last tap wins', async () => {
+    // Tracks concurrency directly: bumps on call start, drops on resolve, and
+    // records the peak so we can assert it never exceeded 1 in-flight request.
+    let active = 0;
+    let peakActive = 0;
+    const resolvers: Array<() => void> = [];
+    const onDismissReason = vi.fn(() => new Promise<void>((resolve) => {
+      active += 1;
+      peakActive = Math.max(peakActive, active);
+      resolvers.push(() => { active -= 1; resolve(); });
+    }));
+
+    const { getByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onUndismiss: () => {},
+      onDismissReason,
+    });
+    await fireEvent.click(getByText('Not interested'));
+
+    const tileA = getByText('Not my genre');
+    const tileB = getByText('Too dark/violent');
+
+    // Fire two taps in immediate succession (both dispatched before either
+    // request has resolved) — the scenario that used to race.
+    fireEvent.click(tileA);
+    fireEvent.click(tileB);
+
+    // Only A's request should go out first — B's tap must be queued behind
+    // it, never fired concurrently.
+    await waitFor(() => expect(onDismissReason).toHaveBeenCalledTimes(1));
+    expect(onDismissReason.mock.calls[0][1]).toBe('not_my_genre');
+    expect(peakActive).toBe(1);
+
+    // Resolving A's request unblocks B's, which fires next — never overlapping.
+    resolvers[0]();
+    await waitFor(() => expect(onDismissReason).toHaveBeenCalledTimes(2));
+    expect(onDismissReason.mock.calls[1][1]).toBe('too_dark'); // the LAST tile tapped
+    expect(peakActive).toBe(1); // still never more than 1 concurrent request
+
+    resolvers[1]();
+    await waitFor(() => expect(active).toBe(0));
+  });
+
+  it('serializes A → B → A tapping — requests fire strictly in tap order, one at a time', async () => {
+    const calls: string[] = [];
+    let resolveCurrent: (() => void) | null = null;
+    const onDismissReason = vi.fn((_item, reason: string) => new Promise<void>((resolve) => {
+      calls.push(reason);
+      resolveCurrent = () => resolve();
+    }));
+
+    const { getByText } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: () => {},
+      onUndismiss: () => {},
+      onDismissReason,
+    });
+    await fireEvent.click(getByText('Not interested'));
+
+    fireEvent.click(getByText('Not my genre'));       // A
+    fireEvent.click(getByText('Too dark/violent'));   // B — queued behind A
+    fireEvent.click(getByText('Not my genre'));       // A again — queued behind B
+
+    await waitFor(() => expect(calls).toEqual(['not_my_genre']));
+    resolveCurrent!();
+
+    await waitFor(() => expect(calls).toEqual(['not_my_genre', 'too_dark']));
+    resolveCurrent!();
+
+    // The final request sent is the LAST tile tapped, in tap order, one at a time.
+    await waitFor(() => expect(calls).toEqual(['not_my_genre', 'too_dark', 'not_my_genre']));
+    resolveCurrent!();
   });
 });

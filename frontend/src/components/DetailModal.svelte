@@ -91,6 +91,16 @@
   let dismissInFlight = $state(false);
   // The in-flight dismiss commit, so a reason tap can await it before posting.
   let pendingDismiss: Promise<unknown> | null = null;
+  // True while a /dismiss-reason request (from a tile tap) is outstanding.
+  // Disables ALL tiles so the user can't fire a second one before the first
+  // settles — the server reverses-the-old-reason-then-applies-the-new, so two
+  // requests in flight together could interleave and corrupt the stored reason.
+  let reasonInFlight = $state(false);
+  // Serializes reason-tile taps: each call chains onto this so requests are
+  // never concurrent even if a tap somehow slips past the disabled tiles above
+  // (belt-and-braces, same pattern as pendingDismiss). Rapid A→B→A taps still
+  // fire in tap order, one at a time, so the last tile chosen always wins.
+  let reasonChain: Promise<unknown> = Promise.resolve();
   // What we last persisted, to avoid re-posting an unchanged note (blur + unmount).
   // $state so the green "saved" border below can react to it.
   let lastSavedNote = $state('');
@@ -117,10 +127,12 @@
       zoomed = false;
       isDismissed = dismissed; // reconcile the armed state from the parent for this title
       chosenReason = null; // reason tiles are local-only, always start fresh per title/nav
-      // The previous title's dismiss (if any) keeps running in the background;
-      // this title's tiles just shouldn't show as blocked by it.
+      // The previous title's dismiss/reason (if any) keeps running in the
+      // background; this title's tiles just shouldn't show as blocked by it.
       dismissInFlight = false;
       pendingDismiss = null;
+      reasonInFlight = false;
+      reasonChain = Promise.resolve();
     });
   });
 
@@ -243,7 +255,23 @@
     const target = item;
     chosenReason = reason;
     if (pendingDismiss) await pendingDismiss;
-    void onDismissReason?.(target, reason);
+    // Chain onto whatever reason request is already outstanding so requests
+    // are strictly serialized (tap order == request order == request
+    // completion order) — never concurrent, even if a tap slips past the
+    // disabled tiles below. Swallow a prior rejection so it can't abort this
+    // one's turn in the chain.
+    reasonInFlight = true;
+    const myTurn = reasonChain.catch(() => {}).then(() => onDismissReason?.(target, reason));
+    reasonChain = myTurn;
+    try {
+      await myTurn;
+    } finally {
+      // Only the request that's still the LATEST one in the chain clears the
+      // in-flight flag — an earlier, already-superseded turn finishing late
+      // (it can't, since we await our own predecessor above, but just in
+      // case) must not re-enable the tiles out from under a newer request.
+      if (reasonChain === myTurn) reasonInFlight = false;
+    }
   }
 </script>
 
@@ -372,7 +400,7 @@
                       type="button"
                       class="reason-tile"
                       class:chosen={chosenReason === tile.key}
-                      disabled={dismissInFlight}
+                      disabled={dismissInFlight || reasonInFlight}
                       onclick={() => doDismissReason(tile.key)}
                     >
                       {tile.label}
