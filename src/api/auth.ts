@@ -1,4 +1,5 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
+import { getConnInfo } from '@hono/node-server/conninfo';
 
 interface RateLimiterOptions {
   /** Rolling window length in milliseconds. */
@@ -18,11 +19,21 @@ interface RateLimiterOptions {
 export function createRateLimiter(opts: RateLimiterOptions): MiddlewareHandler {
   const hits = new Map<string, { count: number; resetAt: number }>();
 
+  // Keyed by the actual TCP peer address (via @hono/node-server's getConnInfo,
+  // which reads the raw socket), NEVER by x-forwarded-for/x-real-ip. The
+  // documented deployments (Docker, bare Node) have no trusted reverse proxy
+  // sanitizing those headers, so trusting them would let a client spoof a
+  // fresh IP per request and evade the limit entirely. A client cannot forge
+  // its own socket's peer address. When no real socket is available (e.g. the
+  // in-process test harness, which drives the app without a listening server),
+  // every caller shares one fallback bucket — still safe, just coarser.
   const clientKey = (c: Context): string => {
-    const fwd = c.req.header('x-forwarded-for');
-    const ip = (fwd ? fwd.split(',')[0]?.trim() : undefined)
-      || c.req.header('x-real-ip')
-      || 'unknown';
+    let ip = 'unknown';
+    try {
+      ip = getConnInfo(c).remote.address ?? 'unknown';
+    } catch {
+      // Not running under @hono/node-server's serve() — no socket to read.
+    }
     return `${opts.keyPrefix}:${ip}`;
   };
 

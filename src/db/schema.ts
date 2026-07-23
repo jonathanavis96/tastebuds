@@ -154,7 +154,7 @@ export const MIGRATE_011_ADD_RATING_CHECKED_AT = [
   `ALTER TABLE titles ADD COLUMN rating_checked_at INTEGER`,
 ];
 
-// Migration 012: dismiss reason tiles (Phase-1.5 step 3). Stores which reason
+// Migration 012: dismiss reason tiles. Stores which reason
 // tile the user tapped when dismissing a rec ("not_my_genre" / "too_dark" /
 // "seen_enough" / "cast_vibe" / "not_in_mood") so the choice is auditable
 // alongside the rec row. Nullable — most historical/dismissed-without-reason

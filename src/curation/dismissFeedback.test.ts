@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrate.js';
 import { upsertTasteSignature, getTasteSignature } from '../db/repos/tasteSignatures.js';
-import { applyDismissReasonToPrefs, DISMISS_REASON_TILES } from './dismissFeedback.js';
+import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES } from './dismissFeedback.js';
 
 function createTestDb(): InstanceType<typeof Database> {
   const db = new Database(':memory:');
@@ -33,7 +33,7 @@ function prefsFor(db: InstanceType<typeof Database>, profileId: number): Record<
 }
 
 describe('DISMISS_REASON_TILES', () => {
-  it('has the 5 tiles from the Phase-1.5 step-3 spec, in order', () => {
+  it('has the 5 tiles in the expected order', () => {
     expect(DISMISS_REASON_TILES.map(t => t.key)).toEqual([
       'not_my_genre', 'too_dark', 'seen_enough', 'cast_vibe', 'not_in_mood',
     ]);
@@ -165,6 +165,81 @@ describe('applyDismissReasonToPrefs', () => {
     const profileId = insertTestProfile(db);
 
     expect(() => applyDismissReasonToPrefs(db, profileId, 999_999, 'not_my_genre')).not.toThrow();
+    expect(getTasteSignature(db, profileId)).toBeNull();
+  });
+});
+
+describe('removeDismissReasonFromPrefs', () => {
+  it('removes the title\'s genres from hated_genres for not_my_genre', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+    const titleId = insertTestTitle(db, ['Horror', 'Thriller']);
+    applyDismissReasonToPrefs(db, profileId, titleId, 'not_my_genre');
+    expect(prefsFor(db, profileId).hated_genres).toEqual(['Horror', 'Thriller']);
+
+    removeDismissReasonFromPrefs(db, profileId, titleId, 'not_my_genre');
+
+    expect(prefsFor(db, profileId).hated_genres).toEqual([]);
+  });
+
+  it('removes the dark/violent tag from hated_themes for too_dark, leaving hated_genres alone', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+    const titleId = insertTestTitle(db, ['Horror']);
+    applyDismissReasonToPrefs(db, profileId, titleId, 'too_dark');
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ ...prefsFor(db, profileId), hated_genres: ['Comedy'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    removeDismissReasonFromPrefs(db, profileId, titleId, 'too_dark');
+
+    const prefs = prefsFor(db, profileId);
+    expect(prefs.hated_themes).toEqual([]);
+    expect(prefs.hated_genres).toEqual(['Comedy']); // untouched
+  });
+
+  it('only removes THIS title\'s genres, leaving unrelated hated_genres entries', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+    const titleId = insertTestTitle(db, ['Horror']);
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ hated_genres: ['Horror', 'Romance'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    removeDismissReasonFromPrefs(db, profileId, titleId, 'not_my_genre');
+
+    expect(prefsFor(db, profileId).hated_genres).toEqual(['Romance']);
+  });
+
+  it('is a no-op for cast_vibe / not_in_mood (nothing was ever written)', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+    const titleId = insertTestTitle(db, ['Horror']);
+    upsertTasteSignature(db, {
+      profile_id: profileId,
+      taste_vector: null,
+      prefs: JSON.stringify({ hated_genres: ['Horror'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+
+    removeDismissReasonFromPrefs(db, profileId, titleId, 'cast_vibe');
+    removeDismissReasonFromPrefs(db, profileId, titleId, 'not_in_mood');
+
+    expect(prefsFor(db, profileId).hated_genres).toEqual(['Horror']);
+  });
+
+  it('no-ops silently when there is no taste signature yet', () => {
+    const db = createTestDb();
+    const profileId = insertTestProfile(db);
+    const titleId = insertTestTitle(db, ['Horror']);
+
+    expect(() => removeDismissReasonFromPrefs(db, profileId, titleId, 'not_my_genre')).not.toThrow();
     expect(getTasteSignature(db, profileId)).toBeNull();
   });
 });

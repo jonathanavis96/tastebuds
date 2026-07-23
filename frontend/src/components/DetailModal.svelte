@@ -47,7 +47,7 @@
     /** Mark / un-mark "Not interested". Both commit immediately in the parent. */
     onDismiss?: (item: DetailItem) => void;
     onUndismiss?: (item: DetailItem) => void;
-    /** Optional "why" reason tile tapped after dismissing (Phase-1.5 step 3 write-back). */
+    /** Optional "why" reason tile tapped after dismissing (feeds back into prefs). */
     onDismissReason?: (item: DetailItem, reason: DismissReason) => void | Promise<void>;
   }
 
@@ -214,7 +214,7 @@
     if (isDismissed) { isDismissed = false; chosenReason = null; onUndismiss?.(target); }
     else { isDismissed = true; onDismiss?.(target); }
   }
-  // Tapping a "why" tile after dismissing persists the reason (Phase-1.5 step 3).
+  // Tapping a "why" tile after dismissing persists the reason.
   // Optional and re-selectable — never blocks or reverses the dismiss itself.
   function doDismissReason(reason: DismissReason) {
     chosenReason = reason;

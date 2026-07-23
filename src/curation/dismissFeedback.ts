@@ -3,8 +3,8 @@ import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignat
 import { getTitleById } from '../db/repos/titles.js';
 
 /**
- * Dismiss-reason tile keys, in tile display order (Phase-1.5 step 3 spec:
- * "not my genre · too dark/violent · seen enough like it · cast/vibe · not in the mood").
+ * Dismiss-reason tile keys, in tile display order: not my genre · too
+ * dark/violent · seen enough like it · cast/vibe · not in the mood.
  */
 export type DismissReason =
   | 'not_my_genre'
@@ -18,7 +18,7 @@ export interface DismissReasonTile {
   label: string;
 }
 
-/** The ≤5 tiles shown after a dismiss, in the spec's order. */
+/** The ≤5 tiles shown after a dismiss, in display order. */
 export const DISMISS_REASON_TILES: DismissReasonTile[] = [
   { key: 'not_my_genre', label: 'Not my genre' },
   { key: 'too_dark', label: 'Too dark/violent' },
@@ -53,18 +53,17 @@ function mergeCapped(existing: string[], additions: string[], cap: number): stri
 }
 
 /**
- * Persist a chosen dismiss-reason tile into the profile's taste signature prefs
- * — the Phase-1.5 step-3 "learning loop" write-back.
+ * Persist a chosen dismiss-reason tile into the profile's taste signature prefs —
+ * the "learning loop" write-back that lets a dismissed rec steer future picks.
  *
- * Mapping (Phase-1.5 step 3):
+ * Mapping:
  *   - 'not_my_genre'  → merge the dismissed title's genres into prefs.hated_genres.
  *   - 'seen_enough'   → same field — over-saturation of a genre reads the same
  *                       way to retrieval's hated-genre veto as an outright dislike.
  *   - 'too_dark'      → merge the fixed 'dark/violent' tag into prefs.hated_themes.
  *   - 'cast_vibe' / 'not_in_mood' → no write-back (title-specific / mood-specific,
- *                       not a durable taste signal) — the spec's "not in the mood
- *                       maps to nothing" extended here to "cast/vibe" too, since
- *                       neither is a genre/theme derivable from the title.
+ *                       not a durable taste signal — neither is a genre/theme
+ *                       derivable from the title).
  *
  * Other prefs keys, taste_vector and refreshed_at are left untouched (a prefs-only
  * write must not look like a fresh vector refresh to callers reading refreshed_at).
@@ -100,6 +99,52 @@ export function applyDismissReasonToPrefs(
     taste_vector: existing?.taste_vector ?? null,
     prefs: JSON.stringify({ ...prefs, [prefsKey]: merged }),
     refreshed_at: existing?.refreshed_at ?? new Date().toISOString(),
+  });
+}
+
+/**
+ * Reverse a previously-applied `applyDismissReasonToPrefs` write-back — called on
+ * undismiss so a negative signal doesn't outlive the dismissal it came from.
+ * Best-effort and title-scoped: it removes only the entries THIS dismissal would
+ * have added (the title's genres, or the fixed dark/violent theme), not the
+ * whole hated_genres/hated_themes list. It does not track provenance, so if
+ * another dismissal independently added the same genre, that entry is removed
+ * here too — undoing one dismissal can drop a genre another dismissal still
+ * justifies. Acceptable for this best-effort cleanup; a no-op if the prefs
+ * don't currently contain anything to remove.
+ */
+export function removeDismissReasonFromPrefs(
+  db: InstanceType<typeof Database>,
+  profileId: number,
+  titleId: number,
+  reason: DismissReason,
+): void {
+  if (reason === 'cast_vibe' || reason === 'not_in_mood') return;
+
+  const existing = getTasteSignature(db, profileId);
+  if (!existing) return;
+  let prefs: Record<string, unknown> = {};
+  try {
+    prefs = JSON.parse(existing.prefs || '{}') as Record<string, unknown>;
+  } catch {
+    return;
+  }
+
+  const prefsKey = reason === 'too_dark' ? 'hated_themes' : 'hated_genres';
+  const toRemove = reason === 'too_dark' ? [DARK_VIOLENT_THEME] : genresForTitle(db, titleId);
+  if (toRemove.length === 0) return;
+
+  const current: string[] = Array.isArray(prefs[prefsKey]) ? (prefs[prefsKey] as string[]) : [];
+  if (current.length === 0) return;
+  const removeSet = new Set(toRemove.map((g) => g.toLowerCase()));
+  const filtered = current.filter((g) => !removeSet.has(g.toLowerCase()));
+  if (filtered.length === current.length) return; // nothing of this dismissal's was present
+
+  upsertTasteSignature(db, {
+    profile_id: profileId,
+    taste_vector: existing.taste_vector,
+    prefs: JSON.stringify({ ...prefs, [prefsKey]: filtered }),
+    refreshed_at: existing.refreshed_at,
   });
 }
 

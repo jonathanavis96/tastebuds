@@ -74,7 +74,7 @@ export interface WatchEvent {
 
 export type MediaFilter = 'all' | 'movie' | 'tv';
 
-/** Dismiss-reason tile keys (Phase-1.5 step 3), mirrored from src/curation/dismissFeedback.ts. */
+/** Dismiss-reason tile keys, mirrored from src/curation/dismissFeedback.ts. */
 export type DismissReason = 'not_my_genre' | 'too_dark' | 'seen_enough' | 'cast_vibe' | 'not_in_mood';
 
 /** The ≤5 tiles shown after "Not interested", in the spec's order. */

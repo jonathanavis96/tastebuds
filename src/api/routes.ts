@@ -15,7 +15,7 @@ import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
-import { applyDismissReasonToPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
+import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
@@ -403,7 +403,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // the chosen reason on the rec row and — for the tiles that map to a durable
   // taste signal (not_my_genre / seen_enough → hated_genres, too_dark →
   // hated_themes) — merges it into the profile's prefs so future retrieval
-  // steers away from it (Phase-1.5 step 3). cast_vibe / not_in_mood store the
+  // steers away from it. cast_vibe / not_in_mood store the
   // reason but write back nothing (see applyDismissReasonToPrefs).
   const dismissReasonKeys = new Set(DISMISS_REASON_TILES.map(t => t.key));
   api.post('/dismiss-reason', async (c) => {
@@ -413,6 +413,12 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     }
     const rec = getRecommendationById(db, body.recommendationId);
     if (!rec) return c.json({ error: 'recommendation not found' }, 404);
+    // A reason only makes sense for a rec that was actually dismissed — otherwise
+    // a caller could write reason-derived hated_genres/hated_themes for a title
+    // the user never rejected.
+    if (rec.state !== 'dismissed') {
+      return c.json({ error: 'recommendation is not dismissed' }, 409);
+    }
     setDismissReason(db, body.recommendationId, body.reason);
     try {
       applyDismissReasonToPrefs(db, body.profileId, rec.title_id, body.reason);
@@ -429,7 +435,18 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     if (!body.profileId || !body.recommendationId) {
       return c.json({ error: 'profileId and recommendationId required' }, 400);
     }
+    const rec = getRecommendationById(db, body.recommendationId);
     updateRecommendationState(db, body.recommendationId, 'pending');
+    // Reverse any reason-tile write-back so the negative signal doesn't outlive
+    // the dismissal it came from, then clear the stored reason itself.
+    if (rec?.dismiss_reason) {
+      try {
+        removeDismissReasonFromPrefs(db, body.profileId, rec.title_id, rec.dismiss_reason as DismissReason);
+      } catch {
+        // non-fatal — undo must not be blocked by a failed prefs cleanup
+      }
+      setDismissReason(db, body.recommendationId, null);
+    }
     await refreshTasteVector(db, body.profileId, config);
     return c.json({ ok: true });
   });

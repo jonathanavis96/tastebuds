@@ -104,11 +104,15 @@ export function getRecommendationById(
   );
 }
 
-/** Record which reason tile the user picked for a dismissed rec (nullable, optional follow-up to /dismiss). */
+/**
+ * Record which reason tile the user picked for a dismissed rec (optional follow-up
+ * to /dismiss), or clear it (pass null — used on /undismiss so a restored rec
+ * doesn't keep a stale reason from a previous dismissal).
+ */
 export function setDismissReason(
   db: InstanceType<typeof Database>,
   id: number,
-  reason: string,
+  reason: string | null,
 ): void {
   db.prepare('UPDATE recommendations SET dismiss_reason = ? WHERE id = ?').run(reason, id);
 }

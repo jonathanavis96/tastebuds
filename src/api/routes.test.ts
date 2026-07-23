@@ -261,6 +261,32 @@ describe('POST /api/dismiss-reason', () => {
     expect(JSON.parse(sig.prefs).hated_genres).toEqual(['Horror']);
   });
 
+  it('rejects a reason for a recommendation that is not dismissed (still pending)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (995, 'movie', 'Pending Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=995').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'pending', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(409);
+
+    // No write-back happened for the never-dismissed rec.
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(sig).toBeUndefined();
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBeNull();
+  });
+
   it('rejects an unrecognised reason', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
@@ -283,6 +309,42 @@ describe('POST /api/dismiss-reason', () => {
 });
 
 describe('POST /api/undismiss', () => {
+  it('reverses the reason-derived prefs write-back and clears dismiss_reason', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (993, 'movie', 'Undo Reason Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Dismiss with a reason first — this is the write-back /undismiss must reverse.
+    await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs).hated_genres)
+      .toEqual(['Horror']);
+
+    const res = await app.request('/api/undismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId }),
+    });
+    expect(res.status).toBe(200);
+
+    const rec = db.prepare('SELECT state, dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.state).toBe('pending');
+    expect(rec.dismiss_reason).toBeNull();
+
+    const sig = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sig.prefs).hated_genres).toEqual([]);
+  });
+
   it('restores a dismissed recommendation to pending', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
