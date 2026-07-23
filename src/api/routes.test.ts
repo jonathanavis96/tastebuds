@@ -261,6 +261,52 @@ describe('POST /api/dismiss-reason', () => {
     expect(JSON.parse(sig.prefs).hated_genres).toEqual(['Horror']);
   });
 
+  it('switching tiles reverses the old reason\'s write-back before applying the new one', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (992, 'movie', 'Switch Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+    const pick = (reason: string) => app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, recommendationId: recId, reason }),
+    });
+
+    // First tile: not_my_genre → hated_genres gets Horror.
+    expect((await pick('not_my_genre')).status).toBe(200);
+    let sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual(['Horror']);
+    expect(sig.hated_themes ?? []).toEqual([]);
+
+    // Switch to too_dark → the earlier hated_genres addition must be reversed,
+    // not left stacked alongside the new hated_themes entry.
+    expect((await pick('too_dark')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual(['dark/violent']);
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBe('too_dark');
+
+    // Switch to a no-write-back reason (cast_vibe) → the hated_themes entry
+    // from too_dark must also be reversed, leaving nothing behind.
+    expect((await pick('cast_vibe')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual([]);
+
+    // Re-selecting the SAME tile again is a harmless no-op — no duplication.
+    expect((await pick('cast_vibe')).status).toBe(200);
+    sig = JSON.parse((db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any).prefs);
+    expect(sig.hated_genres).toEqual([]);
+    expect(sig.hated_themes).toEqual([]);
+  });
+
   it('rejects a reason for a recommendation that is not dismissed (still pending)', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)

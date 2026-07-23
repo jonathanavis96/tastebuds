@@ -419,6 +419,21 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     if (rec.state !== 'dismissed') {
       return c.json({ error: 'recommendation is not dismissed' }, 409);
     }
+    // Re-selecting the same tile is a harmless no-op (the merge is idempotent).
+    if (rec.dismiss_reason === body.reason) {
+      return c.json({ ok: true });
+    }
+    // The user is switching tiles (e.g. "not my genre" → "too dark"). Reverse
+    // whatever the PREVIOUS reason wrote back before applying the new one —
+    // otherwise both reasons' signals accumulate (stale hated_genres left
+    // behind after switching to a reason that writes to hated_themes instead).
+    if (rec.dismiss_reason) {
+      try {
+        removeDismissReasonFromPrefs(db, body.profileId, rec.title_id, rec.dismiss_reason as DismissReason);
+      } catch {
+        // non-fatal — affinity persistence must not break the dismiss flow
+      }
+    }
     setDismissReason(db, body.recommendationId, body.reason);
     try {
       applyDismissReasonToPrefs(db, body.profileId, rec.title_id, body.reason);
