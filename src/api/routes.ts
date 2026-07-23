@@ -412,7 +412,13 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       return c.json({ error: 'profileId, recommendationId and a valid reason are required' }, 400);
     }
     const rec = getRecommendationById(db, body.recommendationId);
-    if (!rec) return c.json({ error: 'recommendation not found' }, 404);
+    // Ownership check folded into the same 404 as a genuinely missing rec, so a
+    // caller can't distinguish "doesn't exist" from "belongs to another profile"
+    // (an IDOR — profile B posting profile A's rec must not write into A's prefs
+    // or B's, and must not reveal that the rec exists at all).
+    if (!rec || rec.profile_id !== body.profileId) {
+      return c.json({ error: 'recommendation not found' }, 404);
+    }
     // A reason only makes sense for a rec that was actually dismissed — otherwise
     // a caller could write reason-derived hated_genres/hated_themes for a title
     // the user never rejected.
@@ -451,6 +457,12 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       return c.json({ error: 'profileId and recommendationId required' }, 400);
     }
     const rec = getRecommendationById(db, body.recommendationId);
+    // Same ownership check as /dismiss-reason: a rec that belongs to a different
+    // profile must not be touched (state flipped, or its reason reversed into
+    // the wrong profile's prefs) by this call.
+    if (rec && rec.profile_id !== body.profileId) {
+      return c.json({ error: 'recommendation not found' }, 404);
+    }
     updateRecommendationState(db, body.recommendationId, 'pending');
     // Reverse any reason-tile write-back so the negative signal doesn't outlive
     // the dismissal it came from, then clear the stored reason itself.

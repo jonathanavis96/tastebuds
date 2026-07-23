@@ -307,6 +307,35 @@ describe('POST /api/dismiss-reason', () => {
     expect(sig.hated_themes).toEqual([]);
   });
 
+  it('rejects a reason for a recommendation owned by a different profile (IDOR)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (991, 'movie', 'Owned By Alex', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
+    // Owned by profile 1 (Alex).
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Posted as profile 2 (Sam) — must be rejected, not applied to either profile's prefs.
+    const res = await app.request('/api/dismiss-reason', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 2, recommendationId: recId, reason: 'not_my_genre' }),
+    });
+    expect(res.status).toBe(404);
+
+    const rec = db.prepare('SELECT dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.dismiss_reason).toBeNull();
+    const sigAlex = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(sigAlex).toBeUndefined();
+    const sigSam = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=2').get() as any;
+    expect(sigSam).toBeUndefined();
+  });
+
   it('rejects a reason for a recommendation that is not dismissed (still pending)', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
@@ -355,6 +384,37 @@ describe('POST /api/dismiss-reason', () => {
 });
 
 describe('POST /api/undismiss', () => {
+  it('rejects undismissing a recommendation owned by a different profile (IDOR)', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (990, 'movie', 'Owned By Alex Undismiss', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
+    // Owned by profile 1 (Alex), already dismissed with a reason.
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, dismiss_reason, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', 'not_my_genre', datetime('now'))`).run(titleId);
+    const recId = (db.prepare('SELECT id FROM recommendations WHERE profile_id=1').get() as any).id;
+    db.prepare(`INSERT INTO taste_signatures (profile_id, prefs, refreshed_at) VALUES (1, ?, datetime('now'))`)
+      .run(JSON.stringify({ hated_genres: ['Horror'] }));
+
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+
+    // Posted as profile 2 (Sam) — must be rejected: rec stays dismissed, its
+    // reason stays intact, and Alex's hated_genres is not reversed by Sam's call.
+    const res = await app.request('/api/undismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 2, recommendationId: recId }),
+    });
+    expect(res.status).toBe(404);
+
+    const rec = db.prepare('SELECT state, dismiss_reason FROM recommendations WHERE id=?').get(recId) as any;
+    expect(rec.state).toBe('dismissed');
+    expect(rec.dismiss_reason).toBe('not_my_genre');
+    const sigAlex = db.prepare('SELECT prefs FROM taste_signatures WHERE profile_id=1').get() as any;
+    expect(JSON.parse(sigAlex.prefs).hated_genres).toEqual(['Horror']);
+  });
+
   it('reverses the reason-derived prefs write-back and clears dismiss_reason', async () => {
     const db = setupDb();
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
