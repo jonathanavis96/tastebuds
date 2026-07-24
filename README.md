@@ -257,6 +257,12 @@ public-exposure risk as above). If you're running `node dist/server/server.js`
 directly on a machine with a public or shared-LAN interface and only want it
 reachable from that machine, set `HOST=127.0.0.1` in `.env`.
 
+Conversely, `HOST` has no effect on the Docker path even though `env_file`
+forwards the whole `.env` into the container: `docker-compose.yml` explicitly
+pins the in-container `HOST` to `0.0.0.0`, overriding anything set for the
+bare-Node case above, so the container always stays reachable at the
+`BIND_HOST`-published port regardless of what `.env` says.
+
 There is no per-request auth token: `profileId` enumeration and the `/generate`
 endpoint are only a concern if the app is reachable by untrusted callers, which
 the `BIND_HOST` guidance above is meant to prevent.

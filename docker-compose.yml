@@ -13,6 +13,16 @@ services:
       - ./data:/app/data
     env_file:
       - .env
+    environment:
+      # Force the in-container listener to every interface, no matter what
+      # HOST is set to in .env. HOST is a bare-Node-only knob (see .env.example);
+      # env_file above forwards the whole .env into the container, so a HOST
+      # set for bare-Node dev (e.g. 127.0.0.1) would otherwise reach the
+      # container too and make the app bind to its own loopback — unreachable
+      # via the BIND_HOST-published port even though the container looks
+      # healthy. A key set in `environment` always wins over the same key
+      # coming from `env_file`, so this stays 0.0.0.0 regardless of .env.
+      - HOST=0.0.0.0
     extra_hosts:
       # lets the container reach the Ollama container published on the host (:11434)
       - "host.docker.internal:host-gateway"
