@@ -72,7 +72,7 @@ ${requestBlock}## ON-TASTE candidates (closest to ${profile.name}'s taste vector
 ${onTasteList || '(none)'}
 
 ## Instructions
-Return ONLY a valid JSON array (no markdown, no explanation) of exactly 5 items. Return exactly 5 items, ALL with kind "core" and category "Top pick" — the 5 best on-taste matches for ${profile.name}. Do NOT include any wildcard or adversarial picks.
+Return ONLY a JSON object of the form {"items":[...]} where "items" is a JSON array of exactly 5 items. Return exactly 5 items, ALL with kind "core" and category "Top pick" — the 5 best on-taste matches for ${profile.name}. Do NOT include any wildcard or adversarial picks.
 
 Each item MUST have exactly these fields:
 - "tmdb_id": number (from the candidate list above)
@@ -112,7 +112,7 @@ ${wildcardList || '(none)'}
 ${adversarialList || '(none)'}
 
 ## Instructions
-Return ONLY a valid JSON array (no markdown, no explanation) of exactly 10 items composed as follows:
+Return ONLY a JSON object of the form {"items":[...]} where "items" is a JSON array of exactly 10 items composed as follows:
 - 7 picks from the ON-TASTE group (kind: "core")
 - 2 picks from the WILDCARD group (kind: "wildcard") — these are discovery picks ${profile.name} wouldn't normally choose but might enjoy
 - 1 pick from the ADVERSARIAL group (kind: "adversarial") — a title you predict ${profile.name} will dislike; in the "why" field briefly explain the mismatch and note that a high rating (3+ on the 5-star scale) means the model should recalibrate${balanceMediaLine}
@@ -146,7 +146,7 @@ ${requestBlock}## Candidate titles
 ${candidateList}
 
 ## Instructions
-Return ONLY a valid JSON array (no markdown, no explanation) of your top picks ranked best-first, maximum 10 items.${requestInstruction}
+Return ONLY a JSON object of the form {"items":[...]} where "items" is a JSON array of your top picks ranked best-first, maximum 10 items.${requestInstruction}
 Each item MUST have exactly these fields:
 - "tmdb_id": number (from the candidate list above)
 - "why": string (≤120 chars, plain text — do NOT use double-quote (") characters inside it; use single quotes if needed)
