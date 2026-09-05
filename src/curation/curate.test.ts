@@ -141,6 +141,26 @@ describe('curateCandidates', () => {
     );
   });
 
+  it('pins the model to Sonnet 5 and requests structured output via --json-schema', async () => {
+    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const spawnMock = makeSpawnMock(claudeOutput);
+    await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-sonnet-5');
+    const schema = JSON.parse(args[args.indexOf('--json-schema') + 1]) as { required: string[] };
+    expect(schema.required).toEqual(['items']);
+  });
+
+  it('prefers structured_output (already-parsed, quote-safe) over the result text', async () => {
+    // A `why` containing a double quote broke the text path in prod (2026-09-05);
+    // structured_output is parsed by the CLI so it never needs extractJsonArray.
+    const items = [{ tmdb_id: 101, why: 'He said "hi" there', category: 'Top pick' }];
+    const claudeOutput = JSON.stringify({ result: 'not json at all', structured_output: { items } });
+    const spawnMock = makeSpawnMock(claudeOutput);
+    const results = await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    expect(results[0]).toMatchObject({ tmdbId: 101, why: 'He said "hi" there' });
+  });
+
   it('parses raw JSON array output (no outer wrapper)', async () => {
     const items = [{ tmdb_id: 101, why: 'Great drama', category: 'Hidden gem' }];
     // When outer.result is undefined, inner = stdout itself

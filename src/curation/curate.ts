@@ -26,6 +26,35 @@ function normalizePredictedRating(v: unknown): number | null {
 
 export type SpawnFn = typeof nodeSpawn;
 
+/** Pinned so curation quality/cost does not drift with the account's default model. */
+export const CURATION_MODEL = 'claude-sonnet-5';
+
+/**
+ * Structured-output schema passed via `--json-schema`. Top level must be an
+ * object, so the array lives under `items`. This is what stops a stray `"`
+ * inside `why` from producing unparseable JSON (the prod 500 of 2026-09-05).
+ */
+export const CURATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          tmdb_id: { type: 'integer' },
+          why: { type: 'string' },
+          category: { type: 'string' },
+          kind: { type: 'string', enum: ['core', 'wildcard', 'adversarial'] },
+          predicted_rating: { type: 'number' },
+        },
+        required: ['tmdb_id', 'why', 'category'],
+      },
+    },
+  },
+  required: ['items'],
+} as const;
+
 /**
  * Robustly extract a JSON array from an LLM text response that may wrap it in
  * markdown fences (```json ... ```), surround it with prose, or include a
@@ -74,7 +103,12 @@ export async function curateCandidates(
   // One claude -p call → parsed CurationResult[]. Rejects on spawn/exit/parse failure.
   const runOnce = (): Promise<CurationResult[]> =>
     new Promise<CurationResult[]>((resolve, reject) => {
-      const proc: ChildProcess = spawnFn('claude', ['-p', prompt, '--output-format', 'json'], {
+      const proc: ChildProcess = spawnFn('claude', [
+        '-p', prompt,
+        '--model', CURATION_MODEL,
+        '--output-format', 'json',
+        '--json-schema', JSON.stringify(CURATION_SCHEMA),
+      ], {
         env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: config.claudeToken },
         // Ignore stdin: the prompt is passed as an arg, so claude has no stdin to read.
         // Without this it warns and blocks ~3s ("no stdin data received in 3s") on every call.
@@ -93,18 +127,27 @@ export async function curateCandidates(
           return;
         }
         try {
-          // claude --output-format json wraps in {type, subtype, result, ...}
-          const outer = JSON.parse(stdout) as { result?: string };
-          const inner = outer.result ?? stdout;
-          // The model's text may wrap the JSON array in markdown fences or prose,
-          // and occasionally emit a trailing comma — extract + sanitise robustly.
-          const parsed = extractJsonArray(inner) as Array<{
+          // claude --output-format json wraps in {type, subtype, result, ...}.
+          // With --json-schema the CLI also returns `structured_output`, already
+          // parsed and quote-safe — prefer it. Fall back to the text path for
+          // older CLIs (or tests) that only provide `result`.
+          const outer = JSON.parse(stdout) as { result?: string; structured_output?: { items?: unknown } };
+          type RawItem = {
             tmdb_id: number;
             why: string;
             category: string;
             kind?: string;
             predicted_rating?: number;
-          }>;
+          };
+          let parsed: RawItem[];
+          if (outer.structured_output && Array.isArray(outer.structured_output.items)) {
+            parsed = outer.structured_output.items as RawItem[];
+          } else {
+            const inner = outer.result ?? stdout;
+            // The model's text may wrap the JSON array in markdown fences or prose,
+            // and occasionally emit a trailing comma — extract + sanitise robustly.
+            parsed = extractJsonArray(inner) as RawItem[];
+          }
           if (!Array.isArray(parsed)) throw new Error('Expected JSON array from claude');
           // No cap here — balance/surprise cap is applied in the outer scope after
           // media_type lookup via titleMap. Guard against runaway LLM responses (>30
