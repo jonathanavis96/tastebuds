@@ -9,6 +9,15 @@ import { getTitleById } from '../db/repos/titles.js';
 import { getRecommendations } from '../db/repos/recommendations.js';
 import { getCachedEmbedding, putCachedEmbedding } from '../db/repos/embeddingCache.js';
 import { blendVectors } from './blend.js';
+import { hardFilterSql, withWidening, type HardFilters } from './filters.js';
+import {
+  genreAffinityForProfile,
+  jointGenreAffinity,
+  rerank,
+  GENRE_VETO_THRESHOLD,
+  type GenreAffinity,
+  type RerankWeights,
+} from './rerank.js';
 
 /** Deserialise a little-endian Float32 embedding Buffer to a number[]. */
 function bufferToVec(buf: Buffer): number[] {
@@ -33,6 +42,17 @@ export interface RetrieveOpts {
    * included (lenient: unrated ≠ bad).
    */
   minImdbRating?: number;
+  /**
+   * Hard metadata filters (year / runtime / votes / rating / language / release
+   * status) applied in SQL before similarity. routes.ts always sets this; when
+   * undefined the stage is skipped (tests only).
+   */
+  hardFilters?: HardFilters;
+  /**
+   * Called with the widening steps that had to be applied to reach the minimum
+   * pool size (empty array = strict filters were enough). For logging.
+   */
+  onWidened?: (stepsApplied: string[]) => void;
 }
 
 /**
@@ -198,6 +218,104 @@ export async function refreshTasteVector(
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Candidate retrieval
+//
+// Every path below runs the same three stages:
+//   1. HARD FILTERS (src/retrieval/filters.ts) — applied in SQL before anything
+//      else, so unreleased, unrated, too-short, too-old or wrong-language titles
+//      never reach ranking. Passed in via opts.hardFilters (routes always sets
+//      it; leaving it undefined disables the stage, which only tests rely on).
+//   2. SIMILARITY — cosine distance to the taste (⊕ request) vector via sqlite-vec,
+//      fetching a wider slate than is returned.
+//   3. RERANK (src/retrieval/rerank.ts) — genre affinity learned from the
+//      profiles' own star ratings (mutual veto for Joint), Bayesian quality and
+//      popularity, so votes visibly change what comes out.
+// A thin pool is widened (year → runtime → votes) rather than returned short.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** How many rows similarity fetches per returned row, before rerank trims. */
+const RERANK_FETCH_MULTIPLIER = 4;
+/** On-taste / request pools are widened until they hold at least this many rows. */
+export const MIN_POOL_ROWS = 20;
+/** Flat request candidates handed to curation (was 30; the request prompt now asks for ≥10 picks). */
+export const REQUEST_CANDIDATE_LIMIT = 60;
+
+/** Wildcards are "off-taste but real": rank them by quality + popularity, not similarity. */
+const WILDCARD_WEIGHTS: RerankWeights = { similarity: 0, affinity: 0.2, quality: 0.5, popularity: 0.3 };
+
+/** SQL fragment + params for opts.hardFilters (or the widened variant `f`). Empty when disabled. */
+function filterClause(f: HardFilters | undefined): { sql: string; params: unknown[] } {
+  return f ? hardFilterSql(f) : { sql: '', params: [] };
+}
+
+/** Genres a solo profile has effectively vetoed: rated consistently low, or a stated hated genre. */
+function soloVetoes(affinity: GenreAffinity): Set<string> {
+  return new Set(Object.entries(affinity).filter(([, v]) => v <= GENRE_VETO_THRESHOLD).map(([g]) => g));
+}
+
+interface TasteContext {
+  affinity: GenreAffinity;
+  vetoed: Set<string>;
+}
+
+function soloTaste(db: InstanceType<typeof Database>, profileId: number): TasteContext {
+  const affinity = genreAffinityForProfile(db, profileId);
+  return { affinity, vetoed: soloVetoes(affinity) };
+}
+
+function jointTaste(
+  db: InstanceType<typeof Database>,
+  alexId: number,
+  samId: number,
+  jointId: number | undefined,
+): TasteContext {
+  return jointGenreAffinity(
+    genreAffinityForProfile(db, alexId),
+    genreAffinityForProfile(db, samId),
+    jointId != null ? genreAffinityForProfile(db, jointId) : {},
+  );
+}
+
+/** Rerank then trim, dropping the rank_score so callers see plain CandidateTitle rows (score = distance). */
+function top<T extends CandidateTitle>(rows: T[], taste: TasteContext, limit: number, weights?: RerankWeights): T[] {
+  return rerank(rows, taste.affinity, taste.vetoed, weights).slice(0, limit).map(({ rank_score: _r, ...rest }) => rest as unknown as T);
+}
+
+/**
+ * Run `query` for movies and series separately (balanced), or once for a fixed
+ * media type, widening the shared filters until the combined pool is big enough.
+ */
+function balancedWithWidening(
+  opts: RetrieveOpts,
+  perSideLimit: number,
+  query: (f: HardFilters | undefined, mediaType: 'movie' | 'tv' | undefined, limit: number) => CandidateTitle[],
+): { movie: CandidateTitle[]; tv: CandidateTitle[]; single: CandidateTitle[]; filters: HardFilters | undefined } {
+  if (!opts.hardFilters) {
+    return opts.mediaType
+      ? { movie: [], tv: [], single: query(undefined, opts.mediaType, perSideLimit), filters: undefined }
+      : { movie: query(undefined, 'movie', perSideLimit), tv: query(undefined, 'tv', perSideLimit), single: [], filters: undefined };
+  }
+  const minRows = Math.min(MIN_POOL_ROWS, opts.mediaType ? perSideLimit : perSideLimit * 2);
+  if (opts.mediaType) {
+    const res = withWidening(opts.hardFilters, minRows, f => query(f, opts.mediaType, perSideLimit));
+    opts.onWidened?.(res.stepsApplied);
+    return { movie: [], tv: [], single: res.rows, filters: res.filters };
+  }
+  const res = withWidening(opts.hardFilters, minRows, f => [
+    ...query(f, 'movie', perSideLimit).map(r => ({ ...r, _side: 'movie' as const })),
+    ...query(f, 'tv', perSideLimit).map(r => ({ ...r, _side: 'tv' as const })),
+  ]);
+  opts.onWidened?.(res.stepsApplied);
+  const strip = (r: CandidateTitle & { _side: string }) => { const { _side: _s, ...rest } = r; return rest as CandidateTitle; };
+  return {
+    movie: res.rows.filter(r => r._side === 'movie').map(strip),
+    tv: res.rows.filter(r => r._side === 'tv').map(strip),
+    single: [],
+    filters: res.filters,
+  };
+}
+
 /**
  * Retrieve candidate titles for a single profile using cosine similarity via sqlite-vec.
  */
@@ -212,31 +330,39 @@ export async function retrieveCandidates(
 
   const tasteVec = sig.taste_vector;
   const limit = opts.limit ?? 20;
+  const taste = soloTaste(db, profileId);
 
-  let sql = `
-    SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-    FROM titles t
-    WHERE t.embedding IS NOT NULL
-      AND t.id NOT IN (
-        SELECT title_id FROM watch_events WHERE profile_id = ?
-      )
-  `;
-  const params: unknown[] = [tasteVec, profileId];
+  const run = (f: HardFilters | undefined): CandidateTitle[] => {
+    const fc = filterClause(f);
+    let sql = `
+      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
+      FROM titles t
+      WHERE t.embedding IS NOT NULL
+        AND t.id NOT IN (
+          SELECT title_id FROM watch_events WHERE profile_id = ?
+        )
+        ${fc.sql}
+    `;
+    const params: unknown[] = [tasteVec, profileId, ...fc.params];
+    if (opts.mediaType) { sql += ' AND t.media_type = ?'; params.push(opts.mediaType); }
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
+    }
+    sql += ' ORDER BY score ASC LIMIT ?';
+    params.push(limit * RERANK_FETCH_MULTIPLIER);
+    return db.prepare(sql).all(...params) as CandidateTitle[];
+  };
 
-  if (opts.mediaType) {
-    sql += ' AND t.media_type = ?';
-    params.push(opts.mediaType);
+  let rows: CandidateTitle[];
+  if (opts.hardFilters) {
+    const res = withWidening(opts.hardFilters, Math.min(MIN_POOL_ROWS, limit), run);
+    opts.onWidened?.(res.stepsApplied);
+    rows = res.rows;
+  } else {
+    rows = run(undefined);
   }
-
-  if (opts.minImdbRating != null) {
-    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-    params.push(opts.minImdbRating);
-  }
-
-  sql += ' ORDER BY score ASC LIMIT ?';
-  params.push(limit);
-
-  return db.prepare(sql).all(...params) as CandidateTitle[];
+  return top(rows, taste, limit);
 }
 
 export interface CandidatePool {
@@ -263,6 +389,7 @@ interface PrefsJson {
  *     picked while browsing in Joint view — that write lands on the Joint
  *     profile's own taste_signatures row, not Alex's or Sam's, so it must be
  *     read from here too or it's silently inert for future joint recs).
+ *   - exclude any genre either partner has rated consistently low (rerank veto).
  */
 export async function retrieveJointCandidates(
   db: InstanceType<typeof Database>,
@@ -276,15 +403,7 @@ export async function retrieveJointCandidates(
 
   if (!alexSig?.taste_vector || !samSig?.taste_vector) return [];
 
-  // Deserialise Buffers to number[]
-  const alexVec = Array.from(
-    new Float32Array(alexSig.taste_vector.buffer, alexSig.taste_vector.byteOffset, alexSig.taste_vector.length / 4),
-  );
-  const samVec = Array.from(
-    new Float32Array(samSig.taste_vector.buffer, samSig.taste_vector.byteOffset, samSig.taste_vector.length / 4),
-  );
-
-  const blended = blendVectors(alexVec, 0.5, samVec, 0.5);
+  const blended = blendVectors(vecFromBuffer(alexSig.taste_vector), 0.5, vecFromBuffer(samSig.taste_vector), 0.5);
   const blendedBuf = Buffer.from(new Float32Array(blended).buffer);
 
   const alexPrefs: PrefsJson = JSON.parse(alexSig.prefs ?? '{}');
@@ -292,45 +411,47 @@ export async function retrieveJointCandidates(
   const jointId = opts.jointProfileId;
   const jointSig = jointId != null ? getTasteSignature(db, jointId) : undefined;
   const jointPrefs: PrefsJson = jointSig ? JSON.parse(jointSig.prefs ?? '{}') : {};
-
-  const alexHated: string[] = alexPrefs.hated_genres ?? [];
-  const samHated: string[] = samPrefs.hated_genres ?? [];
-  const jointHated: string[] = jointPrefs.hated_genres ?? [];
-  const allHated = [...new Set([...alexHated, ...samHated, ...jointHated])];
+  const allHated = [...new Set([
+    ...(alexPrefs.hated_genres ?? []),
+    ...(samPrefs.hated_genres ?? []),
+    ...(jointPrefs.hated_genres ?? []),
+  ])];
 
   const limit = opts.limit ?? 20;
+  const taste = jointTaste(db, alexId, samId, jointId);
 
-  // Build SQL — exclude both watch_event lists and any hated-genre overlap
-  let sql = `
-    SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-    FROM titles t
-    WHERE t.embedding IS NOT NULL
-      AND t.id NOT IN (
-        SELECT title_id FROM watch_events WHERE profile_id = ? OR profile_id = ?
-      )
-  `;
-  const params: unknown[] = [blendedBuf, alexId, samId];
+  const run = (f: HardFilters | undefined): CandidateTitle[] => {
+    const fc = filterClause(f);
+    let sql = `
+      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
+      FROM titles t
+      WHERE t.embedding IS NOT NULL
+        AND t.id NOT IN (
+          SELECT title_id FROM watch_events WHERE profile_id = ? OR profile_id = ?
+        )
+        ${fc.sql}
+    `;
+    const params: unknown[] = [blendedBuf, alexId, samId, ...fc.params];
+    if (opts.mediaType) { sql += ' AND t.media_type = ?'; params.push(opts.mediaType); }
+    for (const genre of allHated) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%${genre}%`); }
+    if (opts.minImdbRating != null) {
+      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      params.push(opts.minImdbRating);
+    }
+    sql += ' ORDER BY score ASC LIMIT ?';
+    params.push(limit * RERANK_FETCH_MULTIPLIER);
+    return db.prepare(sql).all(...params) as CandidateTitle[];
+  };
 
-  if (opts.mediaType) {
-    sql += ' AND t.media_type = ?';
-    params.push(opts.mediaType);
+  let rows: CandidateTitle[];
+  if (opts.hardFilters) {
+    const res = withWidening(opts.hardFilters, Math.min(MIN_POOL_ROWS, limit), run);
+    opts.onWidened?.(res.stepsApplied);
+    rows = res.rows;
+  } else {
+    rows = run(undefined);
   }
-
-  // Hated genre veto — LIKE filter per hated genre
-  for (const genre of allHated) {
-    sql += ' AND t.genres NOT LIKE ?';
-    params.push(`%${genre}%`);
-  }
-
-  if (opts.minImdbRating != null) {
-    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-    params.push(opts.minImdbRating);
-  }
-
-  sql += ' ORDER BY score ASC LIMIT ?';
-  params.push(limit);
-
-  return db.prepare(sql).all(...params) as CandidateTitle[];
+  return top(rows, taste, limit);
 }
 
 /** Build a NOT IN clause safe from the NULL trap: when ids is empty, use `SELECT 0`. */
@@ -339,15 +460,108 @@ function notInClause(ids: number[]): [string, number[]] {
   return [ids.map(() => '?').join(','), ids];
 }
 
+type OrderDir = 'ASC' | 'DESC' | 'RANDOM';
+
 /**
- * Retrieve a structured candidate pool for a single profile.
+ * Shared pool query for the solo and Joint pools: taste vector distance over
+ * titles not engaged by any of `vetoProfileIds`, minus explicit excludes, under
+ * hard filters `f`, optional media type, hated-genre LIKE vetoes and IMDb floor.
+ */
+function runPoolQuery(
+  db: InstanceType<typeof Database>,
+  vec: Buffer,
+  vetoProfileIds: number[],
+  excludeIds: number[],
+  opts: RetrieveOpts,
+  f: HardFilters | undefined,
+  mediaType: 'movie' | 'tv' | undefined,
+  orderDir: OrderDir,
+  limit: number,
+  hatedGenres: string[] = [],
+): CandidateTitle[] {
+  const [vetoPh, vetoIds] = notInClause(vetoProfileIds);
+  const [excPh, excIds] = notInClause(excludeIds);
+  const fc = filterClause(f);
+  let sql = `
+    SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
+    FROM titles t
+    WHERE t.embedding IS NOT NULL
+      AND t.id NOT IN (SELECT title_id FROM watch_events WHERE profile_id IN (${vetoPh}))
+      AND t.id NOT IN (${excPh})
+      ${fc.sql}
+  `;
+  const params: unknown[] = [vec, ...vetoIds, ...excIds, ...fc.params];
+  if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
+  for (const genre of hatedGenres) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%${genre}%`); }
+  if (opts.minImdbRating != null) {
+    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+    params.push(opts.minImdbRating);
+  }
+  sql += orderDir === 'RANDOM' ? ' ORDER BY RANDOM()' : ` ORDER BY score ${orderDir}`;
+  sql += ' LIMIT ?';
+  params.push(limit);
+  return db.prepare(sql).all(...params) as CandidateTitle[];
+}
+
+/**
+ * Assemble the 3-group pool (on-taste / wildcards / adversarial) from a taste
+ * vector, given who has engaged (veto) and what to exclude. Used by both the solo
+ * and Joint pools, which differ only in vector, veto set and affinity context.
  *
- * - onTaste: ~20 closest by cosine distance (score ASC); when mediaType is unset,
- *   balanced as top 10 movies + top 10 series.
- * - adversarial: ~8 farthest (score DESC), not in onTaste; when mediaType is unset,
- *   balanced as 4 movies + 4 series.
- * - wildcards: ~12 random, not in onTaste/adversarial, not hated genre; when
- *   mediaType is unset, balanced as 6 movies + 6 series.
+ * - onTaste: closest by cosine after hard filters, reranked; 20 (or 10 movies +
+ *   10 series when mediaType is unset). Widened when thin.
+ * - adversarial: farthest by cosine under the SAME (possibly widened) filters,
+ *   not in onTaste; 8 (4+4). Genre veto is NOT applied — this is the deliberate
+ *   "predicted dislike" pick — but hard filters are, so it's still a real film.
+ * - wildcards: random under the filters, minus hated genres and the other
+ *   groups, then ranked by quality/popularity; 12 (6+6).
+ */
+function assemblePool(
+  db: InstanceType<typeof Database>,
+  vec: Buffer,
+  vetoProfileIds: number[],
+  opts: RetrieveOpts,
+  taste: TasteContext,
+  hatedGenres: string[],
+): CandidatePool {
+  const extraExclude: number[] = opts.excludeTitleIds ?? [];
+  const q = (f: HardFilters | undefined, mt: 'movie' | 'tv' | undefined, order: OrderDir, limit: number, exclude: number[], hated: string[] = []) =>
+    runPoolQuery(db, vec, vetoProfileIds, [...extraExclude, ...exclude], opts, f, mt, order, limit, hated);
+
+  const sideLimit = opts.mediaType ? 20 : 10;
+  const fetched = balancedWithWidening(opts, sideLimit * RERANK_FETCH_MULTIPLIER, (f, mt, limit) => q(f, mt, 'ASC', limit, []));
+  const f = fetched.filters;
+
+  let onTaste: CandidateTitle[];
+  let adversarial: CandidateTitle[];
+  let wildcards: CandidateTitle[];
+
+  if (opts.mediaType) {
+    onTaste = top(fetched.single, taste, 20);
+    const onIds = onTaste.map(c => c.id);
+    adversarial = top(q(f, opts.mediaType, 'DESC', 8 * 3, onIds), { affinity: {}, vetoed: new Set() }, 8, WILDCARD_WEIGHTS);
+    const exWild = [...onIds, ...adversarial.map(c => c.id)];
+    wildcards = top(q(f, opts.mediaType, 'RANDOM', 12 * 3, exWild, hatedGenres), taste, 12, WILDCARD_WEIGHTS);
+  } else {
+    onTaste = [...top(fetched.movie, taste, 10), ...top(fetched.tv, taste, 10)];
+    const onIds = onTaste.map(c => c.id);
+    const noTaste: TasteContext = { affinity: {}, vetoed: new Set() };
+    adversarial = [
+      ...top(q(f, 'movie', 'DESC', 4 * 3, onIds), noTaste, 4, WILDCARD_WEIGHTS),
+      ...top(q(f, 'tv', 'DESC', 4 * 3, onIds), noTaste, 4, WILDCARD_WEIGHTS),
+    ];
+    const exWild = [...onIds, ...adversarial.map(c => c.id)];
+    wildcards = [
+      ...top(q(f, 'movie', 'RANDOM', 6 * 3, exWild, hatedGenres), taste, 6, WILDCARD_WEIGHTS),
+      ...top(q(f, 'tv', 'RANDOM', 6 * 3, exWild, hatedGenres), taste, 6, WILDCARD_WEIGHTS),
+    ];
+  }
+
+  return { onTaste, wildcards, adversarial };
+}
+
+/**
+ * Retrieve a structured candidate pool for a single profile (see assemblePool).
  *
  * opts.excludeTitleIds: additional title ids to exclude from all groups (e.g.
  * already-pending recommendations — prevents accumulation of duplicates).
@@ -361,119 +575,23 @@ export async function retrieveCandidatePool(
   const sig = getTasteSignature(db, profileId);
   if (!sig?.taste_vector) return { onTaste: [], wildcards: [], adversarial: [] };
 
-  const tasteVec = sig.taste_vector;
   const prefs: PrefsJson = JSON.parse(sig.prefs ?? '{}');
   const hatedGenres: string[] = prefs.hated_genres ?? [];
-  const extraExclude: number[] = opts.excludeTitleIds ?? [];
-
-  const watchedSubquery = 'SELECT title_id FROM watch_events WHERE profile_id = ?';
-
-  // Helper: run a single-media-type or all-media query.
-  const runOnTasteQuery = (mediaType: 'movie' | 'tv' | undefined, limit: number, extraIds: number[]): CandidateTitle[] => {
-    const [excPh, excIds] = notInClause([...extraExclude, ...extraIds]);
-    let sql = `
-      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-      FROM titles t
-      WHERE t.embedding IS NOT NULL
-        AND t.id NOT IN (${watchedSubquery})
-        AND t.id NOT IN (${excPh})
-    `;
-    const params: unknown[] = [tasteVec, profileId, ...excIds];
-    if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-    if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-      params.push(opts.minImdbRating);
-    }
-    sql += ' ORDER BY score ASC LIMIT ?';
-    params.push(limit);
-    return db.prepare(sql).all(...params) as CandidateTitle[];
-  };
-
-  const runAdversarialQuery = (mediaType: 'movie' | 'tv' | undefined, limit: number, extraIds: number[]): CandidateTitle[] => {
-    const [excPh, excIds] = notInClause([...extraExclude, ...extraIds]);
-    let sql = `
-      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-      FROM titles t
-      WHERE t.embedding IS NOT NULL
-        AND t.id NOT IN (${watchedSubquery})
-        AND t.id NOT IN (${excPh})
-    `;
-    const params: unknown[] = [tasteVec, profileId, ...excIds];
-    if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-    if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-      params.push(opts.minImdbRating);
-    }
-    sql += ' ORDER BY score DESC LIMIT ?';
-    params.push(limit);
-    return db.prepare(sql).all(...params) as CandidateTitle[];
-  };
-
-  const runWildcardQuery = (mediaType: 'movie' | 'tv' | undefined, limit: number, extraIds: number[]): CandidateTitle[] => {
-    const [excPh, excIds] = notInClause([...extraExclude, ...extraIds]);
-    let sql = `
-      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-      FROM titles t
-      WHERE t.embedding IS NOT NULL
-        AND t.id NOT IN (${watchedSubquery})
-        AND t.id NOT IN (${excPh})
-    `;
-    const params: unknown[] = [tasteVec, profileId, ...excIds];
-    if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-    for (const genre of hatedGenres) {
-      sql += ' AND t.genres NOT LIKE ?';
-      params.push(`%${genre}%`);
-    }
-    if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-      params.push(opts.minImdbRating);
-    }
-    sql += ' ORDER BY RANDOM() LIMIT ?';
-    params.push(limit);
-    return db.prepare(sql).all(...params) as CandidateTitle[];
-  };
-
-  let onTaste: CandidateTitle[];
-  let adversarial: CandidateTitle[];
-  let wildcards: CandidateTitle[];
-
-  if (opts.mediaType) {
-    // ── single media type: original behaviour ──────────────────────────────
-    onTaste = runOnTasteQuery(opts.mediaType, 20, []);
-    adversarial = runAdversarialQuery(opts.mediaType, 8, onTaste.map(c => c.id));
-    wildcards = runWildcardQuery(opts.mediaType, 12, [...onTaste.map(c => c.id), ...adversarial.map(c => c.id)]);
-  } else {
-    // ── balanced across media types ────────────────────────────────────────
-    const onTasteMovies = runOnTasteQuery('movie', 10, []);
-    const onTasteTv = runOnTasteQuery('tv', 10, []);
-    onTaste = [...onTasteMovies, ...onTasteTv];
-
-    const onTasteIds = onTaste.map(c => c.id);
-    const adversarialMovies = runAdversarialQuery('movie', 4, onTasteIds);
-    const adversarialTv = runAdversarialQuery('tv', 4, onTasteIds);
-    adversarial = [...adversarialMovies, ...adversarialTv];
-
-    const excludeWildcard = [...onTasteIds, ...adversarial.map(c => c.id)];
-    const wildcardMovies = runWildcardQuery('movie', 6, excludeWildcard);
-    const wildcardTv = runWildcardQuery('tv', 6, excludeWildcard);
-    wildcards = [...wildcardMovies, ...wildcardTv];
-  }
-
-  return { onTaste, wildcards, adversarial };
+  return assemblePool(db, sig.taste_vector, [profileId], opts, soloTaste(db, profileId), hatedGenres);
 }
 
 /**
  * Cold-start candidate pool for a profile that has prefs but NO taste vector yet —
  * a freshly seeded profile that has never rated anything, so refreshTasteVector
  * left taste_vector null. There's nothing to compute cosine distance against, so we
- * fall back to the profile's stated loved_genres, ordered RANDOM (there's no
- * popularity/vote column on titles to rank by), with the hated-genre veto and the
+ * fall back to the profile's stated loved_genres, drawn at random under the hard
+ * filters and then ranked by quality/popularity, with the hated-genre veto and the
  * watched/exclude filters still applied. This lets a brand-new user bootstrap:
  * /generate surfaces ratable titles, the first ratings build the real taste vector,
  * and subsequent runs use the normal vector path.
  *
- *   onTaste     = RANDOM titles in a loved genre (or general RANDOM when none stated)
- *   wildcards   = general RANDOM titles (minus hated), excluding onTaste
+ *   onTaste     = titles in a loved genre (or general when none stated)
+ *   wildcards   = general titles (minus hated), excluding onTaste
  *   adversarial = [] (no taste vector → no meaningful "farthest" pick)
  */
 export async function retrieveColdStartPool(
@@ -487,26 +605,30 @@ export async function retrieveColdStartPool(
   const lovedGenres = prefs.loved_genres ?? [];
   const hatedGenres = prefs.hated_genres ?? [];
   const extraExclude: number[] = opts.excludeTitleIds ?? [];
+  const taste = soloTaste(db, profileId);
 
   const watchedSubquery = 'SELECT title_id FROM watch_events WHERE profile_id = ?';
 
   // genres is a JSON array string (e.g. ["Drama","Sci-Fi"]) — match the quoted
   // genre name so "Drama" can't partial-hit a longer genre.
   const runRandomQuery = (
+    f: HardFilters | undefined,
     mediaType: 'movie' | 'tv' | undefined,
     limit: number,
     extraIds: number[],
     lovedOnly: boolean,
   ): CandidateTitle[] => {
     const [excPh, excIds] = notInClause([...extraExclude, ...extraIds]);
+    const fc = filterClause(f);
     let sql = `
       SELECT t.*, 0 AS score
       FROM titles t
       WHERE t.embedding IS NOT NULL
         AND t.id NOT IN (${watchedSubquery})
         AND t.id NOT IN (${excPh})
+        ${fc.sql}
     `;
-    const params: unknown[] = [profileId, ...excIds];
+    const params: unknown[] = [profileId, ...excIds, ...fc.params];
     if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
     if (lovedOnly && lovedGenres.length > 0) {
       sql += ' AND (' + lovedGenres.map(() => 't.genres LIKE ?').join(' OR ') + ')';
@@ -519,20 +641,23 @@ export async function retrieveColdStartPool(
   };
 
   const hasLoved = lovedGenres.length > 0;
+  const sideLimit = opts.mediaType ? 20 : 10;
+  const fetched = balancedWithWidening(opts, sideLimit * 3, (f, mt, limit) => runRandomQuery(f, mt, limit, [], hasLoved));
+  const f = fetched.filters;
+
   let onTaste: CandidateTitle[];
   let wildcards: CandidateTitle[];
 
   if (opts.mediaType) {
-    onTaste = runRandomQuery(opts.mediaType, 20, [], hasLoved);
-    wildcards = runRandomQuery(opts.mediaType, 12, onTaste.map(c => c.id), false);
+    onTaste = top(fetched.single, taste, 20, WILDCARD_WEIGHTS);
+    wildcards = top(runRandomQuery(f, opts.mediaType, 36, onTaste.map(c => c.id), false), taste, 12, WILDCARD_WEIGHTS);
   } else {
-    const onTasteMovies = runRandomQuery('movie', 10, [], hasLoved);
-    const onTasteTv = runRandomQuery('tv', 10, [], hasLoved);
-    onTaste = [...onTasteMovies, ...onTasteTv];
+    onTaste = [...top(fetched.movie, taste, 10, WILDCARD_WEIGHTS), ...top(fetched.tv, taste, 10, WILDCARD_WEIGHTS)];
     const ex = onTaste.map(c => c.id);
-    const wildcardMovies = runRandomQuery('movie', 6, ex, false);
-    const wildcardTv = runRandomQuery('tv', 6, ex, false);
-    wildcards = [...wildcardMovies, ...wildcardTv];
+    wildcards = [
+      ...top(runRandomQuery(f, 'movie', 18, ex, false), taste, 6, WILDCARD_WEIGHTS),
+      ...top(runRandomQuery(f, 'tv', 18, ex, false), taste, 6, WILDCARD_WEIGHTS),
+    ];
   }
 
   return { onTaste, wildcards, adversarial: [] };
@@ -549,34 +674,39 @@ function runRequestQuery(
   queryBuf: Buffer,
   vetoProfileIds: number[],
   opts: RetrieveOpts,
+  f: HardFilters | undefined,
   mediaType: 'movie' | 'tv' | undefined,
   limit: number,
 ): CandidateTitle[] {
-  const extraExclude = opts.excludeTitleIds ?? [];
-  const [vetoPh, vetoIds] = notInClause(vetoProfileIds);
-  const [excPh, excIds] = notInClause(extraExclude);
-  let sql = `
-    SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-    FROM titles t
-    WHERE t.embedding IS NOT NULL
-      AND t.id NOT IN (SELECT title_id FROM watch_events WHERE profile_id IN (${vetoPh}))
-      AND t.id NOT IN (${excPh})
-  `;
-  const params: unknown[] = [queryBuf, ...vetoIds, ...excIds];
-  if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-  if (opts.minImdbRating != null) {
-    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-    params.push(opts.minImdbRating);
-  }
-  sql += ' ORDER BY score ASC LIMIT ?';
-  params.push(limit);
-  return db.prepare(sql).all(...params) as CandidateTitle[];
+  return runPoolQuery(db, queryBuf, vetoProfileIds, opts.excludeTitleIds ?? [], opts, f, mediaType, 'ASC', limit);
 }
 
 /** Build the query buffer from a base taste vector blended with the embedded request. */
 function blendRequestQueryBuf(baseVec: number[], reqVec: number[]): Buffer {
   const queryVec = blendVectors(baseVec, REQUEST_TASTE_WEIGHT, reqVec, REQUEST_WEIGHT);
   return Buffer.from(new Float32Array(queryVec).buffer);
+}
+
+/**
+ * Shared tail of the two request paths: fetch a wide slate under (widened)
+ * filters, rerank by taste WITHOUT the genre veto (an explicit request overrides
+ * a passive dislike — soft affinity still orders the list), and trim.
+ */
+function finishRequest(
+  db: InstanceType<typeof Database>,
+  queryBuf: Buffer,
+  vetoIds: number[],
+  opts: RetrieveOpts,
+  taste: TasteContext,
+): CandidateTitle[] {
+  const softTaste: TasteContext = { affinity: taste.affinity, vetoed: new Set() };
+  const total = opts.limit ?? REQUEST_CANDIDATE_LIMIT;
+  const half = Math.ceil(total / 2);
+  const sideLimit = opts.mediaType ? total : half;
+  const fetched = balancedWithWidening(opts, sideLimit * RERANK_FETCH_MULTIPLIER, (f, mt, limit) =>
+    runRequestQuery(db, queryBuf, vetoIds, opts, f, mt, limit));
+  if (opts.mediaType) return top(fetched.single, softTaste, total);
+  return [...top(fetched.movie, softTaste, half), ...top(fetched.tv, softTaste, half)];
 }
 
 /**
@@ -602,13 +732,7 @@ export async function retrieveRequestCandidates(
   const tasteVec = vecFromBuffer(sig.taste_vector);
   const reqVec = await embedFn(requestText, config);
   const queryBuf = blendRequestQueryBuf(tasteVec, reqVec);
-
-  const total = opts.limit ?? 30;
-  if (opts.mediaType) return runRequestQuery(db, queryBuf, [profileId], opts, opts.mediaType, total);
-  const half = Math.ceil(total / 2);
-  const movies = runRequestQuery(db, queryBuf, [profileId], opts, 'movie', half);
-  const tv = runRequestQuery(db, queryBuf, [profileId], opts, 'tv', half);
-  return [...movies, ...tv];
+  return finishRequest(db, queryBuf, [profileId], opts, soloTaste(db, profileId));
 }
 
 /**
@@ -642,22 +766,18 @@ export async function retrieveJointRequestCandidates(
   const reqVec = await embedFn(requestText, config);
   const queryBuf = blendRequestQueryBuf(baseVec, reqVec);
   const vetoIds = [alexId, samId, ...(jointId != null ? [jointId] : [])];
-
-  const total = opts.limit ?? 30;
-  if (opts.mediaType) return runRequestQuery(db, queryBuf, vetoIds, opts, opts.mediaType, total);
-  const half = Math.ceil(total / 2);
-  const movies = runRequestQuery(db, queryBuf, vetoIds, opts, 'movie', half);
-  const tv = runRequestQuery(db, queryBuf, vetoIds, opts, 'tv', half);
-  return [...movies, ...tv];
+  return finishRequest(db, queryBuf, vetoIds, opts, jointTaste(db, alexId, samId, jointId));
 }
 
 /**
- * Retrieve a structured candidate pool for the Joint (blended) profile.
- * Uses the same blended-vector + mutual-veto logic as retrieveJointCandidates.
- *
- * When opts.mediaType is unset, produces a balanced split:
- *   onTaste = top 10 movies + top 10 series; adversarial = 4+4; wildcards = 6+6.
- * When opts.mediaType is set, single-type behaviour is unchanged.
+ * Retrieve a structured candidate pool for the Joint (blended) profile — the
+ * same 3-group assembly as the solo pool, with:
+ *   - the blended vector (couple-own ⊕ solo-blend when the couple has rated
+ *     together, else the equal solo blend);
+ *   - engagement veto across Alex, Sam AND the Joint profile (so a film they just
+ *     rated jointly leaves the Picks feed — "it should move into rated");
+ *   - mutual genre veto: hated_genres of either partner or the Joint profile's
+ *     own row, plus any genre either partner has rated consistently low.
  *
  * opts.excludeTitleIds: additional ids to exclude from all groups.
  */
@@ -704,81 +824,6 @@ export async function retrieveJointCandidatePool(
     ...(jointPrefs.hated_genres ?? []),
   ])];
 
-  const extraExclude: number[] = opts.excludeTitleIds ?? [];
-
-  // Exclude titles watched by EITHER person AND by the couple together (so a film
-  // they just rated jointly leaves the Picks feed — "it should move into rated").
-  const [vetoPh, vetoIds] = notInClause([alexId, samId, ...(jointId != null ? [jointId] : [])]);
-
-  const buildBase = (extraExcludeIds: number[]): [string, unknown[]] => {
-    const allExclude = [...extraExclude, ...extraExcludeIds];
-    const [excPh, excIds] = notInClause(allExclude);
-    let sql = `
-      SELECT t.*, vec_distance_cosine(t.embedding, ?) AS score
-      FROM titles t
-      WHERE t.embedding IS NOT NULL
-        AND t.id NOT IN (SELECT title_id FROM watch_events WHERE profile_id IN (${vetoPh}))
-        AND t.id NOT IN (${excPh})
-    `;
-    const params: unknown[] = [blendedBuf, ...vetoIds, ...excIds];
-    if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
-      params.push(opts.minImdbRating);
-    }
-    return [sql, params];
-  };
-
-  const runQuery = (
-    extraExcludeIds: number[],
-    mediaType: 'movie' | 'tv' | undefined,
-    orderDir: 'ASC' | 'DESC' | 'RANDOM',
-    limit: number,
-    extraFilters?: Array<[string, unknown]>,
-  ): CandidateTitle[] => {
-    let [sql, params] = buildBase(extraExcludeIds);
-    if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-    if (extraFilters) {
-      for (const [clause, val] of extraFilters) {
-        sql += ` ${clause}`;
-        params.push(val);
-      }
-    }
-    if (orderDir === 'RANDOM') sql += ' ORDER BY RANDOM()';
-    else sql += ` ORDER BY score ${orderDir}`;
-    sql += ' LIMIT ?'; params.push(limit);
-    return db.prepare(sql).all(...params) as CandidateTitle[];
-  };
-
-  const hatedFilters: Array<[string, unknown]> = allHated.map(g => [`AND t.genres NOT LIKE ?`, `%${g}%`]);
-
-  let onTaste: CandidateTitle[];
-  let adversarial: CandidateTitle[];
-  let wildcards: CandidateTitle[];
-
-  if (opts.mediaType) {
-    // ── single media type: original behaviour ──────────────────────────────
-    onTaste = runQuery([], opts.mediaType, 'ASC', 20);
-    adversarial = runQuery(onTaste.map(c => c.id), opts.mediaType, 'DESC', 8);
-    wildcards = runQuery(
-      [...onTaste.map(c => c.id), ...adversarial.map(c => c.id)],
-      opts.mediaType, 'RANDOM', 12, hatedFilters,
-    );
-  } else {
-    // ── balanced across media types ────────────────────────────────────────
-    const onTasteMovies = runQuery([], 'movie', 'ASC', 10);
-    const onTasteTv = runQuery([], 'tv', 'ASC', 10);
-    onTaste = [...onTasteMovies, ...onTasteTv];
-
-    const onTasteIds = onTaste.map(c => c.id);
-    const adversarialMovies = runQuery(onTasteIds, 'movie', 'DESC', 4);
-    const adversarialTv = runQuery(onTasteIds, 'tv', 'DESC', 4);
-    adversarial = [...adversarialMovies, ...adversarialTv];
-
-    const excludeWildcard = [...onTasteIds, ...adversarial.map(c => c.id)];
-    const wildcardMovies = runQuery(excludeWildcard, 'movie', 'RANDOM', 6, hatedFilters);
-    const wildcardTv = runQuery(excludeWildcard, 'tv', 'RANDOM', 6, hatedFilters);
-    wildcards = [...wildcardMovies, ...wildcardTv];
-  }
-
-  return { onTaste, wildcards, adversarial };
+  const vetoIds = [alexId, samId, ...(jointId != null ? [jointId] : [])];
+  return assemblePool(db, blendedBuf, vetoIds, opts, jointTaste(db, alexId, samId, jointId), allHated);
 }

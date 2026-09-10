@@ -32,6 +32,7 @@ const mockCandidates: CandidateTitle[] = [
     embedding: null, updated_at: '2026-01-01T00:00:00Z', score: 0.12,
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
     popularity: null, vote_count: null, rating_checked_at: null,
+    original_language: null, runtime_minutes: null, vote_average: null, status: null, meta_checked_at: null,
   },
 ];
 
@@ -70,14 +71,14 @@ describe('buildCurationPrompt', () => {
     expect(prompt).not.toContain('A'.repeat(101));
   });
 
-  it('caps candidate list at 30 items', () => {
-    const manyCandidates: CandidateTitle[] = Array.from({ length: 40 }, (_, i) => ({
+  it('caps candidate list at 60 items', () => {
+    const manyCandidates: CandidateTitle[] = Array.from({ length: 70 }, (_, i) => ({
       ...mockCandidates[0], id: i + 1, tmdb_id: 100 + i, title: `Film ${i}`,
     }));
     const prompt = buildCurationPrompt(manyCandidates, mockProfile, mockSig, null);
-    // Item 30 present (index 29, tmdb_id 129), item 31 not present (index 30, tmdb_id 130)
-    expect(prompt).toContain('[tmdb_id:129]');
-    expect(prompt).not.toContain('[tmdb_id:130]');
+    // Item 60 present (index 59, tmdb_id 159), item 61 not present (index 60, tmdb_id 160)
+    expect(prompt).toContain('[tmdb_id:159]');
+    expect(prompt).not.toContain('[tmdb_id:160]');
   });
 });
 

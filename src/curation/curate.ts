@@ -4,7 +4,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import type { CandidateTitle, CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
-import { buildCurationPrompt } from './prompt.js';
+import { buildCurationPrompt, FLAT_CANDIDATE_CAP, MIN_REQUEST_PICKS } from './prompt.js';
 import { upsertRecommendation } from '../db/repos/recommendations.js';
 
 export interface CurationResult {
@@ -69,6 +69,35 @@ export function extractJsonArray(text: string): unknown {
   if (start !== -1 && end > start) t = t.slice(start, end + 1);
   t = t.replace(/,(\s*[\]}])/g, '$1'); // strip trailing commas
   return JSON.parse(t);
+}
+
+/**
+ * Top up a request's picks to `min` from the reranked candidate order, skipping
+ * anything the model already chose and anything with a tmdb_id it hallucinated.
+ * Kept separate (and exported) so the guarantee is unit-testable without a spawn.
+ */
+export function padRequestPicks(
+  picks: CurationResult[],
+  candidates: CandidateTitle[],
+  min: number,
+): CurationResult[] {
+  const known = new Set(candidates.map(c => c.tmdb_id));
+  const kept = picks.filter(p => known.has(p.tmdbId));
+  const chosen = new Set(kept.map(p => p.tmdbId));
+  const out = [...kept];
+  for (const c of candidates) {
+    if (out.length >= min) break;
+    if (chosen.has(c.tmdb_id)) continue;
+    chosen.add(c.tmdb_id);
+    out.push({
+      tmdbId: c.tmdb_id,
+      why: 'Strong match for your request by rating and taste fit.',
+      category: 'Based on your request',
+      kind: 'core',
+      predictedRating: null,
+    });
+  }
+  return out;
 }
 
 /**
@@ -150,9 +179,9 @@ export async function curateCandidates(
           }
           if (!Array.isArray(parsed)) throw new Error('Expected JSON array from claude');
           // No cap here — balance/surprise cap is applied in the outer scope after
-          // media_type lookup via titleMap. Guard against runaway LLM responses (>30
-          // candidates were never sent, so >30 picks are hallucinated).
-          resolve(parsed.slice(0, 30).map(item => ({
+          // media_type lookup via titleMap. Guard against runaway LLM responses (more
+          // candidates than FLAT_CANDIDATE_CAP were never sent, so extra picks are hallucinated).
+          resolve(parsed.slice(0, FLAT_CANDIDATE_CAP).map(item => ({
             tmdbId: item.tmdb_id,
             why: item.why,
             category: item.category,
@@ -203,6 +232,14 @@ export async function curateCandidates(
     finalResults = [...moviePrimary, ...tvPrimary, ...backfill];
   } else {
     finalResults = results.slice(0, 10);
+  }
+
+  // A free-text request must come back with at least MIN_REQUEST_PICKS titles
+  // whenever the (already filtered + reranked) flat list allows it. If the model
+  // still under-delivers, pad from the retrieval order — DB-only, no second
+  // claude -p call — so the user never sees "2 options" again.
+  if (request && Array.isArray(candidates) && !surprise) {
+    finalResults = padRequestPicks(finalResults, candidates as CandidateTitle[], MIN_REQUEST_PICKS);
   }
 
   // Persist as recommendations

@@ -2,6 +2,11 @@ import type { CandidateTitle } from '../retrieval/retrieve.js';
 import type { CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 
+/** Flat request candidates listed in the prompt (matches REQUEST_CANDIDATE_LIMIT in retrieval). */
+export const FLAT_CANDIDATE_CAP = 60;
+/** A request must come back with at least this many picks when the list allows it. */
+export const MIN_REQUEST_PICKS = 10;
+
 function buildPrefsBlock(sig: TasteSignatureRow): string {
   const prefs = JSON.parse(sig.prefs) as Partial<{
     loved_genres: string[];
@@ -129,13 +134,18 @@ Example output:
   }
 
   // ── flat array (legacy) overload ───────────────────────────────────────────
-  const candidateList = (candidates as CandidateTitle[])
-    .slice(0, 30)
+  const flat = (candidates as CandidateTitle[]).slice(0, FLAT_CANDIDATE_CAP);
+  const candidateList = flat
     .map((c, i) => formatCandidate(c, i))
     .join('\n');
 
+  // The candidates were hard-filtered (released, rated, English, feature-length,
+  // recent enough) and reranked by taste + quality BEFORE reaching the model, so
+  // the model's job is to ORDER them, not to prune them — an earlier "leave out
+  // poor fits" instruction is what turned a 30-candidate request into 2 picks.
+  const minPicks = Math.min(MIN_REQUEST_PICKS, flat.length);
   const requestInstruction = request
-    ? `\n- The viewer specifically requested: "${request}". Prioritise titles that genuinely match this request ABOVE general taste fit. These candidates were pre-filtered for relevance, but if some don't truly fit the request, leave them out — a shorter, on-request list is better than padding to 10 with off-request titles. Use category "Based on your request" for direct matches.`
+    ? `\n- The viewer specifically requested: "${request}". Rank titles that genuinely match this request ABOVE general taste fit. Return AT LEAST ${minPicks} items${flat.length > minPicks ? ` (there are ${flat.length} candidates)` : ''} — every candidate already passed quality and relevance filters, so order them best-first rather than dropping imperfect fits. Use category "Based on your request" for direct matches and "Top pick" for strong taste matches that only loosely fit the request.`
     : '';
 
   return `You are a taste-matching assistant for ${profile.name}. Your job is to ${request ? 'pick the titles that best satisfy the viewer\'s request, ordered best-first' : 'rank the following candidate titles by how well they match this viewer\'s taste profile'}.
@@ -146,7 +156,7 @@ ${requestBlock}## Candidate titles
 ${candidateList}
 
 ## Instructions
-Return ONLY a JSON object of the form {"items":[...]} where "items" is a JSON array of your top picks ranked best-first, maximum 10 items.${requestInstruction}
+Return ONLY a JSON object of the form {"items":[...]} where "items" is a JSON array of your top picks ranked best-first, maximum ${request ? Math.max(MIN_REQUEST_PICKS, minPicks) : 10} items.${requestInstruction}
 Each item MUST have exactly these fields:
 - "tmdb_id": number (from the candidate list above)
 - "why": string (≤120 chars, plain text — do NOT use double-quote (") characters inside it; use single quotes if needed)

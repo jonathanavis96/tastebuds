@@ -9,6 +9,7 @@ import { getRecommendations, updateRecommendationState, getCalibration, getRecom
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
+import { DEFAULT_HARD_FILTERS, languagesFromHistory, type HardFilters } from '../retrieval/filters.js';
 import { getOmdbRatings } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
@@ -130,6 +131,10 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       imdb_rating: t?.imdb_rating ?? null,
       rt_rating: t?.rt_rating ?? null,
       rt_url: t?.rt_url ?? null,
+      vote_average: t?.vote_average ?? null,
+      vote_count: t?.vote_count ?? null,
+      original_language: t?.original_language ?? null,
+      runtime_minutes: t?.runtime_minutes ?? null,
     };
   };
 
@@ -139,13 +144,29 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   const soloProfileIds = (): number[] =>
     getAllProfiles(db).filter(p => !p.is_derived).map(p => p.id);
 
+  const derivedProfileIds = (): number[] =>
+    getAllProfiles(db).filter(p => p.is_derived).map(p => p.id);
+
   // The set of profile IDs whose engagement should hide a title from `profileId`'s
   // Picks. For a derived (Joint) profile, that's either solo partner OR the couple
-  // together; for a solo profile, just itself.
+  // together; for a solo profile, itself plus the couple (a title watched together
+  // has been seen by both, so it must not resurface in either solo feed).
   const engagementMemberIds = (profileId: number): number[] => {
     const profile = getProfile(db, profileId);
-    if (!profile?.is_derived) return [profileId];
+    if (!profile?.is_derived) return [...new Set([profileId, ...derivedProfileIds()])];
     return [...new Set([...soloProfileIds(), profileId])];
+  };
+
+  // Hard filters for a /generate call: the configured defaults, with the language
+  // set widened by whatever the household has actually liked (English always).
+  const hardFiltersFor = (memberIds: number[]): HardFilters => {
+    const overrides = config.hardFilters ?? {};
+    const learned = languagesFromHistory(db, memberIds);
+    return {
+      ...DEFAULT_HARD_FILTERS,
+      ...Object.fromEntries(Object.entries(overrides).filter(([k, v]) => k !== 'languages' && v != null)),
+      languages: [...new Set([...learned, ...(overrides.languages ?? [])])],
+    };
   };
 
   api.get('/recommendations/:profileId', (c) => {
@@ -199,14 +220,26 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     //  - ENGAGED titles: anything watched or on the watchlist (already seen / already
     //    chosen) — for Joint, that's the couple's combined engagement. Stops Sonnet
     //    wasting picks on titles you've already rated or queued.
+    //  - for a Joint call, titles DISMISSED by either partner solo as well: a
+    //    "not interested" from one of them is a veto for the couple.
+    const memberIds = engagementMemberIds(body.profileId);
     const existingPending = getRecommendations(db, body.profileId, 'pending');
-    const dismissed = getRecommendations(db, body.profileId, 'dismissed');
-    const engagedIds = getEngagedTitleIds(db, engagementMemberIds(body.profileId));
+    const dismissedBy = profile.is_derived ? memberIds : [body.profileId];
+    const dismissed = dismissedBy.flatMap(pid => getRecommendations(db, pid, 'dismissed'));
+    const engagedIds = getEngagedTitleIds(db, memberIds);
     const excludeTitleIds = [...new Set([
       ...existingPending.map(r => r.title_id),
       ...dismissed.map(r => r.title_id),
       ...engagedIds,
     ])];
+
+    // Hard filters run in SQL before any similarity ranking (see filters.ts).
+    // A thin pool is widened year → runtime → votes; log when that happens so a
+    // surprising pick can be traced to a relaxed filter.
+    const hardFilters = hardFiltersFor(memberIds);
+    const onWidened = (steps: string[]) => {
+      if (steps.length > 0) console.log(`[tastebuds] /generate profile=${body.profileId} widened filters: ${steps.join(' → ')}`);
+    };
 
     // balanceMedia = true when no mediaType filter is set (all-tab)
     const balanceMedia = !body.mediaType;
@@ -256,14 +289,14 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       const [soloA, soloB] = soloProfileIds();
       if (soloA == null || soloB == null)
         return c.json({ error: 'Two solo profiles are required for a Joint blend' }, 400);
-      const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId, minImdbRating };
+      const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId, minImdbRating, hardFilters, onWidened };
       candidatePool = coldStart
         ? await retrieveColdStartPool(db, body.profileId, jointOpts, config)
         : hasRequest
           ? await retrieveJointRequestCandidates(db, soloA, soloB, request!, jointOpts, config)
           : await retrieveJointCandidatePool(db, soloA, soloB, jointOpts, config);
     } else {
-      const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, minImdbRating };
+      const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, minImdbRating, hardFilters, onWidened };
       candidatePool = coldStart
         ? await retrieveColdStartPool(db, body.profileId, soloOpts, config)
         : hasRequest
