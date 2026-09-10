@@ -4,6 +4,8 @@ import { Hono } from 'hono';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrate.js';
 import { upsertProfile } from '../db/repos/profiles.js';
+import { upsertTitle } from '../db/repos/titles.js';
+import { upsertRecommendation } from '../db/repos/recommendations.js';
 import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
 import { resolveRtUrl } from '../rt/resolve.js';
@@ -88,6 +90,30 @@ describe('GET /api/recommendations/:profileId', () => {
     expect(body).toHaveLength(0);
   });
 
+  it('hides stored picks whose title fails the loosest hard-filter floor, keeps widened-but-legit ones', async () => {
+    const db = setupDb();
+    const base = {
+      media_type: 'movie' as const, genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's',
+      poster_path: null, embedding: null, updated_at: '2026-01-01', year: 2015, original_language: 'en',
+      runtime_minutes: 100, vote_average: 7.1, vote_count: 2000, status: 'Released', popularity: 20,
+    };
+    upsertTitle(db, { ...base, tmdb_id: 1, title: 'Good Recent', year: 2015 });
+    upsertTitle(db, { ...base, tmdb_id: 2, title: 'Widened Eighties', year: 1984 }); // below strict 1995, above floor 1980
+    upsertTitle(db, { ...base, tmdb_id: 3, title: 'Unreleased Zero Votes', year: 2027, vote_count: 0, vote_average: 0, status: 'Post Production' });
+    upsertTitle(db, { ...base, tmdb_id: 4, title: 'Foreign Short', original_language: 'zh', runtime_minutes: 14 });
+    upsertTitle(db, { ...base, tmdb_id: 5, title: 'Silent Era', year: 1927 });
+    const idOf = (t: string) => (db.prepare('SELECT id FROM titles WHERE title = ?').get(t) as { id: number }).id;
+    for (const t of ['Good Recent', 'Widened Eighties', 'Unreleased Zero Votes', 'Foreign Short', 'Silent Era']) {
+      upsertRecommendation(db, { profile_id: 1, title_id: idOf(t), category: 'Top pick', score: 0.3, why_blurb: 'w', request_text: null, state: 'pending' });
+    }
+    const api = createApiRoutes(db, mockConfig);
+    const app = new Hono().route('/api', api);
+    const res = await app.request('/api/recommendations/1');
+    expect(res.status).toBe(200);
+    const titles = ((await res.json()) as Array<{ title: string }>).map(r => r.title).sort();
+    expect(titles).toEqual(['Good Recent', 'Widened Eighties']);
+  });
+
   it('returns 400 for invalid profileId', async () => {
     const db = setupDb();
     const api = createApiRoutes(db, mockConfig);
@@ -102,8 +128,8 @@ describe('POST /api/watchlist', () => {
   it('adds title to watchlist', async () => {
     const db = setupDb();
     // seed a title (no on_viu column per Decision Override #1)
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (999, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (999, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=999').get() as any).id;
 
     const api = createApiRoutes(db, mockConfig);
@@ -123,8 +149,8 @@ describe('POST /api/watchlist', () => {
 describe('GET /api/recommendations/:profileId — enrichRec includes rating fields', () => {
   it('returns imdb_rating and rt_rating from joined title', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id, imdb_rating, rt_rating)
-      VALUES (997, 'movie', 'Rated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt0000001', '8.5', '92%')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, imdb_rating, rt_rating)
+      VALUES (997, 'movie', 'Rated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt0000001', '8.5', '92%')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great film', null, 'pending', datetime('now'))`).run(titleId);
@@ -141,8 +167,8 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
 
   it('returns null imdb_rating and rt_rating when not set', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (996, 'movie', 'Unrated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (996, 'movie', 'Unrated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Fine film', null, 'pending', datetime('now'))`).run(titleId);
@@ -161,10 +187,10 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
   it('excludes pending recs whose title has been watched by the solo profile', async () => {
     const db = setupDb();
     // Insert two titles
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (991, 'movie', 'Watched Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (992, 'movie', 'Unwatched Film', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (991, 'movie', 'Watched Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (992, 'movie', 'Unwatched Film', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const watchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
     const unwatchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
 
@@ -190,8 +216,8 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
 
   it('excludes watchlist-only titles from Picks (already chosen)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (993, 'movie', 'Watchlist Film', 2022, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (993, 'movie', 'Watchlist Film', 2022, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
 
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
@@ -213,8 +239,8 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
 describe('POST /api/dismiss', () => {
   it('dismisses a recommendation', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (998, 'tv', 'Test Show', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (998, 'tv', 'Test Show', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=998').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'pending', datetime('now'))`).run(titleId);
@@ -237,8 +263,8 @@ describe('POST /api/dismiss', () => {
 describe('POST /api/dismiss-reason', () => {
   it('stores the reason on the rec and writes back to hated_genres for not_my_genre', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (997, 'movie', 'Horror Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (997, 'movie', 'Horror Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
@@ -263,8 +289,8 @@ describe('POST /api/dismiss-reason', () => {
 
   it('switching tiles reverses the old reason\'s write-back before applying the new one', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (992, 'movie', 'Switch Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (992, 'movie', 'Switch Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
@@ -309,8 +335,8 @@ describe('POST /api/dismiss-reason', () => {
 
   it('rejects a reason for a recommendation owned by a different profile (IDOR)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (991, 'movie', 'Owned By Alex', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (991, 'movie', 'Owned By Alex', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
     // Owned by profile 1 (Alex).
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
@@ -338,8 +364,8 @@ describe('POST /api/dismiss-reason', () => {
 
   it('rejects a reason for a recommendation that is not dismissed (still pending)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (995, 'movie', 'Pending Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (995, 'movie', 'Pending Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=995').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'pending', datetime('now'))`).run(titleId);
@@ -364,8 +390,8 @@ describe('POST /api/dismiss-reason', () => {
 
   it('rejects an unrecognised reason', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (996, 'movie', 'Some Flick', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (996, 'movie', 'Some Flick', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
@@ -386,8 +412,8 @@ describe('POST /api/dismiss-reason', () => {
 describe('POST /api/undismiss', () => {
   it('rejects undismissing a recommendation owned by a different profile (IDOR)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (990, 'movie', 'Owned By Alex Undismiss', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (990, 'movie', 'Owned By Alex Undismiss', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
     // Owned by profile 1 (Alex), already dismissed with a reason.
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, dismiss_reason, created_at)
@@ -417,8 +443,8 @@ describe('POST /api/undismiss', () => {
 
   it('reverses the reason-derived prefs write-back and clears dismiss_reason', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (993, 'movie', 'Undo Reason Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (993, 'movie', 'Undo Reason Flick', 2021, '["Horror"]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
@@ -453,8 +479,8 @@ describe('POST /api/undismiss', () => {
 
   it('restores a dismissed recommendation to pending', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (994, 'tv', 'Undo Show', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (994, 'tv', 'Undo Show', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=994').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great show', null, 'dismissed', datetime('now'))`).run(titleId);
@@ -477,12 +503,12 @@ describe('POST /api/undismiss', () => {
 describe('GET /api/stats', () => {
   it('returns the catalogue total plus the movie/series split', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (981, 'movie', 'Film One', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (982, 'movie', 'Film Two', 2021, '[]', '[]', '[]', null, null, datetime('now'))`).run();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (983, 'tv', 'Series One', 2022, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (981, 'movie', 'Film One', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (982, 'movie', 'Film Two', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (983, 'tv', 'Series One', 2022, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
 
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
@@ -516,8 +542,8 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
 
     const db = setupDb();
     // Insert a title with no rt_url, no imdb_id (so OMDb block is skipped)
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (888, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (888, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=888').get() as any).id;
     // Pre-insert a pending rec so the enrichment loop has something to iterate
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
@@ -546,8 +572,8 @@ describe('POST /generate — unverified rt_url is not written to DB', () => {
     });
 
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (889, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (889, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=889').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
@@ -587,8 +613,8 @@ describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () 
 
   it('does not call OMDb or resolveRtUrl for a title already checked (rating_checked_at set) with no ratings', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id, rating_checked_at)
-      VALUES (990, 'movie', 'Already Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9990000', 1700000000)`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, rating_checked_at)
+      VALUES (990, 'movie', 'Already Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt9990000', 1700000000)`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
@@ -612,8 +638,8 @@ describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () 
     vi.mocked(resolveRtUrl).mockResolvedValue(null);
 
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, imdb_id)
-      VALUES (991, 'movie', 'Never Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'tt9910000')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id)
+      VALUES (991, 'movie', 'Never Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt9910000')`).run();
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);

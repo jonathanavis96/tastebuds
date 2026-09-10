@@ -184,3 +184,33 @@ export function languagesFromHistory(
   }
   return [...admitted].sort((a, b) => (a === 'en' ? -1 : b === 'en' ? 1 : a.localeCompare(b)));
 }
+
+/**
+ * The loosest filters the widening ladder can ever reach, given a strict set:
+ * what a stored pick must still satisfy to be shown. Rating, language and
+ * release state are never relaxed by the ladder, so they stay as given.
+ */
+export function floorFilters(f: HardFilters): HardFilters {
+  return {
+    ...f,
+    minYear: Math.min(f.minYear, HARD_FLOOR.minYear),
+    minRuntimeMovie: Math.min(f.minRuntimeMovie, HARD_FLOOR.minRuntimeMovie),
+    minVotesMovie: Math.min(f.minVotesMovie, HARD_FLOOR.minVotesMovie),
+    minVotesTv: Math.min(f.minVotesTv, HARD_FLOOR.minVotesTv),
+  };
+}
+
+/** Of `titleIds`, the ones whose stored metadata passes `f` (unknown metadata fails). */
+export function titleIdsPassing(
+  db: InstanceType<typeof Database>,
+  f: HardFilters,
+  titleIds: number[],
+): Set<number> {
+  const ids = [...new Set(titleIds)];
+  if (ids.length === 0) return new Set();
+  const { sql, params } = hardFilterSql(f, 't');
+  const rows = db.prepare(
+    `SELECT t.id AS id FROM titles t WHERE t.id IN (${ids.map(() => '?').join(',')})${sql}`,
+  ).all(...ids, ...params) as Array<{ id: number }>;
+  return new Set(rows.map(r => r.id));
+}

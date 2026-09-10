@@ -9,7 +9,8 @@ import { getRecommendations, updateRecommendationState, getCalibration, getRecom
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
-import { DEFAULT_HARD_FILTERS, languagesFromHistory, type HardFilters } from '../retrieval/filters.js';
+import type { RecommendationRow } from '../db/types.js';
+import { DEFAULT_HARD_FILTERS, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import { getOmdbRatings } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
@@ -169,6 +170,17 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     };
   };
 
+  // Pending recs are read back through the loosest filters the widening ladder can
+  // reach, so junk stored before the filters existed (unreleased, zero-vote, shorts,
+  // other languages) disappears from the feed without touching the rows, while a
+  // legitimately widened pick is never hidden.
+  const visibleRecs = (profileId: number, recs: RecommendationRow[]): RecommendationRow[] => {
+    const memberIds = engagementMemberIds(profileId);
+    const engagedIds = getEngagedTitleIds(db, memberIds);
+    const passing = titleIdsPassing(db, floorFilters(hardFiltersFor(memberIds)), recs.map(r => r.title_id));
+    return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
+  };
+
   api.get('/recommendations/:profileId', (c) => {
     const profileId = parseInt(c.req.param('profileId'));
     if (isNaN(profileId)) return c.json({ error: 'Invalid profileId' }, 400);
@@ -176,11 +188,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Hide any title the profile has ENGAGED with — watched OR on the watchlist.
     // A watched title is done; a watchlisted title is already chosen. Neither should
     // remain in Picks. (Was watched-only before, so watchlist items leaked through.)
-    const engagedIds = getEngagedTitleIds(db, engagementMemberIds(profileId));
-
-    const recs = getRecommendations(db, profileId, 'pending')
-      .filter(r => !engagedIds.has(r.title_id))
-      .map(enrichRec);
+    const recs = visibleRecs(profileId, getRecommendations(db, profileId, 'pending')).map(enrichRec);
     return c.json(recs);
   });
 
@@ -356,10 +364,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Filter the response the same way /recommendations does, so an engaged title
     // (e.g. a still-pending rec from before it was watched/watchlisted) never shows
     // in the cards immediately after generating.
-    const respEngagedIds = getEngagedTitleIds(db, engagementMemberIds(body.profileId));
-    const recs = getRecommendations(db, body.profileId, 'pending')
-      .filter(r => !respEngagedIds.has(r.title_id))
-      .map(enrichRec);
+    const recs = visibleRecs(body.profileId, getRecommendations(db, body.profileId, 'pending')).map(enrichRec);
     return c.json(recs);
   });
 
