@@ -79,6 +79,29 @@ TMDB harvest ──► titles + posters ──► Ollama embeddings ──► sq
 Stack: Node/TypeScript · [Hono](https://hono.dev/) API + [Svelte](https://svelte.dev/) SPA ·
 a single SQLite file (`sqlite-vec`, WAL) · Ollama embeddings · `claude -p` curation · Docker.
 
+### How a candidate set is built
+
+Every Generate (passive or typed request) runs the same three stages, all in SQLite:
+
+1. **Hard filters** — applied before any ranking. Defaults: released only, year ≥ 1995,
+   movies ≥ 60 min, TMDB votes ≥ 300 (movies) / 50 (series), TMDB rating ≥ 6.0, and the
+   original language must be English or one that shows up in your liked history. A title
+   whose metadata is unknown fails the filter (that is what kept unreleased, zero-vote
+   titles out of the picks). Anything watched, on a watchlist or dismissed by either profile
+   (or the couple together) is excluded.
+2. **Similarity** — cosine distance to the taste vector (blended with the embedded request
+   when you typed one) over a wide slate.
+3. **Rerank** — genre affinity learned from your own star ratings (a genre either partner
+   rates consistently low is vetoed from Joint picks), a Bayesian quality score from TMDB
+   rating and vote count, and popularity, blended with the similarity. Your votes change the
+   order, not just the centroid.
+
+If the filtered pool is thin, it widens in a fixed order — year floor (1990 → 1985 → 1980),
+then movie runtime (40 min), then votes (100/25 → 20/10) — and never relaxes rating,
+language or release status. A typed request always comes back with at least 10 picks when
+the pool allows it; if the model returns fewer, the list is padded from the reranked order
+without a second `claude -p` call. Widening is logged as `[tastebuds] /generate … widened filters`.
+
 ---
 
 ## Prerequisites
@@ -240,6 +263,12 @@ just ignore the profiles you don't use.
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
 | `BIND_HOST` | — | `127.0.0.1` | **Docker only** — host bind address for docker-compose's port mapping — see **Security** below |
 | `HOST` | — | `0.0.0.0` | **Bare Node only** — hostname the server process itself binds to (no effect inside Docker; `BIND_HOST` covers that path) — see **Security** below |
+| `RETRIEVAL_MIN_YEAR` | — | `1995` | Earliest release year a candidate may have (widening can go as low as 1980) |
+| `RETRIEVAL_MIN_RUNTIME` | — | `60` | Minimum movie runtime in minutes (series exempt) |
+| `RETRIEVAL_MIN_VOTES_MOVIE` / `RETRIEVAL_MIN_VOTES_TV` | — | `300` / `50` | Minimum TMDB vote count |
+| `RETRIEVAL_MIN_VOTE_AVERAGE` | — | `6.0` | Minimum TMDB average rating (never relaxed) |
+| `RETRIEVAL_LANGUAGES` | — | — | Extra ISO 639-1 codes to admit (English and languages from your liked history are always in) |
+| `META_BACKFILL_CAP` | — | `20000` | Max titles per TMDB metadata backfill run |
 
 ---
 
