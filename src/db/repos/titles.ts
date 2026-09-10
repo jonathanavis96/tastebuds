@@ -1,13 +1,30 @@
 import type Database from 'better-sqlite3';
 import type { TitleRow } from '../types.js';
 
+const OPTIONAL_TITLE_FIELDS = [
+  'imdb_id',
+  'imdb_rating',
+  'rt_rating',
+  'rt_url',
+  'popularity',
+  'vote_count',
+  'rating_checked_at',
+  'original_language',
+  'runtime_minutes',
+  'vote_average',
+  'status',
+  'meta_checked_at',
+] as const;
+
+type OptionalTitleField = (typeof OPTIONAL_TITLE_FIELDS)[number];
+
 export function upsertTitle(
   db: InstanceType<typeof Database>,
-  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count' | 'rating_checked_at'> & Partial<Pick<TitleRow, 'imdb_id' | 'imdb_rating' | 'rt_rating' | 'rt_url' | 'popularity' | 'vote_count' | 'rating_checked_at'>>),
+  title: Omit<TitleRow, 'id'> | (Omit<TitleRow, 'id' | OptionalTitleField> & Partial<Pick<TitleRow, OptionalTitleField>>),
 ): void {
   db.prepare(`
-    INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, embedding, updated_at, imdb_id, imdb_rating, rt_rating, popularity, vote_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, embedding, updated_at, imdb_id, imdb_rating, rt_rating, popularity, vote_count, original_language, runtime_minutes, vote_average, status, meta_checked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (tmdb_id, media_type) DO UPDATE SET
       title       = excluded.title,
       year        = excluded.year,
@@ -20,7 +37,12 @@ export function upsertTitle(
       updated_at  = excluded.updated_at,
       imdb_id     = COALESCE(excluded.imdb_id, titles.imdb_id),
       popularity  = excluded.popularity,
-      vote_count  = excluded.vote_count
+      vote_count  = excluded.vote_count,
+      original_language = COALESCE(excluded.original_language, titles.original_language),
+      runtime_minutes   = COALESCE(excluded.runtime_minutes, titles.runtime_minutes),
+      vote_average      = COALESCE(excluded.vote_average, titles.vote_average),
+      status            = COALESCE(excluded.status, titles.status),
+      meta_checked_at   = COALESCE(excluded.meta_checked_at, titles.meta_checked_at)
   `).run(
     title.tmdb_id,
     title.media_type,
@@ -38,6 +60,11 @@ export function upsertTitle(
     (title as Partial<TitleRow>).rt_rating ?? null,
     (title as Partial<TitleRow>).popularity ?? null,
     (title as Partial<TitleRow>).vote_count ?? null,
+    (title as Partial<TitleRow>).original_language ?? null,
+    (title as Partial<TitleRow>).runtime_minutes ?? null,
+    (title as Partial<TitleRow>).vote_average ?? null,
+    (title as Partial<TitleRow>).status ?? null,
+    (title as Partial<TitleRow>).meta_checked_at ?? null,
   );
 }
 
@@ -66,6 +93,52 @@ export function updateTitleRatings(
   db.prepare(`
     UPDATE titles SET imdb_rating = ?, rt_rating = ?, rating_checked_at = ? WHERE id = ?
   `).run(ratings.imdb, ratings.rt, now, titleId);
+}
+
+/**
+ * Backfill write for a single title's TMDB metadata (language, runtime, TMDB
+ * rating, release status), plus a fresh popularity/vote_count snapshot when
+ * available. Always stamps meta_checked_at so the row is not re-selected by
+ * backfillTitleMeta on the next run. popularity/vote_count are only
+ * overwritten when the caller actually has a value for them.
+ */
+export function updateTitleMeta(
+  db: InstanceType<typeof Database>,
+  id: number,
+  meta: {
+    original_language: string | null;
+    runtime_minutes: number | null;
+    vote_average: number | null;
+    status: string | null;
+    popularity?: number | null;
+    vote_count?: number | null;
+    meta_checked_at: number;
+  },
+): void {
+  const hasPopularity = meta.popularity !== undefined;
+  const hasVoteCount = meta.vote_count !== undefined;
+  db.prepare(`
+    UPDATE titles SET
+      original_language = ?,
+      runtime_minutes   = ?,
+      vote_average      = ?,
+      status            = ?,
+      popularity        = CASE WHEN ? = 1 THEN ? ELSE popularity END,
+      vote_count        = CASE WHEN ? = 1 THEN ? ELSE vote_count END,
+      meta_checked_at   = ?
+    WHERE id = ?
+  `).run(
+    meta.original_language,
+    meta.runtime_minutes,
+    meta.vote_average,
+    meta.status,
+    hasPopularity ? 1 : 0,
+    hasPopularity ? meta.popularity : null,
+    hasVoteCount ? 1 : 0,
+    hasVoteCount ? meta.vote_count : null,
+    meta.meta_checked_at,
+    id,
+  );
 }
 
 export function getTitleById(

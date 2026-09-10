@@ -17,6 +17,7 @@ import {
   MIGRATE_010_ADD_POPULARITY,
   MIGRATE_011_ADD_RATING_CHECKED_AT,
   MIGRATE_012_ADD_DISMISS_REASON,
+  MIGRATE_013_ADD_TITLE_META,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -122,6 +123,17 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     for (const sql of MIGRATE_012_ADD_DISMISS_REASON) {
       const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
       if (!recColNames12.includes(colName)) {
+        db.exec(sql);
+      }
+    }
+
+    // Migration 013: add original_language, runtime_minutes, vote_average,
+    // status, meta_checked_at to titles (idempotent)
+    const titleCols13 = db.prepare("PRAGMA table_info('titles')").all() as Array<{ name: string }>;
+    const titleColNames13 = titleCols13.map(c => c.name);
+    for (const sql of MIGRATE_013_ADD_TITLE_META) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!titleColNames13.includes(colName)) {
         db.exec(sql);
       }
     }

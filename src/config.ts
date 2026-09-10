@@ -74,12 +74,37 @@ export interface Config {
    * Rationale: OMDb free tier allows ~1 000 calls/day; leave ~200 for live /generate.
    */
   ratingsBackfillCap?: number;
+  /**
+   * Maximum titles to enrich with TMDB metadata (original_language,
+   * runtime_minutes, vote_average, status) during the nightly/startup
+   * backfill run. Defaults to 20000 — enough to sweep the whole ~17.8k
+   * pre-existing catalogue in one pass. Set via META_BACKFILL_CAP env var.
+   */
+  metaBackfillCap?: number;
+  /**
+   * Overrides for the retrieval hard filters (see src/retrieval/filters.ts
+   * DEFAULT_HARD_FILTERS). Each is optional; unset keys keep the default. Set via
+   * RETRIEVAL_MIN_YEAR, RETRIEVAL_MIN_RUNTIME, RETRIEVAL_MIN_VOTES_MOVIE,
+   * RETRIEVAL_MIN_VOTES_TV, RETRIEVAL_MIN_VOTE_AVERAGE and RETRIEVAL_LANGUAGES
+   * (comma-separated ISO 639-1 codes; these are ADDED to the languages learned
+   * from the liked history, English is always included).
+   */
+  hardFilters?: {
+    minYear?: number;
+    minRuntimeMovie?: number;
+    minVotesMovie?: number;
+    minVotesTv?: number;
+    minVoteAverage?: number;
+    languages?: string[];
+  };
 }
 
 /** Default nightly harvest cron expression (container TZ = UTC). */
 export const HARVEST_CRON_DEFAULT = '0 3 * * *';
 /** Default OMDb ratings backfill cap per nightly run. */
 export const RATINGS_BACKFILL_CAP_DEFAULT = 800;
+/** Default TMDB metadata backfill cap per run. */
+export const META_BACKFILL_CAP_DEFAULT = 20000;
 
 /** Default consecutive pages swept per global broad bucket per harvest run. */
 export const HARVEST_PAGES_PER_BUCKET_DEFAULT = 4;
@@ -134,5 +159,33 @@ export function loadConfig(): Config {
     ratingsBackfillCap: process.env.RATINGS_BACKFILL_CAP
       ? parseInt(process.env.RATINGS_BACKFILL_CAP, 10)
       : RATINGS_BACKFILL_CAP_DEFAULT,
+    metaBackfillCap: process.env.META_BACKFILL_CAP
+      ? parseInt(process.env.META_BACKFILL_CAP, 10)
+      : META_BACKFILL_CAP_DEFAULT,
+    hardFilters: parseHardFilterEnv(process.env),
   };
+}
+
+/** Read the optional RETRIEVAL_* overrides; only keys that parse cleanly are set. */
+export function parseHardFilterEnv(env: NodeJS.ProcessEnv): Config['hardFilters'] {
+  const num = (key: string): number | undefined => {
+    const raw = env[key];
+    if (raw == null || raw === '') return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const out: NonNullable<Config['hardFilters']> = {};
+  const minYear = num('RETRIEVAL_MIN_YEAR');
+  const minRuntimeMovie = num('RETRIEVAL_MIN_RUNTIME');
+  const minVotesMovie = num('RETRIEVAL_MIN_VOTES_MOVIE');
+  const minVotesTv = num('RETRIEVAL_MIN_VOTES_TV');
+  const minVoteAverage = num('RETRIEVAL_MIN_VOTE_AVERAGE');
+  if (minYear != null) out.minYear = minYear;
+  if (minRuntimeMovie != null) out.minRuntimeMovie = minRuntimeMovie;
+  if (minVotesMovie != null) out.minVotesMovie = minVotesMovie;
+  if (minVotesTv != null) out.minVotesTv = minVotesTv;
+  if (minVoteAverage != null) out.minVoteAverage = minVoteAverage;
+  const langs = (env.RETRIEVAL_LANGUAGES ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (langs.length > 0) out.languages = langs;
+  return Object.keys(out).length > 0 ? out : undefined;
 }

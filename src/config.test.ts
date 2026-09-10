@@ -81,3 +81,18 @@ describe('loadConfig', () => {
     expect(config.bindHost).toBe('127.0.0.1');
   });
 });
+
+describe('parseHardFilterEnv', () => {
+  it('returns undefined when nothing is set', async () => {
+    const { parseHardFilterEnv } = await import('./config.js');
+    expect(parseHardFilterEnv({})).toBeUndefined();
+  });
+
+  it('parses numeric overrides and a language list, ignoring junk values', async () => {
+    const { parseHardFilterEnv } = await import('./config.js');
+    expect(parseHardFilterEnv({
+      RETRIEVAL_MIN_YEAR: '1990', RETRIEVAL_MIN_VOTES_TV: '25', RETRIEVAL_MIN_VOTE_AVERAGE: 'abc',
+      RETRIEVAL_LANGUAGES: 'EN, ko,,fr ',
+    })).toEqual({ minYear: 1990, minVotesTv: 25, languages: ['en', 'ko', 'fr'] });
+  });
+});

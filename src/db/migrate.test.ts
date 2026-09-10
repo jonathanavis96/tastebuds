@@ -92,6 +92,24 @@ describe('runMigrations', () => {
     expect(() => runMigrations(db)).not.toThrow();
   });
 
+  it('migration 013 adds original_language, runtime_minutes, vote_average, status, meta_checked_at to titles and is idempotent', () => {
+    const db = createTestDb();
+    runMigrations(db);
+
+    const columns = db
+      .prepare("PRAGMA table_info('titles')")
+      .all() as Array<{ name: string }>;
+    const colNames = columns.map((c) => c.name);
+    expect(colNames).toContain('original_language');
+    expect(colNames).toContain('runtime_minutes');
+    expect(colNames).toContain('vote_average');
+    expect(colNames).toContain('status');
+    expect(colNames).toContain('meta_checked_at');
+
+    // Re-running migrations must not throw (idempotent)
+    expect(() => runMigrations(db)).not.toThrow();
+  });
+
   it('watch_events table has status column with correct default check', () => {
     const db = createTestDb();
     runMigrations(db);

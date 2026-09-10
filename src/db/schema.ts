@@ -164,6 +164,19 @@ export const MIGRATE_012_ADD_DISMISS_REASON = [
   `ALTER TABLE recommendations ADD COLUMN dismiss_reason TEXT`,
 ];
 
+// Migration 013: TMDB metadata columns for hard-filtering recommendations by
+// language, runtime, TMDB rating and release status. meta_checked_at (unix
+// epoch seconds) marks when TMDB last supplied this meta for a title — NULL
+// means never fetched, so the backfill job can select untouched rows first
+// and the nightly harvest can skip re-fetching titles it already has meta for.
+export const MIGRATE_013_ADD_TITLE_META = [
+  `ALTER TABLE titles ADD COLUMN original_language TEXT`,
+  `ALTER TABLE titles ADD COLUMN runtime_minutes INTEGER`,
+  `ALTER TABLE titles ADD COLUMN vote_average REAL`,
+  `ALTER TABLE titles ADD COLUMN status TEXT`,
+  `ALTER TABLE titles ADD COLUMN meta_checked_at INTEGER`,
+];
+
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before
 // either inserted, so the read-time excludeTitleIds missed the other's picks and

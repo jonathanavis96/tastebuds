@@ -23,6 +23,11 @@ export function mapTmdbToTitleRow(
 
   const imdb_id = detail.external_ids?.imdb_id ?? detail.imdb_id ?? null;
 
+  const runtime_minutes =
+    mediaType === 'movie'
+      ? detail.runtime || null
+      : (detail.episode_run_time ?? []).find((r) => r > 0) ?? null;
+
   return {
     tmdb_id: detail.id,
     media_type: mediaType,
@@ -41,5 +46,10 @@ export function mapTmdbToTitleRow(
     popularity: detail.popularity ?? null,
     vote_count: detail.vote_count ?? null,
     rating_checked_at: null,
+    original_language: detail.original_language ?? null,
+    runtime_minutes,
+    vote_average: detail.vote_average ?? null,
+    status: detail.status ?? null,
+    meta_checked_at: Math.floor(Date.now() / 1000),
   };
 }

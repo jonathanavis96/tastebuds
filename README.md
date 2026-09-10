@@ -122,6 +122,14 @@ Copy the printed token into `CLAUDE_CODE_OAUTH_TOKEN` in your `.env`.
 Get a free key (1000 req/day) at <https://www.omdbapi.com/apikey.aspx> and put it in
 `OMDB_API_KEY`. Leave it blank to skip IMDb/RT ratings.
 
+### TMDB metadata (language, runtime, TMDB rating, release status)
+Each title also carries `original_language`, `runtime_minutes`, `vote_average` and `status`
+from TMDB, used to hard-filter recommendations (e.g. exclude non-English titles, cap runtime,
+require a minimum TMDB score, or skip titles TMDB no longer lists). New harvests populate
+these automatically; a one-off `npm run backfill:meta` (or `node dist/server/harvest/backfillMetaCli.js`
+in Docker) sweeps any existing titles that don't have them yet — the app also runs this once
+in the background on first boot, and again nightly alongside the ratings backfill.
+
 ---
 
 ## Quick start (Docker — recommended)

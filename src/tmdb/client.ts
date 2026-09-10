@@ -59,6 +59,22 @@ export async function getTitleDetails(
   return tmdbFetch<TmdbTitleDetail>(url);
 }
 
+/**
+ * Lightweight metadata-only fetch (NO append_to_response) — used by the
+ * backfillTitleMeta job, which only needs original_language, runtime,
+ * vote_average and status, not the full keywords/credits/external_ids payload
+ * that getTitleDetails pulls for harvest/curation.
+ */
+export async function getTitleMeta(
+  tmdbId: number,
+  mediaType: 'movie' | 'tv',
+  config: Pick<Config, 'tmdbApiKey'>,
+): Promise<TmdbTitleDetail> {
+  const endpoint = mediaType === 'movie' ? 'movie' : 'tv';
+  const url = `${TMDB_BASE}/${endpoint}/${tmdbId}?api_key=${config.tmdbApiKey}`;
+  return tmdbFetch<TmdbTitleDetail>(url);
+}
+
 export async function searchTitles(
   query: string,
   mediaType: 'movie' | 'tv',

@@ -26,6 +26,13 @@ export interface TmdbTitleDetail extends TmdbTitle {
   external_ids?: {
     imdb_id?: string | null;
   };
+  original_language?: string;
+  /** Movie-only: runtime in minutes. */
+  runtime?: number | null;
+  /** TV-only: per-season/episode runtimes; first positive entry is used. */
+  episode_run_time?: number[];
+  vote_average?: number;
+  status?: string;
 }
 
 export interface DiscoverOpts {
