@@ -243,6 +243,8 @@ export const REQUEST_CANDIDATE_LIMIT = 60;
 
 /** Wildcards are "off-taste but real": rank them by quality + popularity, not similarity. */
 const WILDCARD_WEIGHTS: RerankWeights = { similarity: 0, affinity: 0.2, quality: 0.5, popularity: 0.3 };
+/** Explicit requests are request-dominant (mirrors the 0.7/0.3 vector blend): relevance leads, taste and quality tie-break. */
+const REQUEST_WEIGHTS: RerankWeights = { similarity: 0.55, affinity: 0.15, quality: 0.20, popularity: 0.10 };
 
 /** SQL fragment + params for opts.hardFilters (or the widened variant `f`). Empty when disabled. */
 function filterClause(f: HardFilters | undefined): { sql: string; params: unknown[] } {
@@ -705,8 +707,8 @@ function finishRequest(
   const sideLimit = opts.mediaType ? total : half;
   const fetched = balancedWithWidening(opts, sideLimit * RERANK_FETCH_MULTIPLIER, (f, mt, limit) =>
     runRequestQuery(db, queryBuf, vetoIds, opts, f, mt, limit));
-  if (opts.mediaType) return top(fetched.single, softTaste, total);
-  return [...top(fetched.movie, softTaste, half), ...top(fetched.tv, softTaste, half)];
+  if (opts.mediaType) return top(fetched.single, softTaste, total, REQUEST_WEIGHTS);
+  return [...top(fetched.movie, softTaste, half, REQUEST_WEIGHTS), ...top(fetched.tv, softTaste, half, REQUEST_WEIGHTS)];
 }
 
 /**

@@ -7,6 +7,7 @@ import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
 import {
+  DEFAULT_RERANK_WEIGHTS,
   genreAffinityForProfile,
   jointGenreAffinity,
   qualityScore,
@@ -148,6 +149,15 @@ describe('rerank', () => {
     const close = cand({ title: 'Close', score: 0.05, vote_average: 6.8, vote_count: 1000 });
     const far = cand({ title: 'Far', score: 0.6, vote_average: 7.4, vote_count: 1500 });
     expect(rerank([far, close], {}, new Set())[0].title).toBe('Close');
+  });
+
+  it('rescales similarity within the batch so the closest candidate always leads at equal taste and quality', () => {
+    // Real distances sit in a narrow band; the 0.04 gap must still be decisive when nothing else differs.
+    const near = cand({ title: 'Near', score: 0.31 });
+    const far = cand({ title: 'Far', score: 0.35 });
+    const out = rerank([far, near], {}, new Set());
+    expect(out.map(c => c.title)).toEqual(['Near', 'Far']);
+    expect(out[0].rank_score - out[1].rank_score).toBeCloseTo(DEFAULT_RERANK_WEIGHTS.similarity, 5);
   });
 
   it('attaches a rank_score and keeps the cosine distance in score', () => {

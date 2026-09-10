@@ -163,10 +163,18 @@ export function rerank<T extends CandidateTitle>(
   weights: RerankWeights = DEFAULT_RERANK_WEIGHTS,
 ): RankedCandidate<T>[] {
   const ranked: RankedCandidate<T>[] = [];
-  for (const c of candidates) {
+  const kept = candidates.filter(c => !parseGenres(c.genres).some(g => vetoed.has(g)));
+  // Cosine distances from the embedder cluster in a narrow band (≈0.25–0.45 for
+  // nomic-embed-text), so raw 1−distance would leave similarity nearly constant
+  // and let quality/popularity decide everything. Rescale within the batch:
+  // the closest candidate scores 1, the farthest 0.
+  const dists = kept.map(c => c.score);
+  const minDist = Math.min(...dists);
+  const maxDist = Math.max(...dists);
+  const range = maxDist - minDist;
+  for (const c of kept) {
     const genres = parseGenres(c.genres);
-    if (genres.some(g => vetoed.has(g))) continue;
-    const similarity = clamp(1 - c.score, 0, 1);
+    const similarity = range > 1e-9 ? (maxDist - c.score) / range : clamp(1 - c.score, 0, 1);
     const aff = (titleAffinity(genres, affinity) + 1) / 2; // [-1,1] → [0,1]
     const quality = qualityScore(c.vote_average, c.vote_count, c.media_type);
     const pop = popularityScore(c.popularity);

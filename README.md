@@ -93,8 +93,9 @@ Every Generate (passive or typed request) runs the same three stages, all in SQL
    when you typed one) over a wide slate.
 3. **Rerank** — genre affinity learned from your own star ratings (a genre either partner
    rates consistently low is vetoed from Joint picks), a Bayesian quality score from TMDB
-   rating and vote count, and popularity, blended with the similarity. Your votes change the
-   order, not just the centroid.
+   rating and vote count, and popularity, blended with the similarity (rescaled within the
+   slate, since raw cosine distances cluster tightly). Your votes change the order, not just
+   the centroid. Explicit requests weight similarity more heavily so relevance leads.
 
 If the filtered pool is thin, it widens in a fixed order — year floor (1990 → 1985 → 1980),
 then movie runtime (40 min), then votes (100/25 → 20/10) — and never relaxes rating,
