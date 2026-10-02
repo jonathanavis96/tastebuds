@@ -41,12 +41,27 @@ export function getRecommendations(
     .all(profileId) as RecommendationRow[];
 }
 
-/** Remove a profile's existing pending recommendations so a fresh generate replaces them (no duplicate accumulation). */
+/**
+ * Remove a profile's existing pending recommendations so a fresh generate replaces
+ * them (no duplicate accumulation). With `upToId`, only pending rows with
+ * id <= upToId go, so picks written after that point survive.
+ *
+ * A pending pick whose title the profile has watched, rated or watchlisted is kept:
+ * rating a pick never moves it out of 'pending', and its row holds the
+ * predicted_rating that getCalibration pairs with the actual rating. Such picks are
+ * already hidden from Picks, so keeping them does not bring them back into the feed.
+ */
 export function clearPendingRecommendations(
   db: InstanceType<typeof Database>,
   profileId: number,
+  upToId?: number,
 ): void {
-  db.prepare("DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending'").run(profileId);
+  const untouched = 'AND title_id NOT IN (SELECT title_id FROM watch_events WHERE profile_id = ?)';
+  if (upToId === undefined) {
+    db.prepare(`DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' ${untouched}`).run(profileId, profileId);
+    return;
+  }
+  db.prepare(`DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' AND id <= ? ${untouched}`).run(profileId, upToId, profileId);
 }
 
 export interface Calibration {

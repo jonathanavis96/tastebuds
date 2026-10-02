@@ -12,6 +12,7 @@ import {
   hardFilterSql,
   withWidening,
   languagesFromHistory,
+  titleIdsPassing,
   type HardFilters,
 } from './filters.js';
 
@@ -214,5 +215,34 @@ describe('languagesFromHistory', () => {
   it('returns just English when there is no history', () => {
     const db = createTestDb();
     expect(languagesFromHistory(db, [1, 2])).toEqual(['en']);
+  });
+});
+
+describe('titleIdsPassing', () => {
+  function seed(db: InstanceType<typeof Database>): { good: number[]; bad: number } {
+    const good: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      upsertTitle(db, goodTitle({ title: `ok${i}` }));
+      good.push((db.prepare('SELECT max(id) AS id FROM titles').get() as { id: number }).id);
+    }
+    upsertTitle(db, goodTitle({ title: 'tiny', vote_count: 1 }));
+    const bad = (db.prepare('SELECT max(id) AS id FROM titles').get() as { id: number }).id;
+    return { good, bad };
+  }
+
+  it('returns the passing ids of a small set', () => {
+    const db = createTestDb();
+    const { good, bad } = seed(db);
+    expect([...titleIdsPassing(db, DEFAULT_HARD_FILTERS, [...good, bad, 999_999])].sort()).toEqual([...good].sort());
+  });
+
+  it('handles more ids than SQLite allows as bound variables in one statement', () => {
+    const db = createTestDb();
+    const { good, bad } = seed(db);
+    const small = titleIdsPassing(db, DEFAULT_HARD_FILTERS, [...good, bad]);
+    // 40,000 ids: the real titles plus unknown ids that must simply not match.
+    const many = [...good, bad, ...Array.from({ length: 40_000 - 4 }, (_, i) => 1_000_000 + i)];
+    const result = titleIdsPassing(db, DEFAULT_HARD_FILTERS, many);
+    expect([...result].sort()).toEqual([...small].sort());
   });
 });
