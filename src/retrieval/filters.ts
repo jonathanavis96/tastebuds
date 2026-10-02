@@ -130,6 +130,13 @@ export interface WideningResult<T> {
   stepsApplied: string[];
 }
 
+const WIDENED_KEYS = ['minYear', 'minRuntimeMovie', 'minVotesMovie', 'minVotesTv'] as const;
+
+/** True when `after` is looser than `before` on at least one widened filter. */
+function lowersAnything(before: HardFilters, after: HardFilters): boolean {
+  return WIDENED_KEYS.some(k => after[k] < before[k]);
+}
+
 /**
  * Run `query` under `base`; if it yields fewer than `minCount` rows, apply the
  * widening steps one at a time (re-running the query after each) until the
@@ -146,7 +153,11 @@ export function withWidening<T>(
   let best: WideningResult<T> = { rows, filters, stepsApplied: [] };
   for (const step of WIDENING_STEPS) {
     if (rows.length >= minCount) break;
-    filters = step.apply(filters);
+    const next = step.apply(filters);
+    // A filter already at or below this step's target is left as it is; the
+    // step changed nothing, so it is neither logged nor re-queried.
+    if (!lowersAnything(filters, next)) continue;
+    filters = next;
     stepsApplied.push(step.label);
     rows = query(filters);
     if (rows.length >= best.rows.length) best = { rows, filters, stepsApplied: [...stepsApplied] };

@@ -167,6 +167,29 @@ describe('withWidening', () => {
     expect(res.filters.minYear).toBe(HARD_FLOOR.minYear);
     expect(res.filters.minVotesMovie).toBe(HARD_FLOOR.minVotesMovie);
   });
+
+  it('names only the steps that actually lowered a filter', () => {
+    // Year already sits at 1985 and movie votes below 100: the first two year
+    // steps and the movie half of 'votes>=100/25' change nothing on their own.
+    const start: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear: 1985, minVotesMovie: 50, minVotesTv: 20 };
+    const res = withWidening(start, 10, () => [1, 2]);
+    expect(res.stepsApplied).toEqual([
+      `year>=${HARD_FLOOR.minYear}`,
+      `runtime>=${HARD_FLOOR.minRuntimeMovie}`,
+      `votes>=${HARD_FLOOR.minVotesMovie}/${HARD_FLOOR.minVotesTv}`,
+    ]);
+    expect(res.filters.minYear).toBe(HARD_FLOOR.minYear);
+    expect(res.filters.minVotesMovie).toBe(HARD_FLOOR.minVotesMovie);
+    expect(res.filters.minVotesTv).toBe(HARD_FLOOR.minVotesTv);
+  });
+
+  it('names no step at all when every filter already sits on the hard floor', () => {
+    const floor: HardFilters = { ...DEFAULT_HARD_FILTERS, ...HARD_FLOOR };
+    const res = withWidening(floor, 10, () => [1, 2]);
+    expect(res.rows).toEqual([1, 2]);
+    expect(res.stepsApplied).toEqual([]);
+    expect(res.filters).toEqual(floor);
+  });
 });
 
 describe('languagesFromHistory', () => {
