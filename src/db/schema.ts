@@ -61,7 +61,7 @@ export const CREATE_WATCH_EVENTS = `
     rating     INTEGER CHECK (rating IS NULL OR (rating >= 1 AND rating <= 5)),
     watched_at TEXT,
     note       TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (profile_id, title_id)
   )
 `;
@@ -83,7 +83,7 @@ export const CREATE_RECOMMENDATIONS = `
     kind         TEXT NOT NULL DEFAULT 'core',
     predicted_rating REAL,
     dismiss_reason TEXT,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   )
 `;
 

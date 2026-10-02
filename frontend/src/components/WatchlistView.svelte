@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { parseTimestamp } from '../lib/time';
   import type { WatchEvent } from '../lib/types.js';
 
   interface Props {
@@ -18,8 +19,8 @@
   // created_at is when the title was added to the watchlist.
   function addedDate(iso: string | null | undefined): string {
     if (!iso) return '';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return '';
+    const d = parseTimestamp(iso);
+    if (!d) return '';
     return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
   }
 </script>

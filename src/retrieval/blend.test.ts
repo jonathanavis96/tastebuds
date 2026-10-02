@@ -43,3 +43,26 @@ describe('blendVectors', () => {
     expect(blended.every((x) => Number.isFinite(x))).toBe(true);
   });
 });
+
+describe('blendVectors degenerate inputs', () => {
+  const finite = (v: number[]) => v.every(Number.isFinite);
+
+  it('ignores a side containing NaN instead of poisoning the whole blend', () => {
+    const out = blendVectors([NaN, 1], 0.5, [0, 2], 0.5);
+    expect(finite(out)).toBe(true);
+    expect(out).toEqual([0, 1]);
+  });
+
+  it('falls back to the other side when one side is empty', () => {
+    expect(blendVectors([], 0.5, [3, 4], 0.5)).toEqual([0.6, 0.8]);
+    expect(blendVectors([3, 4], 0.5, [], 0.5)).toEqual([0.6, 0.8]);
+  });
+
+  it('treats zero total weight as equal weights instead of dividing by zero', () => {
+    expect(finite(blendVectors([1, 0], 0, [0, 1], 0))).toBe(true);
+  });
+
+  it('throws on mismatched dimensions rather than producing NaN', () => {
+    expect(() => blendVectors([1, 0, 0], 0.5, [0, 1], 0.5)).toThrow();
+  });
+});
