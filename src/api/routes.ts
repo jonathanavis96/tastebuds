@@ -5,7 +5,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
-import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
+import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason, clearPendingRecommendations } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
@@ -315,6 +315,18 @@ export function createApiRoutes(db: Database, config: Config): Hono {
 
     await curateCandidates(candidatePool, profile, sig, body.request ?? null, config, db, undefined, balanceMedia, body.surprise === true);
 
+    // A fresh generate replaces the profile's pending set. The old rows go only once
+    // curation has written at least one new pick (they were excluded from the pool,
+    // so no new pick collides with one), so a failed or empty generate never leaves
+    // Picks empty. Shown/dismissed recs and watch history are untouched, and so is a
+    // pending pick the profile has watched, rated or watchlisted (its row carries the
+    // predicted_rating the calibration widget needs).
+    if (existingPending.length > 0) {
+      const lastOldId = existingPending.reduce((m, r) => Math.max(m, r.id), 0);
+      const hasNewPick = getRecommendations(db, body.profileId, 'pending').some(r => r.id > lastOldId);
+      if (hasNewPick) clearPendingRecommendations(db, body.profileId, lastOldId);
+    }
+
     // OMDb enrichment + RT URL/score resolution — non-fatal; OMDb is the authority
     // for both imdb and rt ratings. resolveRtUrl is only called when OMDb supplies
     // no RT value this pass, and a scraped score is never persisted unless verified.
@@ -328,8 +340,8 @@ export function createApiRoutes(db: Database, config: Config): Hono {
           // Whole-block gate on rating_checked_at (mirrors backfillRatings.ts's SELECT
           // filter): once this title has been through an OMDb check pass, don't re-run
           // OMDb *or* RT resolution for it forever just because ratings came back empty.
-          // Pending recs accumulate across many /generate calls (nothing ever clears
-          // them — see clearPendingRecommendations, which is unused), so without this
+          // A pending rec can sit in Picks across several /generate calls (old picks are
+          // cleared only once a generate writes new ones), so without this
           // guard an OMDb-absent title sitting in Picks would burn a fresh OMDb call
           // AND a fresh RT scrape on every single /generate, draining the OMDb free-tier
           // quota reserved for genuinely new titles and hammering RT for no benefit.
