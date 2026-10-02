@@ -8,14 +8,14 @@ export function upsertWatchEvent(
   // note uses COALESCE on conflict so a later rate/watchlist action that carries no
   // note never wipes an insight the user already wrote for this title.
   db.prepare(`
-    INSERT INTO watch_events (profile_id, title_id, status, rating, watched_at, note)
-    VALUES (@profile_id, @title_id, @status, @rating, @watched_at, @note)
+    INSERT INTO watch_events (profile_id, title_id, status, rating, watched_at, note, created_at)
+    VALUES (@profile_id, @title_id, @status, @rating, @watched_at, @note, @created_at)
     ON CONFLICT (profile_id, title_id) DO UPDATE SET
       status     = excluded.status,
       rating     = excluded.rating,
       watched_at = excluded.watched_at,
       note       = COALESCE(excluded.note, watch_events.note)
-  `).run({ ...event, note: event.note ?? null });
+  `).run({ ...event, note: event.note ?? null, created_at: new Date().toISOString() });
 }
 
 /** Set (or clear) the free-text taste note for an existing watch_event. */
@@ -43,7 +43,7 @@ export function getWatchEvents(
   profileId: number,
 ): WatchEventRow[] {
   return db
-    .prepare('SELECT * FROM watch_events WHERE profile_id = ? ORDER BY created_at DESC')
+    .prepare('SELECT * FROM watch_events WHERE profile_id = ? ORDER BY julianday(created_at) DESC')
     .all(profileId) as WatchEventRow[];
 }
 

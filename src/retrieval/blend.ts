@@ -22,8 +22,21 @@ function unit(v: number[]): number[] {
  * w1 and w2 are weights (need not sum to 1 — normalised internally).
  */
 export function blendVectors(v1: number[], w1: number, v2: number[], w2: number): number[] {
+  // A side that is empty, zero-length or contains a non-finite value carries no
+  // direction: use the other side alone rather than letting NaN poison the blend.
+  const ok1 = usable(v1);
+  const ok2 = usable(v2);
+  if (!ok1 || !ok2) return ok1 ? unit(v1) : ok2 ? unit(v2) : v1.map(() => 0);
+  if (v1.length !== v2.length) {
+    throw new Error(`blendVectors: dimension mismatch (${v1.length} vs ${v2.length})`);
+  }
+  if (!(w1 + w2 > 0)) { w1 = 1; w2 = 1; }
   const total = w1 + w2;
   const n1 = unit(v1);
   const n2 = unit(v2);
   return n1.map((val, i) => (val * w1 + n2[i] * w2) / total);
+}
+
+function usable(v: number[]): boolean {
+  return v.length > 0 && v.every(Number.isFinite) && v.some((x) => x !== 0);
 }

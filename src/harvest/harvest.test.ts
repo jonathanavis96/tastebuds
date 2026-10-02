@@ -125,6 +125,27 @@ describe('runHarvest', () => {
     expect(saved!.embedding).not.toBeNull();
   });
 
+  it('skips a profile with corrupt prefs, logs it, and harvests the rest', async () => {
+    const db = createTestDb();
+    upsertProfile(db, { name: 'Broken', media_weighting: 0.4, is_derived: 0, config: '{}' });
+    upsertTasteSignature(db, {
+      profile_id: 1, taste_vector: null, prefs: '{not json', refreshed_at: new Date().toISOString(),
+    });
+    upsertProfile(db, { name: 'Sam', media_weighting: 0.4, is_derived: 0, config: '{}' });
+    upsertTasteSignature(db, {
+      profile_id: 2, taste_vector: null, prefs: JSON.stringify({ loved_genres: ['Drama'] }),
+      refreshed_at: new Date().toISOString(),
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await runHarvest(db, mockConfig);
+
+    expect(result.titlesAdded).toBeGreaterThan(0);
+    expect(result.errors.some(e => e.includes('profile 1') && e.includes('prefs'))).toBe(true);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('skips titles already in watch_events for the profile', async () => {
     const db = createTestDb();
     seedProfileAndSig(db);

@@ -1,3 +1,4 @@
+import { parsePrefs, type PrefsJson } from './prefs.js';
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import type { TitleRow } from '../db/types.js';
@@ -100,6 +101,15 @@ const REQUEST_TASTE_WEIGHT = 0.3;
 /** Deserialise a stored Float32 taste-vector Buffer to number[]. */
 function vecFromBuffer(buf: Buffer): number[] {
   return Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.length / 4));
+}
+
+/**
+ * Equal blend of the two partners' taste vectors. When only one partner has a
+ * vector, the blend is that partner's alone; null only when neither has one.
+ */
+function partnerBlend(a: Buffer | null | undefined, b: Buffer | null | undefined): number[] | null {
+  if (!a && !b) return null;
+  return blendVectors(a ? vecFromBuffer(a) : [], 0.5, b ? vecFromBuffer(b) : [], 0.5);
 }
 
 export interface CandidateTitle extends TitleRow {
@@ -373,14 +383,6 @@ export interface CandidatePool {
   adversarial: CandidateTitle[];
 }
 
-interface PrefsJson {
-  loved_genres?: string[];
-  hated_genres?: string[];
-  loved_themes?: string[];
-  hated_themes?: string[];
-  preferred_era?: string;
-  media_weighting?: number;
-}
 
 /**
  * Retrieve candidates for the Joint profile.
@@ -403,16 +405,15 @@ export async function retrieveJointCandidates(
   const alexSig = getTasteSignature(db, alexId);
   const samSig = getTasteSignature(db, samId);
 
-  if (!alexSig?.taste_vector || !samSig?.taste_vector) return [];
-
-  const blended = blendVectors(vecFromBuffer(alexSig.taste_vector), 0.5, vecFromBuffer(samSig.taste_vector), 0.5);
+  const blended = partnerBlend(alexSig?.taste_vector, samSig?.taste_vector);
+  if (!blended) return [];
   const blendedBuf = Buffer.from(new Float32Array(blended).buffer);
 
-  const alexPrefs: PrefsJson = JSON.parse(alexSig.prefs ?? '{}');
-  const samPrefs: PrefsJson = JSON.parse(samSig.prefs ?? '{}');
+  const alexPrefs: PrefsJson = parsePrefs(alexSig?.prefs);
+  const samPrefs: PrefsJson = parsePrefs(samSig?.prefs);
   const jointId = opts.jointProfileId;
   const jointSig = jointId != null ? getTasteSignature(db, jointId) : undefined;
-  const jointPrefs: PrefsJson = jointSig ? JSON.parse(jointSig.prefs ?? '{}') : {};
+  const jointPrefs: PrefsJson = jointSig ? parsePrefs(jointSig.prefs) : {};
   const allHated = [...new Set([
     ...(alexPrefs.hated_genres ?? []),
     ...(samPrefs.hated_genres ?? []),
@@ -435,7 +436,7 @@ export async function retrieveJointCandidates(
     `;
     const params: unknown[] = [blendedBuf, alexId, samId, ...fc.params];
     if (opts.mediaType) { sql += ' AND t.media_type = ?'; params.push(opts.mediaType); }
-    for (const genre of allHated) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%${genre}%`); }
+    { const h = hatedGenreClause(allHated); sql += h.sql; params.push(...h.params); }
     if (opts.minImdbRating != null) {
       sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
       params.push(opts.minImdbRating);
@@ -456,6 +457,18 @@ export async function retrieveJointCandidates(
   return top(rows, taste, limit);
 }
 
+/**
+ * SQL veto for hated genres. `t.genres` is a JSON array of genre names; a title
+ * is dropped only when one of its genres equals a hated genre exactly, ignoring
+ * case, so hating "Action" keeps "Action & Adventure".
+ */
+export function hatedGenreClause(hatedGenres: string[]): { sql: string; params: string[] } {
+  const sql = hatedGenres
+    .map(() => ' AND NOT EXISTS (SELECT 1 FROM json_each(t.genres) g WHERE lower(g.value) = lower(?))')
+    .join('');
+  return { sql, params: [...hatedGenres] };
+}
+
 /** Build a NOT IN clause safe from the NULL trap: when ids is empty, use `SELECT 0`. */
 function notInClause(ids: number[]): [string, number[]] {
   if (ids.length === 0) return ['SELECT 0', []];
@@ -467,7 +480,7 @@ type OrderDir = 'ASC' | 'DESC' | 'RANDOM';
 /**
  * Shared pool query for the solo and Joint pools: taste vector distance over
  * titles not engaged by any of `vetoProfileIds`, minus explicit excludes, under
- * hard filters `f`, optional media type, hated-genre LIKE vetoes and IMDb floor.
+ * hard filters `f`, optional media type, exact hated-genre vetoes and IMDb floor.
  */
 function runPoolQuery(
   db: InstanceType<typeof Database>,
@@ -494,7 +507,7 @@ function runPoolQuery(
   `;
   const params: unknown[] = [vec, ...vetoIds, ...excIds, ...fc.params];
   if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
-  for (const genre of hatedGenres) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%${genre}%`); }
+  { const h = hatedGenreClause(hatedGenres); sql += h.sql; params.push(...h.params); }
   if (opts.minImdbRating != null) {
     sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
     params.push(opts.minImdbRating);
@@ -577,7 +590,7 @@ export async function retrieveCandidatePool(
   const sig = getTasteSignature(db, profileId);
   if (!sig?.taste_vector) return { onTaste: [], wildcards: [], adversarial: [] };
 
-  const prefs: PrefsJson = JSON.parse(sig.prefs ?? '{}');
+  const prefs: PrefsJson = parsePrefs(sig.prefs);
   const hatedGenres: string[] = prefs.hated_genres ?? [];
   return assemblePool(db, sig.taste_vector, [profileId], opts, soloTaste(db, profileId), hatedGenres);
 }
@@ -603,7 +616,7 @@ export async function retrieveColdStartPool(
   _config: Pick<Config, 'ollamaUrl'>,
 ): Promise<CandidatePool> {
   const sig = getTasteSignature(db, profileId);
-  const prefs: PrefsJson = JSON.parse(sig?.prefs ?? '{}');
+  const prefs: PrefsJson = parsePrefs(sig?.prefs);
   const lovedGenres = prefs.loved_genres ?? [];
   const hatedGenres = prefs.hated_genres ?? [];
   const extraExclude: number[] = opts.excludeTitleIds ?? [];
@@ -636,7 +649,7 @@ export async function retrieveColdStartPool(
       sql += ' AND (' + lovedGenres.map(() => 't.genres LIKE ?').join(' OR ') + ')';
       for (const g of lovedGenres) params.push(`%"${g}"%`);
     }
-    for (const g of hatedGenres) { sql += ' AND t.genres NOT LIKE ?'; params.push(`%"${g}"%`); }
+    { const h = hatedGenreClause(hatedGenres); sql += h.sql; params.push(...h.params); }
     sql += ' ORDER BY RANDOM() LIMIT ?';
     params.push(limit);
     return db.prepare(sql).all(...params) as CandidateTitle[];
@@ -684,8 +697,16 @@ function runRequestQuery(
 }
 
 /** Build the query buffer from a base taste vector blended with the embedded request. */
-function blendRequestQueryBuf(baseVec: number[], reqVec: number[]): Buffer {
-  const queryVec = blendVectors(baseVec, REQUEST_TASTE_WEIGHT, reqVec, REQUEST_WEIGHT);
+export function blendRequestQueryBuf(baseVec: number[], reqVec: number[]): Buffer {
+  let queryVec: number[];
+  try {
+    queryVec = blendVectors(baseVec, REQUEST_TASTE_WEIGHT, reqVec, REQUEST_WEIGHT);
+  } catch {
+    // A request embedding of a different size (e.g. the embedding model changed)
+    // must never fail /generate: rank on the stored taste vector alone.
+    console.warn(`request blend skipped: taste vector has ${baseVec.length} dimensions, request embedding has ${reqVec.length}`);
+    queryVec = baseVec;
+  }
   return Buffer.from(new Float32Array(queryVec).buffer);
 }
 
@@ -753,12 +774,8 @@ export async function retrieveJointRequestCandidates(
 ): Promise<CandidateTitle[]> {
   const alexSig = getTasteSignature(db, alexId);
   const samSig = getTasteSignature(db, samId);
-  if (!alexSig?.taste_vector || !samSig?.taste_vector) return [];
-
-  const individualBlend = blendVectors(
-    vecFromBuffer(alexSig.taste_vector), 0.5,
-    vecFromBuffer(samSig.taste_vector), 0.5,
-  );
+  const individualBlend = partnerBlend(alexSig?.taste_vector, samSig?.taste_vector);
+  if (!individualBlend) return [];
   const jointId = opts.jointProfileId;
   const jointSig = jointId != null ? getTasteSignature(db, jointId) : undefined;
   const baseVec = jointSig?.taste_vector
@@ -793,15 +810,10 @@ export async function retrieveJointCandidatePool(
   const alexSig = getTasteSignature(db, alexId);
   const samSig = getTasteSignature(db, samId);
 
-  if (!alexSig?.taste_vector || !samSig?.taste_vector) {
-    return { onTaste: [], wildcards: [], adversarial: [] };
-  }
-
-  const alexVec = vecFromBuffer(alexSig.taste_vector);
-  const samVec = vecFromBuffer(samSig.taste_vector);
-
-  // Solo blend of the two people, equal weight.
-  const individualBlend = blendVectors(alexVec, 0.5, samVec, 0.5);
+  // Solo blend of the two people, equal weight (one partner alone if only one
+  // has rated enough to have a vector).
+  const individualBlend = partnerBlend(alexSig?.taste_vector, samSig?.taste_vector);
+  if (!individualBlend) return { onTaste: [], wildcards: [], adversarial: [] };
 
   // If the couple has its OWN taste vector (built from what they rated together,
   // incl. their joint notes), lean on it heavily; otherwise fall back to the solo
@@ -813,13 +825,13 @@ export async function retrieveJointCandidatePool(
     : individualBlend;
   const blendedBuf = Buffer.from(new Float32Array(blended).buffer);
 
-  const alexPrefs: PrefsJson = JSON.parse(alexSig.prefs ?? '{}');
-  const samPrefs: PrefsJson = JSON.parse(samSig.prefs ?? '{}');
+  const alexPrefs: PrefsJson = parsePrefs(alexSig?.prefs);
+  const samPrefs: PrefsJson = parsePrefs(samSig?.prefs);
   // Also honor the Joint profile's OWN hated_genres — a dismiss-reason tile
   // picked while browsing in Joint view writes back to the Joint profile's own
   // taste_signatures row (not Alex's or Sam's), so it must be read from here
   // too or it's silently inert for future joint recs.
-  const jointPrefs: PrefsJson = jointSig ? JSON.parse(jointSig.prefs ?? '{}') : {};
+  const jointPrefs: PrefsJson = jointSig ? parsePrefs(jointSig.prefs) : {};
   const allHated = [...new Set([
     ...(alexPrefs.hated_genres ?? []),
     ...(samPrefs.hated_genres ?? []),

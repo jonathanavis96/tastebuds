@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
+import { parsePrefs } from './prefs.js';
 import type { CandidateTitle } from './retrieve.js';
 
 /** Per-genre taste in [-1, 1]: +1 loves it, −1 hates it, 0 / absent = no signal. */
@@ -85,7 +86,7 @@ export function genreAffinityForProfile(
   }
 
   const sig = getTasteSignature(db, profileId);
-  const prefs = sig ? (JSON.parse(sig.prefs || '{}') as { loved_genres?: string[]; hated_genres?: string[] }) : {};
+  const prefs = sig ? parsePrefs(sig.prefs) : {};
   for (const g of prefs.hated_genres ?? []) affinity[g] = -1;
   for (const g of prefs.loved_genres ?? []) {
     if (!(g in affinity)) affinity[g] = LOVED_PREF_AFFINITY;
@@ -163,18 +164,24 @@ export function rerank<T extends CandidateTitle>(
   weights: RerankWeights = DEFAULT_RERANK_WEIGHTS,
 ): RankedCandidate<T>[] {
   const ranked: RankedCandidate<T>[] = [];
-  const kept = candidates.filter(c => !parseGenres(c.genres).some(g => vetoed.has(g)));
+  // Same exact, case-insensitive match as hatedGenreClause in retrieve.ts.
+  const vetoedLower = new Set([...vetoed].map(g => g.toLowerCase()));
+  const kept = candidates.filter(c => !parseGenres(c.genres).some(g => vetoedLower.has(g.toLowerCase())));
   // Cosine distances from the embedder cluster in a narrow band (≈0.25–0.45 for
   // nomic-embed-text), so raw 1−distance would leave similarity nearly constant
   // and let quality/popularity decide everything. Rescale within the batch:
   // the closest candidate scores 1, the farthest 0.
-  const dists = kept.map(c => c.score);
+  // A missing distance (NULL from SQLite, or NaN) means "no similarity signal":
+  // it must not join the min/max (null would read as distance 0, the best match).
+  const hasDist = (d: unknown): d is number => typeof d === 'number' && Number.isFinite(d);
+  const dists = kept.map(c => c.score).filter(hasDist);
   const minDist = Math.min(...dists);
   const maxDist = Math.max(...dists);
   const range = maxDist - minDist;
   for (const c of kept) {
     const genres = parseGenres(c.genres);
-    const similarity = range > 1e-9 ? (maxDist - c.score) / range : clamp(1 - c.score, 0, 1);
+    const similarity = !hasDist(c.score) ? 0
+      : range > 1e-9 ? (maxDist - c.score) / range : clamp(1 - c.score, 0, 1);
     const aff = (titleAffinity(genres, affinity) + 1) / 2; // [-1,1] → [0,1]
     const quality = qualityScore(c.vote_average, c.vote_count, c.media_type);
     const pop = popularityScore(c.popularity);

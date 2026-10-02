@@ -130,6 +130,11 @@ describe('rerank', () => {
     expect(out.map(c => c.title)).toEqual(['Ok']);
   });
 
+  it('matches a vetoed genre ignoring case', () => {
+    const out = rerank([cand({ title: 'Gore', genres: '["Horror"]' }), cand({ title: 'Ok' })], {}, new Set(['horror']));
+    expect(out.map(c => c.title)).toEqual(['Ok']);
+  });
+
   it('votes change the order: the same two titles swap when the genre affinity flips', () => {
     const a = cand({ title: 'Thrill', genres: '["Thriller"]', score: 0.30 });
     const b = cand({ title: 'Rom', genres: '["Romance"]', score: 0.30 });
@@ -164,5 +169,23 @@ describe('rerank', () => {
     const out = rerank([cand({ title: 'X', score: 0.25 })], {}, new Set());
     expect(out[0].score).toBe(0.25);
     expect(out[0].rank_score).toBeGreaterThan(0);
+  });
+});
+
+describe('rerank with a missing distance', () => {
+  it('ranks a null or NaN score as the farthest match, not the closest, and never yields NaN', () => {
+    const out = rerank(
+      [
+        cand({ title: 'near', score: 0.25 }),
+        cand({ title: 'far', score: 0.45 }),
+        cand({ title: 'nullScore', score: null as unknown as number }),
+        cand({ title: 'nanScore', score: NaN }),
+      ],
+      {},
+      new Set(),
+    );
+    expect(out.every(c => Number.isFinite(c.rank_score))).toBe(true);
+    expect(out[0].title).toBe('near');
+    expect(out.slice(2).map(c => c.title).sort()).toEqual(['nanScore', 'nullScore']);
   });
 });

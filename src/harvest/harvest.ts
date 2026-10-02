@@ -122,7 +122,16 @@ export async function runHarvest(
   // ── Per-profile loved-genre discovery ─────────────────────────────────────
   for (const profile of nonDerivedProfiles) {
     const sig = getTasteSignature(db, profile.id);
-    const prefs = sig ? (JSON.parse(sig.prefs) as { loved_genres?: string[] }) : {};
+    let prefs: { loved_genres?: string[] } = {};
+    try {
+      prefs = sig ? (JSON.parse(sig.prefs) as { loved_genres?: string[] }) : {};
+    } catch (err) {
+      // One hand-edited row must not stop the nightly harvest for everyone else.
+      const msg = `Skipped profile ${profile.id}: unreadable prefs (${String(err)})`;
+      console.warn(msg);
+      result.errors.push(msg);
+      continue;
+    }
     const lovedGenres = prefs.loved_genres ?? [];
 
     // Movies: full genre taxonomy — Horror (27), Thriller (53), etc. all resolve to ids.

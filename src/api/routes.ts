@@ -206,7 +206,8 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     if (!profile) return c.json({ error: 'Profile not found' }, 404);
     let sig = getTasteSignature(db, body.profileId);
     // Cold start: a freshly seeded profile has never rated anything, so it has no
-    // taste_vector (and a Joint can't blend two missing solo vectors). Instead of
+    // taste_vector (and a Joint can't blend two missing solo vectors; with one
+    // missing it ranks by the other partner). Instead of
     // 400-ing, fall back to a loved-genre/random pool so a new user can bootstrap
     // by rating what /generate surfaces (the first ratings build the real vector).
     let coldStart = false;
@@ -216,7 +217,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       const [soloA, soloB] = soloProfileIds();
       const aHasVec = soloA != null && !!getTasteSignature(db, soloA)?.taste_vector;
       const bHasVec = soloB != null && !!getTasteSignature(db, soloB)?.taste_vector;
-      coldStart = !aHasVec || !bHasVec;
+      coldStart = !aHasVec && !bHasVec;
     } else if (!sig || !sig.taste_vector) {
       sig = sig ?? { profile_id: body.profileId, taste_vector: null, prefs: '{}', refreshed_at: new Date().toISOString() };
       coldStart = true;
@@ -374,7 +375,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       return c.json({ error: 'profileId, titleId, and rating required' }, 400);
     }
     // Ratings are 1–5 stars with half-star steps (the column CHECK enforces 1–5).
-    if (body.rating < 1 || body.rating > 5) {
+    if (!isValidRating(body.rating)) {
       return c.json({ error: 'rating must be between 1 and 5' }, 400);
     }
     upsertWatchEvent(db, {
@@ -402,6 +403,11 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   api.post('/watchlist', async (c) => {
     const body = await c.req.json<{ profileId: number; titleId: number }>();
     if (!body.profileId || !body.titleId) return c.json({ error: 'profileId and titleId required' }, 400);
+    // A title already watched (and possibly rated) stays as it is: overwriting it
+    // with a watchlist row would erase the rating and drop it from the taste vector.
+    if (getWatchEvent(db, body.profileId, body.titleId)?.status === 'watched') {
+      return c.json({ ok: true });
+    }
     upsertWatchEvent(db, {
       profile_id: body.profileId,
       title_id: body.titleId,
@@ -415,6 +421,9 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   api.post('/mark-watched', async (c) => {
     const body = await c.req.json<{ profileId: number; titleId: number; rating?: number }>();
     if (!body.profileId || !body.titleId) return c.json({ error: 'profileId and titleId required' }, 400);
+    if (body.rating != null && !isValidRating(body.rating)) {
+      return c.json({ error: 'rating must be between 1 and 5' }, 400);
+    }
     upsertWatchEvent(db, {
       profile_id: body.profileId,
       title_id: body.titleId,
@@ -430,6 +439,11 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const body = await c.req.json<{ profileId: number; recommendationId: number }>();
     if (!body.profileId || !body.recommendationId) {
       return c.json({ error: 'profileId and recommendationId required' }, 400);
+    }
+    // Same ownership check as /dismiss-reason: one profile must not dismiss another's rec.
+    const rec = getRecommendationById(db, body.recommendationId);
+    if (!rec || rec.profile_id !== body.profileId) {
+      return c.json({ error: 'recommendation not found' }, 404);
     }
     updateRecommendationState(db, body.recommendationId, 'dismissed');
     // "Not interested" is a mild negative signal — fold it into the taste vector.
@@ -559,4 +573,9 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   });
 
   return api;
+}
+
+/** A star rating: a number from 1 to 5 in half-star steps. */
+function isValidRating(r: unknown): r is number {
+  return typeof r === 'number' && Number.isFinite(r) && r >= 1 && r <= 5 && Number.isInteger(r * 2);
 }

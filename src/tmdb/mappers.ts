@@ -12,14 +12,14 @@ export function mapTmdbToTitleRow(
 
   const year = parseInt(rawYear, 10) || null;
 
-  const genreNames = (detail.genres ?? []).map((g) => g.name);
+  const genreNames = names(detail.genres);
 
-  const keywordList = [
+  const keywordList = names([
     ...(detail.keywords?.keywords ?? []),
     ...(detail.keywords?.results ?? []),
-  ].map((k) => k.name);
+  ]);
 
-  const castList = (detail.credits?.cast ?? []).slice(0, 5).map((c) => c.name);
+  const castList = names(detail.credits?.cast).slice(0, 5);
 
   const imdb_id = detail.external_ids?.imdb_id ?? detail.imdb_id ?? null;
 
@@ -37,7 +37,7 @@ export function mapTmdbToTitleRow(
     keywords: JSON.stringify(keywordList),
     cast: JSON.stringify(castList),
     synopsis: detail.overview || null,
-    poster_path: detail.poster_path,
+    poster_path: detail.poster_path ?? null,
     updated_at: new Date().toISOString(),
     imdb_id,
     imdb_rating: null,
@@ -52,4 +52,11 @@ export function mapTmdbToTitleRow(
     status: detail.status ?? null,
     meta_checked_at: Math.floor(Date.now() / 1000),
   };
+}
+
+/** Non-empty `name` strings from a TMDB list; entries without one are dropped. */
+function names(list: ReadonlyArray<{ name?: unknown }> | null | undefined): string[] {
+  return (list ?? [])
+    .map((x) => x?.name)
+    .filter((n): n is string => typeof n === 'string' && n.length > 0);
 }

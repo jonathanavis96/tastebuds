@@ -10,13 +10,13 @@ export function upsertRecommendation(
   db: InstanceType<typeof Database>,
   rec: UpsertRec,
 ): void {
-  const row = { ...rec, kind: rec.kind ?? 'core', predicted_rating: rec.predicted_rating ?? null };
+  const row = { ...rec, kind: rec.kind ?? 'core', predicted_rating: rec.predicted_rating ?? null, created_at: new Date().toISOString() };
   // At most one pending rec per (profile_id, title_id) — guarded by the partial
   // unique index (MIGRATE_005). A racing/duplicate pending insert is silently
   // skipped (DO NOTHING) rather than creating a duplicate row or throwing.
   db.prepare(`
-    INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, kind, predicted_rating)
-    VALUES (@profile_id, @title_id, @category, @score, @why_blurb, @request_text, @state, @kind, @predicted_rating)
+    INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, kind, predicted_rating, created_at)
+    VALUES (@profile_id, @title_id, @category, @score, @why_blurb, @request_text, @state, @kind, @predicted_rating, @created_at)
     ON CONFLICT (profile_id, title_id) WHERE state = 'pending' DO NOTHING
   `).run(row);
 }
@@ -28,7 +28,7 @@ export function getRecommendations(
 ): RecommendationRow[] {
   if (state !== undefined) {
     const order = state === 'pending'
-      ? 'ORDER BY created_at DESC, score DESC'
+      ? 'ORDER BY julianday(created_at) DESC, score DESC'
       : 'ORDER BY score DESC';
     return db
       .prepare(
@@ -73,7 +73,7 @@ export function getCalibration(
       (SELECT r.predicted_rating FROM recommendations r
         WHERE r.profile_id = we.profile_id AND r.title_id = we.title_id
           AND r.predicted_rating IS NOT NULL
-        ORDER BY r.created_at DESC LIMIT 1) AS predicted
+        ORDER BY julianday(r.created_at) DESC LIMIT 1) AS predicted
     FROM watch_events we
     WHERE we.profile_id = ? AND we.status = 'watched' AND we.rating IS NOT NULL
   `).all(profileId) as Array<{ actual: number; predicted: number | null }>;

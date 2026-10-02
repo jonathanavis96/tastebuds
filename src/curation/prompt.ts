@@ -1,3 +1,4 @@
+import { parsePrefs } from '../retrieval/prefs.js';
 import type { CandidateTitle } from '../retrieval/retrieve.js';
 import type { CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
@@ -8,14 +9,7 @@ export const FLAT_CANDIDATE_CAP = 60;
 export const MIN_REQUEST_PICKS = 10;
 
 function buildPrefsBlock(sig: TasteSignatureRow): string {
-  const prefs = JSON.parse(sig.prefs) as Partial<{
-    loved_genres: string[];
-    hated_genres: string[];
-    loved_themes: string[];
-    hated_themes: string[];
-    preferred_era: string;
-    media_weighting: number;
-  }>;
+  const prefs = parsePrefs(sig.prefs);
   // Defensive: a derived (Joint) profile may have sparse/empty prefs ({}) — never assume arrays exist.
   return [
     `Loved genres: ${(prefs.loved_genres ?? []).join(', ') || 'none specified'}`,
