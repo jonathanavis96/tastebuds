@@ -7,6 +7,7 @@
   import WatchedHistory from './components/WatchedHistory.svelte';
   import DetailModal from './components/DetailModal.svelte';
   import CategoryLegend from './components/CategoryLegend.svelte';
+  import { compareTimestamps } from './lib/time.js';
   import type { Profile, Recommendation, WatchEvent, MediaFilter, DismissReason } from './lib/types.js';
   import {
     getProfiles, getRecommendations, generateRecommendations,
@@ -130,20 +131,20 @@
   const visibleWatchlist = $derived.by(() => {
     const list = byMedia(watchlist, listMediaFilter).slice();
     switch (watchlistSort) {
-      case 'added_asc': return list.sort((a, b) => cmpStr(a.created_at, b.created_at));
+      case 'added_asc': return list.sort((a, b) => compareTimestamps(a.created_at, b.created_at));
       case 'title': return list.sort((a, b) => cmpStr(a.title, b.title));
       case 'year_desc': return list.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
-      default: return list.sort((a, b) => cmpStr(b.created_at, a.created_at)); // added_desc
+      default: return list.sort((a, b) => compareTimestamps(b.created_at, a.created_at)); // added_desc
     }
   });
   const visibleWatched = $derived.by(() => {
     const list = byMedia(watched, listMediaFilter).slice();
     switch (watchedSort) {
-      case 'watched_asc': return list.sort((a, b) => cmpStr(a.watched_at, b.watched_at));
+      case 'watched_asc': return list.sort((a, b) => compareTimestamps(a.watched_at, b.watched_at));
       case 'rating_desc': return list.sort((a, b) => (b.rating ?? -1) - (a.rating ?? -1));
       case 'title': return list.sort((a, b) => cmpStr(a.title, b.title));
       case 'year_desc': return list.sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
-      default: return list.sort((a, b) => cmpStr(b.watched_at, a.watched_at)); // watched_desc
+      default: return list.sort((a, b) => compareTimestamps(b.watched_at, a.watched_at)); // watched_desc
     }
   });
 
