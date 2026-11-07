@@ -2,9 +2,11 @@ import type { Config } from '../config.js';
 import type { DiscoverOpts, TmdbTitle, TmdbTitleDetail } from './types.js';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
+/** Per call: harvest and /generate loop over these, so a stall must fail fast. */
+const TMDB_TIMEOUT_MS = 15_000;
 
 async function tmdbFetch<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(TMDB_TIMEOUT_MS) });
   if (!response.ok) {
     const body = await response.text().catch(() => '');
     throw new Error(`TMDB request failed with HTTP ${response.status}: ${body}`);

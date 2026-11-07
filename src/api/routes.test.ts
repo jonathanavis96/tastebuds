@@ -10,13 +10,16 @@ import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { curateCandidates } from '../curation/curate.js';
-import { getOmdbRatings } from '../omdb/client.js';
+import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
 
 // Module-level mocks: only affect tests that exercise /generate.
 // All other route tests do not call these modules so they are unaffected.
 vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
-vi.mock('../omdb/client.js', () => ({ getOmdbRatings: vi.fn() }));
+vi.mock('../omdb/client.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../omdb/client.js')>()),
+  getOmdbRatings: vi.fn(),
+}));
 
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
@@ -500,6 +503,32 @@ describe('POST /api/undismiss', () => {
   });
 });
 
+describe('a change that saved while the embedder is down', () => {
+  beforeEach(() => { vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED'))); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('reports success: the rating is stored even though the taste refresh failed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = setupDb();
+    // No stored embedding, so rating it high needs a live call to Ollama.
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
+      VALUES (777, 'movie', 'Unembedded', 2020, '[]', '[]', '[]', null, null, datetime('now'))`).run();
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=777').get() as any).id;
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const res = await app.request('/api/rate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, titleId, rating: 5 }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(db.prepare('SELECT rating FROM watch_events WHERE title_id = ?').get(titleId)).toEqual({ rating: 5 });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 describe('GET /api/stats', () => {
   it('returns the catalogue total plus the movie/series split', async () => {
     const db = setupDb();
@@ -656,5 +685,109 @@ describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () 
     expect(getOmdbRatings).toHaveBeenCalledTimes(1);
     const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
     expect(row.rating_checked_at).not.toBeNull();
+  });
+
+  // A pending pick with the ratings columns left empty, ready for one enrichment pass.
+  function insertPendingTitle(db: ReturnType<typeof setupDb>, tmdbId: number, imdbId: string | null): number {
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id)
+      VALUES (?, 'movie', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', ?)`).run(tmdbId, `Film ${tmdbId}`, imdbId);
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
+    return titleId;
+  }
+
+  async function generate(db: ReturnType<typeof setupDb>, config: Config) {
+    const app = new Hono().route('/api', createApiRoutes(db, config));
+    return app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+  }
+
+  it('does not mark a title checked when OMDb gave no answer, and retries it next time', async () => {
+    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 503', false));
+    const db = setupDb();
+    const titleId = insertPendingTitle(db, 992, 'tt9920000');
+
+    expect((await generate(db, omdbConfig)).status).toBe(200);
+
+    const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row.rating_checked_at).toBeNull();
+    expect(resolveRtUrl).not.toHaveBeenCalled();
+
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.1', rottenTomatoes: '80%' });
+    await generate(db, omdbConfig);
+    const after = db.prepare('SELECT imdb_rating, rt_rating FROM titles WHERE id = ?').get(titleId) as any;
+    expect(after).toEqual({ imdb_rating: '7.1', rt_rating: '80%' });
+  });
+
+  it('scrapes Rotten Tomatoes once for a pick it cannot verify, not on every /generate', async () => {
+    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/search?search=x', score: null, verified: false });
+    const db = setupDb();
+    insertPendingTitle(db, 995, null); // no imdb_id, so OMDb can never stamp it checked
+
+    await generate(db, mockConfig);
+    await generate(db, mockConfig);
+
+    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a Rotten Tomatoes miss too, when the site has no page at all', async () => {
+    vi.mocked(resolveRtUrl).mockResolvedValue(null);
+    const db = setupDb();
+    insertPendingTitle(db, 996, null);
+
+    await generate(db, mockConfig);
+    await generate(db, mockConfig);
+
+    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it('tries Rotten Tomatoes again once the last attempt is a month old', async () => {
+    vi.mocked(resolveRtUrl).mockResolvedValue(null);
+    const db = setupDb();
+    const titleId = insertPendingTitle(db, 997, null);
+    const longAgo = Math.floor(Date.now() / 1000) - 31 * 24 * 60 * 60;
+    db.prepare('UPDATE titles SET rt_checked_at = ? WHERE id = ?').run(longAgo, titleId);
+
+    await generate(db, mockConfig);
+
+    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the IMDb rating OMDb just returned when a scraped RT score is saved after it', async () => {
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.4', rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/m/x', score: '91%', verified: true });
+    const db = setupDb();
+    const titleId = insertPendingTitle(db, 998, 'tt9980000');
+
+    await generate(db, omdbConfig);
+
+    const row = db.prepare('SELECT imdb_rating, rt_rating FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row).toEqual({ imdb_rating: '7.4', rt_rating: '91%' });
+  });
+
+  it('does not mark a title OMDb-checked for a scraped RT score, so a key added later still reaches it', async () => {
+    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/m/x', score: '91%', verified: true });
+    const db = setupDb();
+    const titleId = insertPendingTitle(db, 999, 'tt9990001');
+
+    await generate(db, mockConfig); // no OMDb key
+
+    const row = db.prepare('SELECT rt_rating, rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
+    expect(row).toEqual({ rt_rating: '91%', rating_checked_at: null });
+  });
+
+  it('stops asking OMDb for the rest of the picks once it refuses the key or quota', async () => {
+    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 401', true));
+    const db = setupDb();
+    insertPendingTitle(db, 993, 'tt9930000');
+    insertPendingTitle(db, 994, 'tt9940000');
+
+    await generate(db, omdbConfig);
+
+    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
   });
 });

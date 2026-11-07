@@ -66,7 +66,7 @@ describe('backfillTitleMeta', () => {
   it('fills original_language, runtime_minutes, vote_average, status and stamps meta_checked_at', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 1 });
-    const title = getTitleByTmdbId(db, 1)!;
+    const title = getTitleByTmdbId(db, 1, 'movie')!;
 
     const fetchDetail = vi.fn().mockResolvedValue(baseDetail());
     const before = Math.floor(Date.now() / 1000);
@@ -87,7 +87,7 @@ describe('backfillTitleMeta', () => {
   it('maps tv episode_run_time to the first positive entry', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 2, mediaType: 'tv' });
-    const title = getTitleByTmdbId(db, 2)!;
+    const title = getTitleByTmdbId(db, 2, 'tv')!;
 
     const fetchDetail = vi.fn().mockResolvedValue(
       baseDetail({ runtime: undefined, episode_run_time: [0, 42, 50] }),
@@ -101,7 +101,7 @@ describe('backfillTitleMeta', () => {
   it('a 404 counts as missing and stamps status=Missing + meta_checked_at', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 3 });
-    const title = getTitleByTmdbId(db, 3)!;
+    const title = getTitleByTmdbId(db, 3, 'movie')!;
 
     const fetchDetail = vi.fn().mockRejectedValue(new Error('TMDB request failed with HTTP 404: not found'));
     const result = await backfillTitleMeta(db, mockConfig, { cap: 10, concurrency: 1, fetchDetail });
@@ -115,7 +115,7 @@ describe('backfillTitleMeta', () => {
   it('a non-404 error counts as errors and does NOT stamp meta_checked_at', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 4 });
-    const title = getTitleByTmdbId(db, 4)!;
+    const title = getTitleByTmdbId(db, 4, 'movie')!;
 
     const fetchDetail = vi.fn().mockRejectedValue(new Error('network error'));
     const result = await backfillTitleMeta(db, mockConfig, { cap: 10, concurrency: 1, fetchDetail });
@@ -160,7 +160,7 @@ describe('backfillTitleMeta', () => {
   it('does not overwrite popularity/vote_count when the response omits them', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 20, voteCount: 500 });
-    const title = getTitleByTmdbId(db, 20)!;
+    const title = getTitleByTmdbId(db, 20, 'movie')!;
 
     const fetchDetail = vi.fn().mockResolvedValue(
       baseDetail({ popularity: undefined, vote_count: undefined }),

@@ -282,36 +282,34 @@ export async function runHarvest(
     }
   }
 
-  // Build per-profile sets of watched tmdb_ids (regardless of media_type).
-  // If a tmdb_id appears in any watch_event for a profile, skip ALL media_type
-  // variants — in practice TMDB IDs don't overlap between movies and TV, so this
-  // is safe and makes the skip logic clean.
+  // Build per-profile sets of watched titles, keyed like toHarvest: TMDB numbers
+  // movies and series separately, so a tmdb_id alone can name two different titles.
   // One JOIN query per profile instead of one query per watch_event (was N+1 —
   // harmless at today's per-profile event counts, but needless as history grows).
-  const watchedTmdbIdsStmt = db.prepare(
-    'SELECT t.tmdb_id AS tmdb_id FROM watch_events we JOIN titles t ON t.id = we.title_id WHERE we.profile_id = ?',
+  const watchedTitlesStmt = db.prepare(
+    'SELECT t.tmdb_id AS tmdb_id, t.media_type AS media_type FROM watch_events we JOIN titles t ON t.id = we.title_id WHERE we.profile_id = ?',
   );
-  const watchedTmdbIds = new Map<number, Set<number>>();
+  const watchedTitles = new Map<number, Set<string>>();
   for (const profile of nonDerivedProfiles) {
-    const rows = watchedTmdbIdsStmt.all(profile.id) as Array<{ tmdb_id: number }>;
-    watchedTmdbIds.set(profile.id, new Set(rows.map((r) => r.tmdb_id)));
+    const rows = watchedTitlesStmt.all(profile.id) as Array<{ tmdb_id: number; media_type: string }>;
+    watchedTitles.set(profile.id, new Set(rows.map((r) => `${r.tmdb_id}:${r.media_type}`)));
   }
 
-  for (const [, { tmdbId, mediaType }] of toHarvest.entries()) {
+  for (const [key, { tmdbId, mediaType }] of toHarvest.entries()) {
     // Budget exhausted — stop ingesting
     if (remaining <= 0) break;
 
-    // Skip if ALL non-derived profiles have this tmdb_id in their watch_events
+    // Skip if ALL non-derived profiles have this title in their watch_events
     const allWatched =
       nonDerivedProfiles.length > 0 &&
-      nonDerivedProfiles.every((p) => watchedTmdbIds.get(p.id)?.has(tmdbId));
+      nonDerivedProfiles.every((p) => watchedTitles.get(p.id)?.has(key));
     if (allWatched) {
       continue;
     }
 
     // Skip titles already in the DB — avoids re-fetching details for known titles
     // and focuses the budget on growing the DB with genuinely new content.
-    const alreadyPresent = getTitleByTmdbId(db, tmdbId);
+    const alreadyPresent = getTitleByTmdbId(db, tmdbId, mediaType);
     if (alreadyPresent) {
       // We no longer update existing titles during harvest — budget is for growth.
       continue;

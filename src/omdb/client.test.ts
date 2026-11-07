@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getOmdbRatings } from './client.js';
+import { getOmdbRatings, OmdbUnavailableError } from './client.js';
 
 const mockConfig = { omdbApiKey: 'test-omdb-key' };
 
@@ -28,9 +28,11 @@ describe('getOmdbRatings', () => {
     expect(result.rottenTomatoes).toBe('79%');
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('i=tt0137523'),
+      expect.anything(),
     );
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('apikey=test-omdb-key'),
+      expect.anything(),
     );
   });
 
@@ -86,14 +88,49 @@ describe('getOmdbRatings', () => {
     expect(result.rottenTomatoes).toBeNull();
   });
 
-  it('returns all-null on non-200 response and does not throw', async () => {
+  it('reports a 401 as a refusal, so a used-up quota is never stored as "no ratings"', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
-      new Response('Unauthorized', { status: 401 }),
+      new Response(JSON.stringify({ Response: 'False', Error: 'Request limit reached!' }), { status: 401 }),
     );
-    await expect(getOmdbRatings('tt0137523', mockConfig)).resolves.toEqual({
-      imdb: null,
-      rottenTomatoes: null,
+    await expect(getOmdbRatings('tt0137523', mockConfig)).rejects.toMatchObject({
+      name: 'OmdbUnavailableError',
+      refused: true,
     });
+  });
+
+  it.each(['Request limit reached!', 'Invalid API key!', 'No API key provided.'])(
+    'reports a 200 carrying "%s" as a refusal',
+    async (Error) => {
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(JSON.stringify({ Response: 'False', Error }), { status: 200 }),
+      );
+      await expect(getOmdbRatings('tt0137523', mockConfig)).rejects.toMatchObject({ refused: true });
+    },
+  );
+
+  it('reports a server error as unavailable, not as a title with no ratings', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('oops', { status: 503 }));
+    const err = await getOmdbRatings('tt0137523', mockConfig).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OmdbUnavailableError);
+    expect((err as OmdbUnavailableError).refused).toBe(false);
+  });
+
+  it('reports an unreadable body as unavailable', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('<html>down</html>', { status: 200 }));
+    await expect(getOmdbRatings('tt0137523', mockConfig)).rejects.toBeInstanceOf(OmdbUnavailableError);
+  });
+
+  it('never puts the API key in an error message', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('network failure'));
+    const err = await getOmdbRatings('tt0137523', mockConfig).catch((e: Error) => e);
+    expect(String((err as Error).message)).not.toContain('test-omdb-key');
+  });
+
+  it('gives up on a stalled request instead of waiting on it', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(fullResponse), { status: 200 }));
+    await getOmdbRatings('tt0137523', mockConfig);
+    const init = vi.mocked(fetch).mock.calls[0][1];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('returns all-null when omdbApiKey is undefined', async () => {
@@ -103,11 +140,11 @@ describe('getOmdbRatings', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('returns all-null on fetch network error and does not throw', async () => {
+  it('reports a network error as unavailable', async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error('network failure'));
-    await expect(getOmdbRatings('tt0137523', mockConfig)).resolves.toEqual({
-      imdb: null,
-      rottenTomatoes: null,
+    await expect(getOmdbRatings('tt0137523', mockConfig)).rejects.toMatchObject({
+      name: 'OmdbUnavailableError',
+      refused: false,
     });
   });
 });

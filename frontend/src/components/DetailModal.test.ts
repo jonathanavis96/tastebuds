@@ -9,6 +9,137 @@ const baseProps = (title_id: number, title: string) => ({
 
 afterEach(() => cleanup());
 
+describe('DetailModal when saving a change fails', () => {
+  const fills = (container: Element) =>
+    [...container.querySelectorAll('.star')].map(el => (el as HTMLElement).style.getPropertyValue('--fill'));
+
+  it('takes the stars back and says so, rather than showing a lost rating as saved', async () => {
+    const onRate = vi.fn().mockRejectedValue(new Error('rate failed: 429'));
+    const { container, getByLabelText, findByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onRate,
+    });
+
+    await fireEvent.click(getByLabelText('Rate 4 stars'));
+
+    expect((await findByRole('alert')).textContent).toContain('rating');
+    expect(fills(container)).toEqual(['0%', '0%', '0%', '0%', '0%']);
+  });
+
+  it('keeps a rating that saved', async () => {
+    const { container, getByLabelText, queryByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onRate: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await fireEvent.click(getByLabelText('Rate 4 stars'));
+
+    await waitFor(() => expect(fills(container)[3]).toBe('100%'));
+    expect(queryByRole('alert')).toBeNull();
+  });
+
+  it('restores the earlier rating, not an empty one', async () => {
+    const { container, getByLabelText, findByRole } = render(DetailModal, {
+      item: { title_id: 1, title: 'Movie A', rating: 2 },
+      onClose: () => {},
+      onRate: vi.fn().mockRejectedValue(new Error('nope')),
+    });
+
+    await fireEvent.click(getByLabelText('Rate 5 stars'));
+    await findByRole('alert');
+
+    expect(fills(container)).toEqual(['100%', '100%', '0%', '0%', '0%']);
+  });
+
+  it('leaves the next title alone when a rating fails after moving on', async () => {
+    let fail = (_: Error) => {};
+    const onRate = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
+    const { container, getByLabelText, rerender, queryByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onRate,
+    });
+    await fireEvent.click(getByLabelText('Rate 4 stars'));
+
+    await rerender({ item: { title_id: 2, title: 'Movie B', rating: 3 } });
+    fail(new Error('nope'));
+    await new Promise(r => setTimeout(r));
+
+    expect(fills(container)).toEqual(['100%', '100%', '100%', '0%', '0%']);
+    expect(queryByRole('alert')).toBeNull();
+  });
+
+  it('clears the message once a later change saves', async () => {
+    const onRate = vi.fn().mockRejectedValueOnce(new Error('nope')).mockResolvedValue(undefined);
+    const { getByLabelText, findByRole, queryByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onRate,
+    });
+
+    await fireEvent.click(getByLabelText('Rate 4 stars'));
+    await findByRole('alert');
+    await fireEvent.click(getByLabelText('Rate 3 stars'));
+
+    await waitFor(() => expect(queryByRole('alert')).toBeNull());
+  });
+
+  it('un-ticks the watchlist button again if adding failed', async () => {
+    const { getByText, findByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onWatchlist: vi.fn().mockRejectedValue(new Error('nope')),
+    });
+
+    await fireEvent.click(getByText('+ Watchlist'));
+    await findByRole('alert');
+
+    expect(getByText('+ Watchlist')).toBeTruthy();
+  });
+
+  it('does not show a note as saved when saving it failed', async () => {
+    const { container, findByRole } = render(DetailModal, {
+      item: { title_id: 1, title: 'Movie A', watched_at: '2026-01-01T00:00:00Z' },
+      onClose: () => {},
+      onRate: () => {},
+      onSaveNote: vi.fn().mockRejectedValue(new Error('nope')),
+    });
+    const box = container.querySelector('.note-input') as HTMLTextAreaElement;
+
+    await fireEvent.input(box, { target: { value: 'too slow' } });
+    await fireEvent.blur(box);
+    await findByRole('alert');
+
+    expect(box.classList.contains('saved')).toBe(false);
+  });
+
+  it('un-marks "Not interested" and holds back the reason if the dismiss failed', async () => {
+    const onDismissReason = vi.fn();
+    const { getByText, findByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      onDismiss: vi.fn().mockRejectedValue(new Error('nope')),
+      onDismissReason,
+    });
+
+    await fireEvent.click(getByText('Not interested'));
+    await findByRole('alert');
+
+    expect(getByText('Not interested')).toBeTruthy();
+    expect(onDismissReason).not.toHaveBeenCalled();
+  });
+
+  it('puts "Not interested" back if undoing it failed', async () => {
+    const { getByText, findByRole } = render(DetailModal, {
+      ...baseProps(1, 'Movie A'),
+      dismissed: true,
+      onDismiss: () => {},
+      onUndismiss: vi.fn().mockRejectedValue(new Error('nope')),
+    });
+
+    await fireEvent.click(getByText('✗ Not interested — tap to undo'));
+    await findByRole('alert');
+
+    expect(getByText('✗ Not interested — tap to undo')).toBeTruthy();
+  });
+});
+
 describe('DetailModal "Not interested" — immediate commit + undo', () => {
   it('commits the dismiss immediately on tap for the shown title', async () => {
     const onDismiss = vi.fn();
@@ -135,9 +266,8 @@ describe('DetailModal dismiss-reason tiles', () => {
 
     resolveDismiss();
     await dismissPromise;
-    await Promise.resolve(); // flush the component's .finally()
 
-    expect(tile.disabled).toBe(false);
+    await waitFor(() => expect(tile.disabled).toBe(false));
   });
 
   it('waits for an in-flight dismiss to resolve before firing the reason request (no race)', async () => {
@@ -162,8 +292,7 @@ describe('DetailModal dismiss-reason tiles', () => {
 
     resolveDismiss();
     await dismissPromise;
-    await Promise.resolve();
-    expect(tile.disabled).toBe(false);
+    await waitFor(() => expect(tile.disabled).toBe(false));
 
     await fireEvent.click(tile);
     expect(onDismissReason).toHaveBeenCalledTimes(1);

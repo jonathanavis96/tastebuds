@@ -31,6 +31,14 @@ describe('embedText', () => {
     );
   });
 
+  it('has a time limit, because harvest and /generate embed titles one at a time', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ embedding: [0.1] }), { status: 200 }),
+    );
+    await embedText('Test', mockConfig);
+    expect(vi.mocked(fetch).mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('throws OllamaError containing "Ollama" on network error', async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
     await expect(embedText('Some text', mockConfig)).rejects.toThrow(OllamaError);

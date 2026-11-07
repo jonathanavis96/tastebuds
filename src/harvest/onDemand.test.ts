@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrate.js';
-import { getTitleByTmdbId } from '../db/repos/titles.js';
+import { getTitleByTmdbId, upsertTitle } from '../db/repos/titles.js';
 import { getUsage, bumpRequestAdded } from '../db/repos/apiUsage.js';
 import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import { ensureRequestCoverage, resolveRequestToGenres, mergeRequestGenresToProfile, type OnDemandDeps } from './onDemand.js';
@@ -130,11 +130,26 @@ describe('ensureRequestCoverage — keyword path (TV Horror)', () => {
     const result = await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
 
     // The horror series should be in the DB
-    const saved = getTitleByTmdbId(db, 87108);
+    const saved = getTitleByTmdbId(db, 87108, 'tv');
     expect(saved).not.toBeNull();
     expect(saved!.title).toBe('The Terror');
     expect(result.added).toBeGreaterThanOrEqual(1);
     expect(result.errors).toHaveLength(0);
+  });
+
+  it('adds a series whose TMDB id is already taken by a stored movie', async () => {
+    const db = createTestDb();
+    upsertTitle(db, {
+      tmdb_id: 87108, media_type: 'movie', title: 'Some Movie', year: 2001, genres: '[]', keywords: '[]',
+      cast: '[]', synopsis: null, poster_path: null, embedding: null, updated_at: new Date().toISOString(),
+    });
+    const deps = makeDeps({ searchTitles: vi.fn().mockResolvedValue([horrorTvTitle]) });
+
+    const result = await ensureRequestCoverage(db, 'the terror', 'tv', mockConfig, deps);
+
+    expect(result.added).toBe(1);
+    expect(getTitleByTmdbId(db, 87108, 'tv')?.title).toBe('The Terror');
+    expect(getTitleByTmdbId(db, 87108, 'movie')?.title).toBe('Some Movie');
   });
 
   it('bumps the request_added usage counter after ingestion', async () => {
