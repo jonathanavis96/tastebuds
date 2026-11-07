@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig, dismissReason } from './api.js';
+import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig, dismissReason, removeWatch } from './api.js';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -41,6 +41,43 @@ describe('rateTitle', () => {
       method: 'POST',
       body: JSON.stringify({ profileId: 1, titleId: 42, rating: 4 }),
     }));
+  });
+});
+
+describe('a change past the server\'s per-minute cap', () => {
+  const tooMany = () => new Response('{"error":"Too many requests"}', { status: 429, headers: { 'Retry-After': '20' } });
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('waits out Retry-After and goes through instead of being lost', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(new Response('{}', { status: 200 }));
+
+    const done = rateTitle(1, 42, 4);
+    await vi.advanceTimersByTimeAsync(19_000);
+    expect(fetch).toHaveBeenCalledTimes(1); // still waiting
+    await vi.advanceTimersByTimeAsync(1_000);
+    await done;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies to the other changes a person makes in the modal too', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(new Response('{}', { status: 200 }));
+
+    const done = removeWatch(1, 42);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await done;
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('still fails loudly if the cap will not clear', async () => {
+    vi.mocked(fetch).mockImplementation(async () => tooMany());
+
+    const outcome = expect(rateTitle(1, 42, 4)).rejects.toThrow('rate failed: 429');
+    await vi.advanceTimersByTimeAsync(120_000);
+    await outcome;
   });
 });
 

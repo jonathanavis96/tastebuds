@@ -27,7 +27,7 @@ function cand(overrides: Partial<CandidateTitle> & { title: string }): Candidate
   return {
     id: 0, tmdb_id: 0, media_type: 'movie', year: 2015, genres: '["Drama"]', keywords: '[]', cast: '[]',
     synopsis: null, poster_path: null, embedding: null, updated_at: '', imdb_id: null, imdb_rating: null,
-    rt_rating: null, rt_url: null, popularity: 20, vote_count: 2000, rating_checked_at: null,
+    rt_rating: null, rt_url: null, popularity: 20, vote_count: 2000, rating_checked_at: null, rt_checked_at: null,
     original_language: 'en', runtime_minutes: 100, vote_average: 7, status: 'Released', meta_checked_at: null,
     score: 0.3,
     ...overrides,

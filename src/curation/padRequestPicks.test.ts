@@ -9,7 +9,7 @@ function cand(tmdb_id: number): CandidateTitle {
     id: tmdb_id, tmdb_id, media_type: 'movie', title: `Film ${tmdb_id}`, year: 2015,
     genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
     embedding: null, updated_at: '', imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
-    popularity: 10, vote_count: 1000, rating_checked_at: null, original_language: 'en',
+    popularity: 10, vote_count: 1000, rating_checked_at: null, rt_checked_at: null, original_language: 'en',
     runtime_minutes: 100, vote_average: 7, status: 'Released', meta_checked_at: null, score: 0.2,
   };
 }

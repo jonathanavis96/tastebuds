@@ -104,7 +104,7 @@ export async function importFromSeedJson(
       }
 
       const tmdbId = bestMatch.id;
-      const newlyIngested = !getTitleByTmdbId(db, tmdbId);
+      const newlyIngested = !getTitleByTmdbId(db, tmdbId, item.mediaType);
 
       if (newlyIngested) {
         // Fetch full detail, map, embed, and upsert
@@ -125,8 +125,8 @@ export async function importFromSeedJson(
         resolved++;
       }
 
-      // Re-read the now-inserted (or pre-existing by tmdb_id) title row
-      titleRow = getTitleByTmdbId(db, tmdbId) as { id: number } | undefined;
+      // Re-read the now-inserted (or pre-existing by tmdb_id + media type) title row
+      titleRow = (getTitleByTmdbId(db, tmdbId, item.mediaType) ?? undefined) as { id: number } | undefined;
 
       if (!titleRow) {
         notFound.push(`${item.title} (${item.year ?? '?'}) [${item.mediaType}]`);

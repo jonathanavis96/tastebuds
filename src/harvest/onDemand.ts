@@ -291,7 +291,7 @@ export async function ensureRequestCoverage(
     if (remaining <= 0) break;
 
     // Skip titles already in the DB — budget is for new content only
-    const existing = getTitleByTmdbId(db, tmdbId);
+    const existing = getTitleByTmdbId(db, tmdbId, mt);
     if (existing) continue;
 
     try {

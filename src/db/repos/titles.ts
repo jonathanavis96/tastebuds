@@ -9,6 +9,7 @@ const OPTIONAL_TITLE_FIELDS = [
   'popularity',
   'vote_count',
   'rating_checked_at',
+  'rt_checked_at',
   'original_language',
   'runtime_minutes',
   'vote_average',
@@ -96,6 +97,26 @@ export function updateTitleRatings(
 }
 
 /**
+ * Save a scraped Rotten Tomatoes score. Unlike updateTitleRatings this leaves
+ * rating_checked_at alone: OMDb has not been asked about this title.
+ */
+export function updateTitleRtRating(
+  db: InstanceType<typeof Database>,
+  titleId: number,
+  rt: string,
+): void {
+  db.prepare('UPDATE titles SET rt_rating = ? WHERE id = ?').run(rt, titleId);
+}
+
+/** Record a Rotten Tomatoes attempt, whatever it found, so it is not repeated soon. */
+export function markTitleRtChecked(
+  db: InstanceType<typeof Database>,
+  titleId: number,
+): void {
+  db.prepare('UPDATE titles SET rt_checked_at = ? WHERE id = ?').run(Math.floor(Date.now() / 1000), titleId);
+}
+
+/**
  * Backfill write for a single title's TMDB metadata (language, runtime, TMDB
  * rating, release status), plus a fresh popularity/vote_count snapshot when
  * available. Always stamps meta_checked_at so the row is not re-selected by
@@ -148,12 +169,14 @@ export function getTitleById(
   return (db.prepare('SELECT * FROM titles WHERE id = ?').get(id) as TitleRow | undefined) ?? null;
 }
 
+/** TMDB numbers movies and series separately, so a title is its id plus its media type. */
 export function getTitleByTmdbId(
   db: InstanceType<typeof Database>,
   tmdbId: number,
+  mediaType: 'movie' | 'tv',
 ): TitleRow | null {
   return (
-    (db.prepare('SELECT * FROM titles WHERE tmdb_id = ?').get(tmdbId) as TitleRow | undefined) ??
+    (db.prepare('SELECT * FROM titles WHERE tmdb_id = ? AND media_type = ?').get(tmdbId, mediaType) as TitleRow | undefined) ??
     null
   );
 }

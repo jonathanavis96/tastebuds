@@ -180,34 +180,46 @@
     loadRecs(true);
   }
 
+  // The modal undoes and reports a failed change itself, but a change waiting out the
+  // rate cap can fail after the modal has closed or moved on, so the page says so too.
+  // Rethrows so the modal still hears about it.
+  async function reportFailure(change: Promise<void>) {
+    try {
+      await change;
+    } catch (e) {
+      error = `Your change wasn't saved: ${String(e)}`;
+      throw e;
+    }
+  }
+
   async function modalRate(r: number) {
     if (!activeProfileId || !modalItem) return;
-    await rateTitle(activeProfileId, modalItem.title_id, r);
+    await reportFailure(rateTitle(activeProfileId, modalItem.title_id, r));
     scheduleRefresh();
   }
   async function modalWatchlist() {
     if (!activeProfileId || !modalItem) return;
-    await addToWatchlist(activeProfileId, modalItem.title_id);
+    await reportFailure(addToWatchlist(activeProfileId, modalItem.title_id));
     scheduleRefresh();
   }
   async function modalRemoveWatchlist() {
     if (!activeProfileId || !modalItem) return;
-    await removeWatch(activeProfileId, modalItem.title_id);
+    await reportFailure(removeWatch(activeProfileId, modalItem.title_id));
     scheduleRefresh();
   }
   async function modalMarkWatched() {
     if (!activeProfileId || !modalItem) return;
-    await markWatched(activeProfileId, modalItem.title_id);
+    await reportFailure(markWatched(activeProfileId, modalItem.title_id));
     scheduleRefresh();
   }
   async function modalUnwatch() {
     if (!activeProfileId || !modalItem) return;
-    await removeWatch(activeProfileId, modalItem.title_id);
+    await reportFailure(removeWatch(activeProfileId, modalItem.title_id));
     scheduleRefresh();
   }
   async function modalSaveNote(note: string) {
     if (!activeProfileId || !modalItem) return;
-    await saveNote(activeProfileId, modalItem.title_id, note);
+    await reportFailure(saveNote(activeProfileId, modalItem.title_id, note));
     // Keep the open snapshot in sync so reopening shows the saved note.
     (modalItem as { note?: string | null }).note = note;
     scheduleRefresh();
@@ -226,7 +238,12 @@
     const recId = (item as Recommendation).id;
     if (recId == null || dismissedRecIds.includes(recId)) return;
     dismissedRecIds = [...dismissedRecIds, recId];
-    await dismissRecommendation(activeProfileId, recId);
+    try {
+      await reportFailure(dismissRecommendation(activeProfileId, recId));
+    } catch (e) {
+      dismissedRecIds = dismissedRecIds.filter(id => id !== recId);
+      throw e;
+    }
   }
 
   // "Why" reason tile tapped after a dismiss (Phase-1.5 step 3 write-back).
@@ -244,7 +261,12 @@
     const recId = (item as Recommendation).id;
     if (recId == null || !dismissedRecIds.includes(recId)) return;
     dismissedRecIds = dismissedRecIds.filter(id => id !== recId);
-    await undismissRecommendation(activeProfileId, recId);
+    try {
+      await reportFailure(undismissRecommendation(activeProfileId, recId));
+    } catch (e) {
+      dismissedRecIds = [...dismissedRecIds, recId];
+      throw e;
+    }
   }
 
   onMount(async () => {
@@ -333,7 +355,12 @@
   // Quick "Mark Watched" from the watchlist list (no modal).
   async function handleMarkWatched(titleId: number) {
     if (!activeProfileId) return;
-    await markWatched(activeProfileId, titleId);
+    try {
+      await markWatched(activeProfileId, titleId);
+    } catch (e) {
+      error = `Your change wasn't saved: ${String(e)}`;
+      return;
+    }
     await loadRecs();
   }
 

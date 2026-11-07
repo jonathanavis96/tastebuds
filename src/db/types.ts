@@ -18,6 +18,7 @@ export interface TitleRow {
   popularity: number | null;
   vote_count: number | null;
   rating_checked_at: number | null;
+  rt_checked_at: number | null;
   original_language: string | null;
   runtime_minutes: number | null;
   vote_average: number | null;

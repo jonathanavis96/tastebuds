@@ -18,6 +18,7 @@ import {
   MIGRATE_011_ADD_RATING_CHECKED_AT,
   MIGRATE_012_ADD_DISMISS_REASON,
   MIGRATE_013_ADD_TITLE_META,
+  MIGRATE_014_ADD_RT_CHECKED_AT,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -134,6 +135,16 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     for (const sql of MIGRATE_013_ADD_TITLE_META) {
       const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
       if (!titleColNames13.includes(colName)) {
+        db.exec(sql);
+      }
+    }
+
+    // Migration 014: add rt_checked_at to titles (idempotent)
+    const titleCols14 = db.prepare("PRAGMA table_info('titles')").all() as Array<{ name: string }>;
+    const titleColNames14 = titleCols14.map(c => c.name);
+    for (const sql of MIGRATE_014_ADD_RT_CHECKED_AT) {
+      const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+      if (!titleColNames14.includes(colName)) {
         db.exec(sql);
       }
     }

@@ -8,7 +8,8 @@ import { runMigrations } from '../db/migrate.js';
 import { upsertTitle } from '../db/repos/titles.js';
 import { backfillRatings } from './backfillRatings.js';
 
-vi.mock('../omdb/client.js', () => ({
+vi.mock('../omdb/client.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../omdb/client.js')>()),
   getOmdbRatings: vi.fn(),
 }));
 
@@ -16,7 +17,7 @@ vi.mock('../rt/resolve.js', () => ({
   resolveRtUrl: vi.fn(),
 }));
 
-import { getOmdbRatings } from '../omdb/client.js';
+import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 
 const mockConfig = { omdbApiKey: 'test-key' };
@@ -165,6 +166,52 @@ describe('backfillRatings', () => {
     expect(row.rt_url).toBeNull();
   });
 
+  it('keeps a scraped RT score when OMDb answers without one', async () => {
+    // /generate saves a scraped score without stamping rating_checked_at, so a title
+    // scraped before an OMDb key existed reaches this job with rt_url and rt_rating set.
+    // The stored rt_url means nothing re-scrapes it, so a lost score stays lost.
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    db.prepare('UPDATE titles SET rt_url = ?, rt_rating = ? WHERE tmdb_id = 1').run(
+      'https://www.rottentomatoes.com/m/title_1',
+      '85%',
+    );
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.1', rottenTomatoes: null });
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const row = db
+      .prepare('SELECT imdb_rating, rt_rating, rt_url, rating_checked_at FROM titles WHERE tmdb_id = 1')
+      .get() as {
+        imdb_rating: string | null;
+        rt_rating: string | null;
+        rt_url: string | null;
+        rating_checked_at: number | null;
+      };
+    expect(row.imdb_rating).toBe('7.1');
+    expect(row.rt_rating).toBe('85%');
+    expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/title_1');
+    expect(row.rating_checked_at).not.toBeNull();
+    expect(resolveRtUrl).not.toHaveBeenCalled();
+  });
+
+  it('prefers OMDb over a scraped RT score when OMDb has one', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    db.prepare('UPDATE titles SET rt_url = ?, rt_rating = ? WHERE tmdb_id = 1').run(
+      'https://www.rottentomatoes.com/m/title_1',
+      '85%',
+    );
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.1', rottenTomatoes: '91%' });
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const row = db.prepare('SELECT rt_rating FROM titles WHERE tmdb_id = 1').get() as {
+      rt_rating: string | null;
+    };
+    expect(row.rt_rating).toBe('91%');
+  });
+
   it('does NOT call resolveRtUrl when OMDb provides a RT rating', async () => {
     const db = createTestDb();
     insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
@@ -190,6 +237,47 @@ describe('backfillRatings', () => {
 
     // First title threw → not counted; second succeeded → counted
     expect(result.processed).toBe(1);
+  });
+
+  it('leaves a title unchecked when OMDb gave no answer, so the next run retries it', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 503', false));
+
+    const { processed } = await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    expect(processed).toBe(0);
+    expect(resolveRtUrl).not.toHaveBeenCalled();
+    const row = db.prepare('SELECT rating_checked_at FROM titles').get() as { rating_checked_at: number | null };
+    expect(row.rating_checked_at).toBeNull();
+  });
+
+  it('stops the batch once OMDb refuses the key or quota, leaving the rest unchecked', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    insertTitle(db, { tmdbId: 2, imdbId: 'tt0000002' });
+    insertTitle(db, { tmdbId: 3, imdbId: 'tt0000003' });
+    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 401', true));
+
+    const { processed } = await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    expect(processed).toBe(0);
+    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
+    const stamped = db.prepare('SELECT COUNT(*) AS n FROM titles WHERE rating_checked_at IS NOT NULL').get() as { n: number };
+    expect(stamped.n).toBe(0);
+  });
+
+  it('does nothing without an OMDb key, so adding one later still reaches every title', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+    vi.mocked(resolveRtUrl).mockResolvedValue(null);
+
+    const { processed } = await backfillRatings(db, { omdbApiKey: undefined }, { dailyCap: 10 });
+
+    expect(processed).toBe(0);
+    const row = db.prepare('SELECT rating_checked_at FROM titles').get() as { rating_checked_at: number | null };
+    expect(row.rating_checked_at).toBeNull();
   });
 
   it('returns processed: 0 when no unrated titles exist', async () => {
