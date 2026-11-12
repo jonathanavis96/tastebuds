@@ -4,7 +4,7 @@ import { runMigrations } from '../db/migrate.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
-import { getTitleByTmdbId } from '../db/repos/titles.js';
+import { getTitleByTmdbId, upsertTitle } from '../db/repos/titles.js';
 import { runHarvest } from './harvest.js';
 import { keywordIdCache } from './onDemand.js';
 import type { Config } from '../config.js';
@@ -119,10 +119,54 @@ describe('runHarvest', () => {
     expect(result.titlesAdded).toBeGreaterThan(0);
     expect(result.errors).toHaveLength(0);
 
-    const saved = getTitleByTmdbId(db, 550);
+    const saved = getTitleByTmdbId(db, 550, 'movie');
     expect(saved).not.toBeNull();
     expect(saved!.title).toBe('Fight Club');
     expect(saved!.embedding).not.toBeNull();
+  });
+
+  it('adds a series whose TMDB id is already taken by a stored movie', async () => {
+    const db = createTestDb();
+    seedProfileAndSig(db);
+    // TMDB numbers movies and series separately, so one id can name both.
+    vi.mocked(discoverTitles).mockImplementation(async (opts) =>
+      opts.mediaType === 'tv'
+        ? [{ id: 550, name: 'Some Series', first_air_date: '2010-01-01', genre_ids: [18], overview: 'x', poster_path: null }]
+        : [mockTmdbTitle],
+    );
+    vi.mocked(getTitleDetails).mockImplementation(async (_id, mediaType) =>
+      mediaType === 'tv'
+        ? { id: 550, name: 'Some Series', first_air_date: '2010-01-01', genre_ids: [18], overview: 'x', poster_path: null, genres: [{ id: 18, name: 'Drama' }] }
+        : mockTmdbDetail,
+    );
+
+    await runHarvest(db, mockConfig);
+
+    expect(getTitleByTmdbId(db, 550, 'movie')?.title).toBe('Fight Club');
+    expect(getTitleByTmdbId(db, 550, 'tv')?.title).toBe('Some Series');
+  });
+
+  it('still harvests a series when every profile has only watched the movie with the same TMDB id', async () => {
+    const db = createTestDb();
+    seedProfileAndSig(db);
+    upsertTitle(db, {
+      tmdb_id: 550, media_type: 'movie', title: 'Fight Club', year: 1999, genres: '[]', keywords: '[]',
+      cast: '[]', synopsis: null, poster_path: null, embedding: null, updated_at: new Date().toISOString(),
+    });
+    const movie = getTitleByTmdbId(db, 550, 'movie')!;
+    upsertWatchEvent(db, { profile_id: 1, title_id: movie.id, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
+    vi.mocked(discoverTitles).mockImplementation(async (opts) =>
+      opts.mediaType === 'tv'
+        ? [{ id: 550, name: 'Some Series', first_air_date: '2010-01-01', genre_ids: [18], overview: 'x', poster_path: null }]
+        : [],
+    );
+    vi.mocked(getTitleDetails).mockResolvedValue(
+      { id: 550, name: 'Some Series', first_air_date: '2010-01-01', genre_ids: [18], overview: 'x', poster_path: null, genres: [{ id: 18, name: 'Drama' }] },
+    );
+
+    await runHarvest(db, mockConfig);
+
+    expect(getTitleByTmdbId(db, 550, 'tv')?.title).toBe('Some Series');
   });
 
   it('skips a profile with corrupt prefs, logs it, and harvests the rest', async () => {
@@ -153,7 +197,7 @@ describe('runHarvest', () => {
     // First harvest to insert the title
     await runHarvest(db, mockConfig);
 
-    const title = getTitleByTmdbId(db, 550)!;
+    const title = getTitleByTmdbId(db, 550, 'movie')!;
     upsertWatchEvent(db, {
       profile_id: 1,
       title_id: title.id,
@@ -263,7 +307,7 @@ describe('runHarvest', () => {
     expect(keywordCall).toBeDefined();
 
     // The horror series should be in the DB
-    const saved = getTitleByTmdbId(db, 87108);
+    const saved = getTitleByTmdbId(db, 87108, 'tv');
     expect(saved).not.toBeNull();
     expect(saved!.title).toBe('The Terror');
     expect(result.titlesAdded).toBeGreaterThanOrEqual(1);

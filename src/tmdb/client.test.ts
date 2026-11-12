@@ -46,9 +46,11 @@ describe('discoverTitles', () => {
     expect(results[0].id).toBe(550);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('discover/movie'),
+      expect.anything(),
     );
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('api_key=test-key'),
+      expect.anything(),
     );
   });
 
@@ -60,7 +62,7 @@ describe('discoverTitles', () => {
     const results = await discoverTitles({ mediaType: 'tv' }, mockConfig);
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe(1396);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('discover/tv'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('discover/tv'), expect.anything());
   });
 
   it('throws on non-200 response', async () => {
@@ -69,6 +71,17 @@ describe('discoverTitles', () => {
     );
 
     await expect(discoverTitles({ mediaType: 'movie' }, mockConfig)).rejects.toThrow('401');
+  });
+});
+
+describe('a stalled TMDB request', () => {
+  beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('has a time limit, because /generate loops over TMDB calls one at a time', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    await getTrendingTitles('movie', mockConfig);
+    expect(vi.mocked(fetch).mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
   });
 });
 
@@ -83,7 +96,7 @@ describe('getTrendingTitles', () => {
 
     const results = await getTrendingTitles('movie', mockConfig);
     expect(results).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('trending/movie/week'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('trending/movie/week'), expect.anything());
   });
 
   it('returns weekly trending tv', async () => {
@@ -93,7 +106,7 @@ describe('getTrendingTitles', () => {
 
     const results = await getTrendingTitles('tv', mockConfig);
     expect(results).toHaveLength(1);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('trending/tv/week'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('trending/tv/week'), expect.anything());
   });
 });
 
@@ -110,9 +123,11 @@ describe('getTitleDetails', () => {
     expect(detail.id).toBe(550);
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('movie/550'),
+      expect.anything(),
     );
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining('append_to_response=keywords,credits,external_ids'),
+      expect.anything(),
     );
   });
 });
@@ -129,9 +144,9 @@ describe('searchTitles', () => {
     const results = await searchTitles('Fight Club', 'movie', mockConfig);
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe(550);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('search/movie'));
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('query=Fight%20Club'));
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('api_key=test-key'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('search/movie'), expect.anything());
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('query=Fight%20Club'), expect.anything());
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('api_key=test-key'), expect.anything());
   });
 
   it('searches tv shows and returns results array', async () => {
@@ -142,7 +157,7 @@ describe('searchTitles', () => {
     const results = await searchTitles('Breaking Bad', 'tv', mockConfig);
     expect(results).toHaveLength(1);
     expect(results[0].id).toBe(1396);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('search/tv'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('search/tv'), expect.anything());
   });
 
   it('includes year param as &year= for movies', async () => {
@@ -151,7 +166,7 @@ describe('searchTitles', () => {
     );
 
     await searchTitles('Fight Club', 'movie', mockConfig, 1999);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('&year=1999'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('&year=1999'), expect.anything());
   });
 
   it('includes year param as &first_air_date_year= for tv', async () => {
@@ -160,7 +175,7 @@ describe('searchTitles', () => {
     );
 
     await searchTitles('Breaking Bad', 'tv', mockConfig, 2008);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('&first_air_date_year=2008'));
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('&first_air_date_year=2008'), expect.anything());
   });
 
   it('omits year param when year is not provided', async () => {

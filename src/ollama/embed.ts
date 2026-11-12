@@ -1,5 +1,8 @@
 import type { Config } from '../config.js';
 
+/** Generous, since the model may have to load first, but a stall must still end. */
+const EMBED_TIMEOUT_MS = 120_000;
+
 export class OllamaError extends Error {
   constructor(message: string) {
     super(message);
@@ -18,6 +21,7 @@ export async function embedText(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'nomic-embed-text', prompt: text }),
+      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
     });
   } catch (err) {
     throw new OllamaError(

@@ -233,6 +233,17 @@ describe('parsePageIdentity', () => {
   });
 });
 
+describe('resolveRtUrl stalled requests', () => {
+  it('puts a time limit on every page fetch', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 404 }));
+    await resolveRtUrl('Heat', 1995, 'movie', fetchMock as unknown as typeof fetch);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      expect((call[1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+});
+
 // ─── resolveRtUrl identity verification ──────────────────────────────────────
 
 describe('resolveRtUrl identity verification', () => {

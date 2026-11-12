@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildCurationPrompt } from './prompt.js';
-import { curateCandidates } from './curate.js';
+import { curateCandidates, CURATION_TIMEOUT_MS } from './curate.js';
 import type { CandidateTitle } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 import type { Database } from 'better-sqlite3';
@@ -31,7 +31,7 @@ const mockCandidates: CandidateTitle[] = [
     synopsis: 'A family saga with a time-travel conspiracy.', poster_path: null,
     embedding: null, updated_at: '2026-01-01T00:00:00Z', score: 0.12,
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
-    popularity: null, vote_count: null, rating_checked_at: null,
+    popularity: null, vote_count: null, rating_checked_at: null, rt_checked_at: null,
     original_language: null, runtime_minutes: null, vote_average: null, status: null, meta_checked_at: null,
   },
 ];
@@ -129,6 +129,75 @@ describe('curateCandidates', () => {
     const results = await curateCandidates(candidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
     expect(results).toHaveLength(10);
     expect(results[0]).toMatchObject({ tmdbId: 101, why: 'Reason 0', category: 'Top pick' });
+  });
+
+  it('does not offer the model two candidates it could not tell apart by tmdb_id', async () => {
+    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const spawnMock = makeSpawnMock(claudeOutput);
+    const run = vi.fn();
+    const db = { prepare: vi.fn().mockReturnValue({ run }) } as unknown as Database;
+    // A movie and a series can share a TMDB id; the model answers with the bare id.
+    const candidates: CandidateTitle[] = [
+      { ...mockCandidates[0], id: 7, media_type: 'movie', title: 'Better Ranked Film' },
+      { ...mockCandidates[0], id: 8, media_type: 'tv', title: 'Lower Ranked Series' },
+    ];
+
+    await curateCandidates(candidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+
+    const prompt = (spawnMock.mock.calls[0][1] as string[])[1];
+    expect(prompt).toContain('Better Ranked Film');
+    expect(prompt).not.toContain('Lower Ranked Series');
+    expect(run.mock.calls[0][0]).toMatchObject({ title_id: 7 }); // the title the model was shown
+  });
+
+  describe('a stalled claude -p', () => {
+    const stalledProc = (kill: ReturnType<typeof vi.fn>) => ({
+      stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), kill,
+    });
+
+    afterEach(() => vi.useRealTimers());
+
+    it('is killed and fails the call instead of hanging /generate', async () => {
+      vi.useFakeTimers();
+      const kill = vi.fn();
+      const spawnMock = vi.fn().mockReturnValue(stalledProc(kill));
+
+      const outcome = expect(
+        curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+      ).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS);
+      await outcome;
+
+      expect(kill).toHaveBeenCalledWith('SIGTERM');
+      expect(spawnMock).toHaveBeenCalledTimes(1); // a stall is not retried: that would double the wait
+    });
+
+    it('is force-killed if it ignores the polite signal', async () => {
+      vi.useFakeTimers();
+      const kill = vi.fn();
+      const spawnMock = vi.fn().mockReturnValue(stalledProc(kill));
+
+      const outcome = expect(
+        curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+      ).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS + 10_000);
+      await outcome;
+
+      expect(kill).toHaveBeenCalledWith('SIGKILL');
+    });
+
+    it('leaves a call that finishes in time alone', async () => {
+      vi.useFakeTimers();
+      const kill = vi.fn();
+      const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+      const spawnMock = makeSpawnMock(claudeOutput);
+      spawnMock.mockReturnValue({ ...spawnMock(), kill });
+
+      await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+      await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS + 10_000);
+
+      expect(kill).not.toHaveBeenCalled();
+    });
   });
 
   it('spawns claude with stdin ignored so it does not wait ~3s for stdin', async () => {

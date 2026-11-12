@@ -48,7 +48,7 @@ describe('titles repo', () => {
   it('upsertTitle + getTitleByTmdbId returns inserted row', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
-    const found = getTitleByTmdbId(db, 12345);
+    const found = getTitleByTmdbId(db, 12345, 'movie');
     expect(found).not.toBeNull();
     expect(found!.title).toBe('Test Movie');
     expect(found!.tmdb_id).toBe(12345);
@@ -60,28 +60,36 @@ describe('titles repo', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
     upsertTitle(db, { ...baseTitle, title: 'Updated Movie' });
-    const found = getTitleByTmdbId(db, 12345);
+    const found = getTitleByTmdbId(db, 12345, 'movie');
     expect(found!.title).toBe('Updated Movie');
   });
 
   it('getTitleById returns row by primary key', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
-    const byTmdb = getTitleByTmdbId(db, 12345);
+    const byTmdb = getTitleByTmdbId(db, 12345, 'movie');
     const byId = getTitleById(db, byTmdb!.id);
     expect(byId).not.toBeNull();
     expect(byId!.tmdb_id).toBe(12345);
   });
 
+  it('getTitleByTmdbId tells a movie from a series with the same TMDB id', () => {
+    const db = createTestDb();
+    upsertTitle(db, { ...baseTitle, media_type: 'tv', title: 'Test Series' });
+    upsertTitle(db, baseTitle);
+    expect(getTitleByTmdbId(db, 12345, 'movie')?.title).toBe('Test Movie');
+    expect(getTitleByTmdbId(db, 12345, 'tv')?.title).toBe('Test Series');
+  });
+
   it('getTitleByTmdbId returns null for missing id', () => {
     const db = createTestDb();
-    expect(getTitleByTmdbId(db, 99999)).toBeNull();
+    expect(getTitleByTmdbId(db, 99999, 'movie')).toBeNull();
   });
 
   it('upsertTitle persists imdb_id, imdb_rating, rt_rating', () => {
     const db = createTestDb();
     upsertTitle(db, { ...baseTitle, imdb_id: 'tt0137523', imdb_rating: '8.8', rt_rating: '79%' });
-    const found = getTitleByTmdbId(db, 12345)!;
+    const found = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(found.imdb_id).toBe('tt0137523');
     expect(found.imdb_rating).toBe('8.8');
     expect(found.rt_rating).toBe('79%');
@@ -90,7 +98,7 @@ describe('titles repo', () => {
   it('updateTitleRatings sets imdb_rating and rt_rating by id', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
-    const inserted = getTitleByTmdbId(db, 12345)!;
+    const inserted = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(inserted.imdb_rating).toBeNull();
     updateTitleRatings(db, inserted.id, { imdb: '7.5', rt: '85%' });
     const updated = getTitleById(db, inserted.id)!;
@@ -101,7 +109,7 @@ describe('titles repo', () => {
   it('updateTitleRatings stamps rating_checked_at with current unix seconds', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
-    const inserted = getTitleByTmdbId(db, 12345)!;
+    const inserted = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(inserted.rating_checked_at).toBeNull();
     const before = Math.floor(Date.now() / 1000);
     updateTitleRatings(db, inserted.id, { imdb: null, rt: null });
@@ -117,7 +125,7 @@ describe('titles repo', () => {
     upsertTitle(db, { ...baseTitle, imdb_id: 'tt0137523' });
     // Re-upsert without imdb_id
     upsertTitle(db, { ...baseTitle, imdb_id: null, title: 'Updated' });
-    const found = getTitleByTmdbId(db, 12345)!;
+    const found = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(found.imdb_id).toBe('tt0137523'); // preserved via COALESCE
     expect(found.title).toBe('Updated');
   });
@@ -125,7 +133,7 @@ describe('titles repo', () => {
   it('upsertTitle persists popularity and vote_count', () => {
     const db = createTestDb();
     upsertTitle(db, { ...baseTitle, popularity: 123.45, vote_count: 5000 });
-    const found = getTitleByTmdbId(db, 12345)!;
+    const found = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(found.popularity).toBeCloseTo(123.45);
     expect(found.vote_count).toBe(5000);
   });
@@ -134,7 +142,7 @@ describe('titles repo', () => {
     const db = createTestDb();
     upsertTitle(db, { ...baseTitle, popularity: 50.0, vote_count: 1000 });
     upsertTitle(db, { ...baseTitle, popularity: 99.9, vote_count: 9999 });
-    const found = getTitleByTmdbId(db, 12345)!;
+    const found = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(found.popularity).toBeCloseTo(99.9);
     expect(found.vote_count).toBe(9999);
   });
@@ -142,7 +150,7 @@ describe('titles repo', () => {
   it('upsertTitle stores null for popularity and vote_count when not provided', () => {
     const db = createTestDb();
     upsertTitle(db, baseTitle);
-    const found = getTitleByTmdbId(db, 12345)!;
+    const found = getTitleByTmdbId(db, 12345, 'movie')!;
     expect(found.popularity).toBeNull();
     expect(found.vote_count).toBeNull();
   });
@@ -154,7 +162,7 @@ describe('titles repo', () => {
     upsertTitle(db, { ...baseTitle, tmdb_id: 99999, title: 'Another Movie' });
 
     const profile = getProfile(db, 1)!;
-    const title = getTitleByTmdbId(db, 12345)!;
+    const title = getTitleByTmdbId(db, 12345, 'movie')!;
 
     upsertWatchEvent(db, {
       profile_id: profile.id,

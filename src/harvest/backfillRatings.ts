@@ -14,7 +14,15 @@
  *  3. If OMDb provides no RT rating AND the title has no rt_url yet, attempt
  *     resolveRtUrl — persist url/score ONLY when verified === true (unverified
  *     search-URL fallbacks are NOT written so the title can be retried later).
- *  4. A per-title exception never aborts the batch — skip and continue.
+ *     A score already stored is kept when neither source has one: a title scraped
+ *     before an OMDb key existed has rt_url set, so it would never be scraped again.
+ *  4. A per-title exception never aborts the batch — skip and continue. That includes
+ *     OMDb not answering: the title stays unchecked for the next run. The one exception
+ *     is OMDb refusing the key or quota, which ends the batch because every other title
+ *     would be refused too.
+ *
+ * Without an OMDb key the job does nothing, so that adding a key later still reaches
+ * every title.
  *
  * The cap is set to ~800 by default (RATINGS_BACKFILL_CAP env) leaving ~200
  * of the OMDb free tier's ~1 000/day quota available for live /generate calls.
@@ -22,7 +30,7 @@
 
 import type Database from 'better-sqlite3';
 import type { Config } from '../config.js';
-import { getOmdbRatings } from '../omdb/client.js';
+import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
 import { resolveRtUrl } from '../rt/resolve.js';
 import { updateTitleRatings, updateTitleRtUrl } from '../db/repos/titles.js';
 
@@ -33,6 +41,7 @@ interface BackfillCandidate {
   year: number | null;
   media_type: 'movie' | 'tv';
   rt_url: string | null;
+  rt_rating: string | null;
 }
 
 /**
@@ -48,9 +57,11 @@ export async function backfillRatings(
   config: Pick<Config, 'omdbApiKey'>,
   { dailyCap }: { dailyCap: number },
 ): Promise<{ processed: number }> {
+  if (!config.omdbApiKey) return { processed: 0 };
+
   const candidates = db
     .prepare<[number], BackfillCandidate>(
-      `SELECT id, imdb_id, title, year, media_type, rt_url
+      `SELECT id, imdb_id, title, year, media_type, rt_url, rt_rating
        FROM titles
        WHERE imdb_id IS NOT NULL AND imdb_rating IS NULL AND rating_checked_at IS NULL
        ORDER BY vote_count DESC, popularity DESC
@@ -86,11 +97,16 @@ export async function backfillRatings(
         }
       }
 
-      // Single write per title — final rt is OMDb's value, or a verified RT scrape.
-      updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt });
+      // Single write per title — final rt is OMDb's value, or a verified RT scrape,
+      // or the score already stored.
+      updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: rt ?? t.rt_rating });
 
       processed++;
-    } catch {
+    } catch (err) {
+      if (err instanceof OmdbUnavailableError && err.refused) {
+        console.warn(`[tastebuds] Ratings backfill stopped: ${err.message}`);
+        break;
+      }
       // One title failure must never abort the batch — skip and continue.
     }
   }

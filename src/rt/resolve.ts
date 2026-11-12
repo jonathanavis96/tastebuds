@@ -3,6 +3,9 @@
  * Dependency-free — uses the global fetch (Node 18+).
  */
 
+/** Per page: /generate walks every pending pick, so a stalled site must not hold it. */
+const RT_TIMEOUT_MS = 10_000;
+
 /**
  * Normalise a title for identity comparison: lowercase, replace punctuation with
  * spaces, collapse whitespace.
@@ -110,6 +113,7 @@ export async function resolveRtUrl(
       const res = await fetchImpl(url, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
         redirect: 'follow',
+        signal: AbortSignal.timeout(RT_TIMEOUT_MS),
       });
       if (res.status === 200) {
         return { url: res.url, body: await res.text() };

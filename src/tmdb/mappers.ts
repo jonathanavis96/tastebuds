@@ -46,6 +46,7 @@ export function mapTmdbToTitleRow(
     popularity: detail.popularity ?? null,
     vote_count: detail.vote_count ?? null,
     rating_checked_at: null,
+    rt_checked_at: null,
     original_language: detail.original_language ?? null,
     runtime_minutes,
     vote_average: detail.vote_average ?? null,

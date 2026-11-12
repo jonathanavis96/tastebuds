@@ -46,7 +46,7 @@
     dismissed?: boolean;
     /** Mark / un-mark "Not interested". Both commit immediately in the parent. */
     onDismiss?: (item: DetailItem) => void | Promise<void>;
-    onUndismiss?: (item: DetailItem) => void;
+    onUndismiss?: (item: DetailItem) => void | Promise<void>;
     /** Optional "why" reason tile tapped after dismissing (feeds back into prefs). */
     onDismissReason?: (item: DetailItem, reason: DismissReason) => void | Promise<void>;
   }
@@ -79,6 +79,10 @@
   // Optimistic local copy of the parent's "Not interested" flag for THIS title, so
   // the button flips instantly on tap; reconciled from the prop on every nav.
   let isDismissed = $state(false);
+  // Shown when a change could not be saved, so a lost change never looks saved.
+  let saveError = $state('');
+  // Counts changes, so only the newest one that fails undoes its optimistic state.
+  let changeCount = 0;
   // Which "why" reason tile (if any) was tapped for the currently-armed dismiss.
   // Local-only (no dismiss_reason prop comes back down) — resets on nav/undo.
   let chosenReason = $state<DismissReason | null>(null);
@@ -127,6 +131,7 @@
       zoomed = false;
       isDismissed = dismissed; // reconcile the armed state from the parent for this title
       chosenReason = null; // reason tiles are local-only, always start fresh per title/nav
+      saveError = '';
       // The previous title's dismiss/reason (if any) keeps running in the
       // background; this title's tiles just shouldn't show as blocked by it.
       dismissInFlight = false;
@@ -209,22 +214,59 @@
   // Actions update local state immediately, then persist (no close).
   // Rating or marking watched implies you've SEEN it, so it leaves the watchlist:
   // the watchlist button unticks (greys) and the watched button greens — in place.
-  async function doRate(r: number) { rating = r; seen = true; inList = false; await onRate?.(r); }
+  // If saving fails, `undo` takes the optimistic change back and the person is told.
+  // A failure for a title no longer on screen leaves this one alone (the page itself
+  // reports it, see App.svelte).
+  async function saveChange(save: () => void | Promise<void>, undo: () => void, failure: string): Promise<boolean> {
+    const titleId = item.title_id;
+    const change = ++changeCount;
+    try {
+      await save();
+      if (change === changeCount) saveError = '';
+      return true;
+    } catch {
+      if (item.title_id !== titleId) return false;
+      if (change === changeCount) undo();
+      saveError = failure;
+      return false;
+    }
+  }
+  function snapshot() {
+    const before = { rating, seen, inList };
+    return () => { ({ rating, seen, inList } = before); };
+  }
+  async function doRate(r: number) {
+    const undo = snapshot();
+    rating = r; seen = true; inList = false;
+    await saveChange(() => onRate?.(r), undo, "Couldn't save that rating. Try again.");
+  }
   async function toggleWatchlist() {
-    if (inList) { inList = false; await onRemoveWatchlist?.(); }
-    else { inList = true; await onWatchlist?.(); }
+    const undo = snapshot();
+    const save = inList ? onRemoveWatchlist : onWatchlist;
+    inList = !inList;
+    await saveChange(() => save?.(), undo, "Couldn't update your watchlist. Try again.");
   }
   async function toggleWatched() {
-    if (seen) { seen = false; rating = null; await onUnwatch?.(); }
-    else { seen = true; inList = false; await onMarkWatched?.(); }
+    const undo = snapshot();
+    const save = seen ? onUnwatch : onMarkWatched;
+    if (seen) { seen = false; rating = null; }
+    else { seen = true; inList = false; }
+    await saveChange(() => save?.(), undo, "Couldn't update watched. Try again.");
   }
   // Persist the note when it actually changed (fires on blur and on unmount).
   async function saveNote() {
     if (!onSaveNote) return;
     const trimmed = note.trim();
     if (trimmed === lastSavedNote.trim()) return;
+    const previous = lastSavedNote;
     lastSavedNote = trimmed;
-    await onSaveNote(trimmed);
+    try {
+      await onSaveNote(trimmed);
+    } catch {
+      lastSavedNote = previous; // the green "saved" border must not stay on
+      saveError = "Couldn't save your note. Try again.";
+      return;
+    }
     noteSaved = true;
     setTimeout(() => { noteSaved = false; }, 1800);
   }
@@ -236,13 +278,19 @@
   // tap. Tapping again genuinely undoes it (restores to pending). The modal stays open.
   function doDismiss() {
     const target = item;
-    if (isDismissed) { isDismissed = false; chosenReason = null; onUndismiss?.(target); return; }
+    if (isDismissed) {
+      isDismissed = false;
+      chosenReason = null;
+      void saveChange(() => onUndismiss?.(target), () => { isDismissed = true; }, "Couldn't undo that. Try again.");
+      return;
+    }
     isDismissed = true;
     dismissInFlight = true;
     // Track completion so a reason tile tapped in the same instant can wait for
     // it — /dismiss-reason requires the rec to already be 'dismissed' server-side,
     // so firing it before this resolves would race the dismiss (409/no-op).
-    const p = Promise.resolve(onDismiss?.(target)).finally(() => { dismissInFlight = false; });
+    const p = saveChange(() => onDismiss?.(target), () => { isDismissed = false; chosenReason = null; }, "Couldn't save that. Try again.")
+      .finally(() => { dismissInFlight = false; });
     pendingDismiss = p;
   }
   // Tapping a "why" tile after dismissing persists the reason. If the dismiss
@@ -254,7 +302,8 @@
   async function doDismissReason(reason: DismissReason) {
     const target = item;
     chosenReason = reason;
-    if (pendingDismiss) await pendingDismiss;
+    // A dismiss that failed left nothing to attach a reason to.
+    if (pendingDismiss && (await pendingDismiss) === false) return;
     // Chain onto whatever reason request is already outstanding so requests
     // are strictly serialized (tap order == request order == request
     // completion order) — never concurrent, even if a tap slips past the
@@ -366,6 +415,7 @@
 
         {#if onRate || onWatchlist || onMarkWatched || onDismiss}
           <div class="actions">
+            {#if saveError}<p class="save-error" role="alert">{saveError}</p>{/if}
             {#if onRate}
               <div class="rate-block">
                 <span class="rate-label">{rating ? 'Your rating' : 'Rate it'}</span>
@@ -543,6 +593,7 @@
   .cast-names { color: #bbb; }
 
   .actions { margin-top: 1.1rem; border-top: 1px solid #2a2a4a; padding-top: 0.9rem; }
+  .save-error { margin-bottom: 0.6rem; font-size: 0.82rem; color: #e94560; }
   .rate-block { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.85rem; }
   /* Fixed width so swapping "Rate it" → "Your rating" never shifts the stars. */
   .rate-label { font-size: 0.82rem; color: #aaa; min-width: 5.25rem; flex-shrink: 0; }

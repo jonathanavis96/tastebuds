@@ -108,6 +108,30 @@ describe('importFromSeedJson', () => {
     vi.clearAllMocks();
   });
 
+  it('rates the series, not a stored movie that shares its TMDB id', async () => {
+    const db = createTestDb();
+    seedProfiles(db);
+    upsertTitle(db, {
+      tmdb_id: 1396, media_type: 'movie', title: 'A Different Film', year: 1975, genres: '[]', keywords: '[]',
+      cast: '[]', synopsis: null, poster_path: null, embedding: null, updated_at: new Date().toISOString(),
+    });
+    vi.mocked(searchTitles).mockResolvedValue([mockTvSearchResult]);
+    vi.mocked(getTitleDetails).mockResolvedValue(mockTvDetail);
+    const seedData: SeedItem[] = [
+      { profile: 'Alex', title: 'Breaking Bad', year: 2008, mediaType: 'tv', status: 'watched', rating: 9 },
+    ];
+
+    const result = await importFromSeedJson(db, mockConfig, seedData);
+
+    const series = getTitleByTmdbId(db, 1396, 'tv')!;
+    const movie = getTitleByTmdbId(db, 1396, 'movie')!;
+    expect(series.title).toBe('Breaking Bad');
+    expect(result.resolved).toBe(1);
+    const ratedIds = (db.prepare('SELECT title_id FROM watch_events').all() as Array<{ title_id: number }>).map(r => r.title_id);
+    expect(ratedIds).toEqual([series.id]);
+    expect(ratedIds).not.toContain(movie.id);
+  });
+
   describe('(a) item already in local titles — links without searching', () => {
     it('links watch_event without calling searchTitles', async () => {
       const db = createTestDb();
@@ -163,7 +187,7 @@ describe('importFromSeedJson', () => {
       expect(vi.mocked(getTitleDetails)).toHaveBeenCalledWith(550, 'movie', mockConfig);
 
       // Title should now be in the DB
-      const saved = getTitleByTmdbId(db, 550);
+      const saved = getTitleByTmdbId(db, 550, 'movie');
       expect(saved).not.toBeNull();
       expect(saved!.title).toBe('Fight Club');
     });
@@ -263,7 +287,7 @@ describe('importFromSeedJson', () => {
       expect(result.notFound).toHaveLength(0);
 
       // Title should exist in DB but with null embedding
-      const saved = getTitleByTmdbId(db, 1396);
+      const saved = getTitleByTmdbId(db, 1396, 'tv');
       expect(saved).not.toBeNull();
       expect(saved!.embedding).toBeNull();
     });

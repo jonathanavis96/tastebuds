@@ -30,6 +30,21 @@ export type SpawnFn = typeof nodeSpawn;
 export const CURATION_MODEL = 'claude-sonnet-5';
 
 /**
+ * How long one `claude -p` may run. A stalled CLI would otherwise hold /generate,
+ * and the caller's rate-limit slot, with no limit at all.
+ */
+export const CURATION_TIMEOUT_MS = 5 * 60_000;
+/** Grace after SIGTERM before SIGKILL. */
+const CURATION_KILL_GRACE_MS = 5_000;
+
+class CurationTimeoutError extends Error {
+  constructor() {
+    super(`claude -p timed out after ${CURATION_TIMEOUT_MS / 1000}s`);
+    this.name = 'CurationTimeoutError';
+  }
+}
+
+/**
  * Structured-output schema passed via `--json-schema`. Top level must be an
  * object, so the array lives under `items`. This is what stops a stray `"`
  * inside `why` from producing unparseable JSON (the prod 500 of 2026-09-05).
@@ -101,6 +116,20 @@ export function padRequestPicks(
 }
 
 /**
+ * TMDB numbers movies and series separately, so a movie and a series can share a
+ * tmdb_id. The model answers with the bare id, which could then land the pick on
+ * the wrong title, so only the better-ranked of the two is offered. `seen` spans
+ * the groups of a pool.
+ */
+function withoutTmdbIdClashes(candidates: CandidateTitle[], seen: Set<number>): CandidateTitle[] {
+  return candidates.filter((c) => {
+    if (seen.has(c.tmdb_id)) return false;
+    seen.add(c.tmdb_id);
+    return true;
+  });
+}
+
+/**
  * Curate candidates via the claude -p subprocess.
  *
  * Accepts either:
@@ -118,6 +147,16 @@ export async function curateCandidates(
   balanceMedia = false,
   surprise = false,
 ): Promise<CurationResult[]> {
+  const seenTmdbIds = new Set<number>();
+  candidates = Array.isArray(candidates)
+    ? withoutTmdbIdClashes(candidates, seenTmdbIds)
+    : {
+        ...candidates,
+        onTaste: withoutTmdbIdClashes(candidates.onTaste, seenTmdbIds),
+        wildcards: withoutTmdbIdClashes(candidates.wildcards, seenTmdbIds),
+        adversarial: withoutTmdbIdClashes(candidates.adversarial, seenTmdbIds),
+      };
+
   const prompt = buildCurationPrompt(candidates, profile, sig, request, balanceMedia, surprise);
 
   // Flatten pool → map for tmdb_id lookup
@@ -147,10 +186,18 @@ export async function curateCandidates(
       let stdout = '';
       let stderr = '';
 
+      const timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        setTimeout(() => proc.kill('SIGKILL'), CURATION_KILL_GRACE_MS).unref();
+        reject(new CurationTimeoutError());
+      }, CURATION_TIMEOUT_MS);
+      timer.unref();
+
       proc.stdout!.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
       proc.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
       proc.on('close', (code) => {
+        clearTimeout(timer);
         if (code !== 0) {
           reject(new Error(`claude -p exited with code ${code}: ${stderr}`));
           return;
@@ -193,7 +240,10 @@ export async function curateCandidates(
         }
       });
 
-      proc.on('error', (err: Error) => reject(new Error(`Failed to spawn claude: ${err.message}`)));
+      proc.on('error', (err: Error) => {
+        clearTimeout(timer);
+        reject(new Error(`Failed to spawn claude: ${err.message}`));
+      });
     });
 
   // The model occasionally emits unparseable JSON (unescaped quotes etc.) — retry once before failing.
@@ -206,6 +256,7 @@ export async function curateCandidates(
       break;
     } catch (err) {
       lastErr = err;
+      if (err instanceof CurationTimeoutError) break; // retrying a stall only doubles the wait
     }
   }
   if (!results) throw lastErr;

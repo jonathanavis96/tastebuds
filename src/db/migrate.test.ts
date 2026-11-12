@@ -110,6 +110,14 @@ describe('runMigrations', () => {
     expect(() => runMigrations(db)).not.toThrow();
   });
 
+  it('migration 014 adds rt_checked_at to titles and is idempotent', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    runMigrations(db);
+    const cols = db.prepare("PRAGMA table_info('titles')").all() as Array<{ name: string }>;
+    expect(cols.map(c => c.name)).toContain('rt_checked_at');
+  });
+
   it('watch_events table has status column with correct default check', () => {
     const db = createTestDb();
     runMigrations(db);

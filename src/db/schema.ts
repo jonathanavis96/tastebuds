@@ -177,6 +177,14 @@ export const MIGRATE_013_ADD_TITLE_META = [
   `ALTER TABLE titles ADD COLUMN meta_checked_at INTEGER`,
 ];
 
+// Migration 014: Rotten Tomatoes attempt marker, kept apart from rating_checked_at
+// because that one means OMDb answered, and a title with no imdb_id or no OMDb key
+// never gets it. Without this, every such pending pick was re-scraped on every
+// /generate. Unix epoch seconds; NULL means never tried.
+export const MIGRATE_014_ADD_RT_CHECKED_AT = [
+  `ALTER TABLE titles ADD COLUMN rt_checked_at INTEGER`,
+];
+
 // Migration 005: at most ONE pending recommendation per (profile_id, title_id).
 // Without this, two overlapping /generate calls each read the pending set before
 // either inserted, so the read-time excludeTitleIds missed the other's picks and

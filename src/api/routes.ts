@@ -7,11 +7,11 @@ import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
 import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason, clearPendingRecommendations } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
-import { getTitleById, updateTitleRatings, updateTitleRtUrl, countTitles } from '../db/repos/titles.js';
+import { getTitleById, updateTitleRatings, updateTitleRtUrl, updateTitleRtRating, markTitleRtChecked, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
 import type { RecommendationRow } from '../db/types.js';
 import { DEFAULT_HARD_FILTERS, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
-import { getOmdbRatings } from '../omdb/client.js';
+import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
@@ -19,6 +19,9 @@ import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
 import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
+
+/** How long a pending pick waits before Rotten Tomatoes is tried for it again. */
+const RT_RETRY_SECONDS = 30 * 24 * 60 * 60;
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
@@ -107,6 +110,16 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' },
     });
   });
+
+  // Runs after a change is already stored, so a failed refresh (Ollama down) must not
+  // report that change as failed. The next successful refresh rebuilds from all history.
+  const refreshTaste = async (profileId: number): Promise<void> => {
+    try {
+      await refreshTasteVector(db, profileId, config);
+    } catch (err) {
+      console.warn(`[tastebuds] taste refresh failed for profile ${profileId}: ${String(err)}`);
+    }
+  };
 
   // Attach display/detail fields from the joined title (the embedding Buffer is omitted).
   // Also fold in this profile's own watch_event (if any) so a card opened from Picks
@@ -332,6 +345,8 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // no RT value this pass, and a scraped score is never persisted unless verified.
     {
       const pendingRecs = getRecommendations(db, body.profileId, 'pending');
+      // Set once OMDb refuses the key or quota: every other title would be refused too.
+      let omdbRefused = false;
       for (const rec of pendingRecs) {
         try {
           const t = getTitleById(db, rec.title_id);
@@ -349,27 +364,32 @@ export function createApiRoutes(db: Database, config: Config): Hono {
             // OMDb: authority for both imdb and rt ratings; fetch when either is missing
             let omdbRt: string | null = null;
             if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
+              if (omdbRefused) continue;
+              // Rejects when OMDb gave no answer, leaving the title unchecked for the next pass.
               const ratings = await getOmdbRatings(t.imdb_id, config);
               omdbRt = ratings.rottenTomatoes;
-              updateTitleRatings(db, t.id, { imdb: ratings.imdb, rt: ratings.rottenTomatoes });
+              updateTitleRatings(db, t.id, { imdb: ratings.imdb ?? t.imdb_rating, rt: ratings.rottenTomatoes ?? t.rt_rating });
             }
 
-            // RT URL: only resolve when we have no URL and OMDb provided no RT this pass
-            if (!t.rt_url && omdbRt == null) {
+            // RT URL: only resolve when we have no URL and OMDb provided no RT this pass.
+            // A title OMDb cannot stamp (no imdb_id, no key) reaches this line on every
+            // /generate, so the attempt is rationed by rt_checked_at, found or not.
+            const rtDue = t.rt_checked_at == null || Date.now() / 1000 - t.rt_checked_at >= RT_RETRY_SECONDS;
+            if (!t.rt_url && omdbRt == null && rtDue) {
               const result = await resolveRtUrl(t.title, t.year, t.media_type);
+              markTitleRtChecked(db, t.id);
               // Only persist rt_url when the result is verified. Storing an unverified
               // search URL would block future re-resolution (the !t.rt_url guard above).
               if (result?.verified) {
                 updateTitleRtUrl(db, t.id, result.url);
                 // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
-                if (result.score) {
-                  updateTitleRatings(db, t.id, { imdb: t.imdb_rating ?? null, rt: result.score });
-                }
+                if (result.score) updateTitleRtRating(db, t.id, result.score);
               }
             }
           }
-        } catch {
+        } catch (err) {
           // enrichment failure must never break /generate
+          if (err instanceof OmdbUnavailableError && err.refused) omdbRefused = true;
         }
       }
     }
@@ -398,7 +418,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       watched_at: new Date().toISOString(),
       note: body.note ?? null,
     });
-    await refreshTasteVector(db, body.profileId, config);
+    await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 
@@ -408,7 +428,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const body = await c.req.json<{ profileId: number; titleId: number; note: string | null }>();
     if (!body.profileId || !body.titleId) return c.json({ error: 'profileId and titleId required' }, 400);
     setWatchNote(db, body.profileId, body.titleId, body.note ?? null);
-    await refreshTasteVector(db, body.profileId, config);
+    await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 
@@ -443,7 +463,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       rating: body.rating ?? null,
       watched_at: new Date().toISOString(),
     });
-    if (body.rating) await refreshTasteVector(db, body.profileId, config);
+    if (body.rating) await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 
@@ -459,7 +479,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     }
     updateRecommendationState(db, body.recommendationId, 'dismissed');
     // "Not interested" is a mild negative signal — fold it into the taste vector.
-    await refreshTasteVector(db, body.profileId, config);
+    await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 
@@ -538,7 +558,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       }
       setDismissReason(db, body.recommendationId, null);
     }
-    await refreshTasteVector(db, body.profileId, config);
+    await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 
@@ -547,7 +567,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const body = await c.req.json<{ profileId: number; titleId: number }>();
     if (!body.profileId || !body.titleId) return c.json({ error: 'profileId and titleId required' }, 400);
     deleteWatchEvent(db, body.profileId, body.titleId);
-    await refreshTasteVector(db, body.profileId, config);
+    await refreshTaste(body.profileId);
     return c.json({ ok: true });
   });
 

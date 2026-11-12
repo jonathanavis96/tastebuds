@@ -2,6 +2,28 @@ import type { Profile, Recommendation, WatchEvent, DismissReason } from './types
 
 const BASE = '/api';
 
+/** How many times a change waits out the server's per-minute cap before it counts as failed. */
+const CAP_RETRIES = 2;
+
+/**
+ * POST something the person did. The server caps changes per minute across the
+ * household, so one past the cap waits for the window named in Retry-After rather
+ * than being lost. /generate does not come through here: it costs real money, so a
+ * refused call is shown to the person instead of being repeated.
+ */
+async function postChange(path: string, body: unknown): Promise<Response> {
+  for (let retriesLeft = CAP_RETRIES; ; retriesLeft--) {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 429 || retriesLeft === 0) return res;
+    const seconds = Number(res.headers.get('Retry-After'));
+    await new Promise(resolve => setTimeout(resolve, (seconds > 0 ? seconds : 5) * 1000));
+  }
+}
+
 export async function getProfiles(): Promise<Profile[]> {
   const res = await fetch(`${BASE}/profiles`);
   if (!res.ok) throw new Error(`getProfiles failed: ${res.status}`);
@@ -51,75 +73,43 @@ export async function generateRecommendations(opts: {
 }
 
 export async function rateTitle(profileId: number, titleId: number, rating: number, note?: string): Promise<void> {
-  const res = await fetch(`${BASE}/rate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, titleId, rating, note }),
-  });
+  const res = await postChange('/rate', { profileId, titleId, rating, note });
   if (!res.ok) throw new Error(`rate failed: ${res.status}`);
 }
 
 export async function saveNote(profileId: number, titleId: number, note: string): Promise<void> {
-  const res = await fetch(`${BASE}/note`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, titleId, note: note || null }),
-  });
+  const res = await postChange('/note', { profileId, titleId, note: note || null });
   if (!res.ok) throw new Error(`note failed: ${res.status}`);
 }
 
 export async function addToWatchlist(profileId: number, titleId: number): Promise<void> {
-  const res = await fetch(`${BASE}/watchlist`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, titleId }),
-  });
+  const res = await postChange('/watchlist', { profileId, titleId });
   if (!res.ok) throw new Error(`watchlist failed: ${res.status}`);
 }
 
 export async function markWatched(profileId: number, titleId: number, rating?: number): Promise<void> {
-  const res = await fetch(`${BASE}/mark-watched`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, titleId, rating }),
-  });
+  const res = await postChange('/mark-watched', { profileId, titleId, rating });
   if (!res.ok) throw new Error(`mark-watched failed: ${res.status}`);
 }
 
 export async function dismissRecommendation(profileId: number, recommendationId: number): Promise<void> {
-  const res = await fetch(`${BASE}/dismiss`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, recommendationId }),
-  });
+  const res = await postChange('/dismiss', { profileId, recommendationId });
   if (!res.ok) throw new Error(`dismiss failed: ${res.status}`);
 }
 
 /** Optional follow-up to dismissRecommendation: which reason tile the user tapped (Phase-1.5 step 3 write-back). */
 export async function dismissReason(profileId: number, recommendationId: number, reason: DismissReason): Promise<void> {
-  const res = await fetch(`${BASE}/dismiss-reason`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, recommendationId, reason }),
-  });
+  const res = await postChange('/dismiss-reason', { profileId, recommendationId, reason });
   if (!res.ok) throw new Error(`dismiss-reason failed: ${res.status}`);
 }
 
 export async function undismissRecommendation(profileId: number, recommendationId: number): Promise<void> {
-  const res = await fetch(`${BASE}/undismiss`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, recommendationId }),
-  });
+  const res = await postChange('/undismiss', { profileId, recommendationId });
   if (!res.ok) throw new Error(`undismiss failed: ${res.status}`);
 }
 
 export async function removeWatch(profileId: number, titleId: number): Promise<void> {
-  const res = await fetch(`${BASE}/remove-watch`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profileId, titleId }),
-  });
+  const res = await postChange('/remove-watch', { profileId, titleId });
   if (!res.ok) throw new Error(`remove-watch failed: ${res.status}`);
 }
 
