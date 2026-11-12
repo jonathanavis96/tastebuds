@@ -930,6 +930,42 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     expect(pending).toHaveLength(2);
   });
 
+  it('an overlapping generate for the same profile does not count the other call\'s picks as its own', async () => {
+    const db = setupDb();
+    const oldMovieT = addTitle(db, 751);
+    for (const [tmdbId, name] of [[752, 'Old Show'], [753, 'New Show']] as const) {
+      db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
+        VALUES (?, 'tv', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 45, 7.0, 1000, 'Returning Series', 1700000000)`).run(tmdbId, name);
+    }
+    const tvId = (tmdbId: number) => (db.prepare("SELECT id FROM titles WHERE tmdb_id = ? AND media_type = 'tv'").get(tmdbId) as { id: number }).id;
+    const oldMovieId = addRec(db, 1, oldMovieT, 'pending');
+    addRec(db, 1, tvId(752), 'pending');
+
+    // The Movies-only call is slow and finds nothing; the TV-only call writes a new TV pick.
+    vi.mocked(curateCandidates).mockImplementation(async () => {
+      const calls = vi.mocked(curateCandidates).mock.calls.length;
+      if (calls === 1) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return [] as any;
+      }
+      upsertRecommendation(db, { profile_id: 1, title_id: tvId(753), category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
+      return [] as any;
+    });
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const post = (mediaType: string) => app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, mediaType }),
+    });
+    const [movieRes, tvRes] = await Promise.all([post('movie'), post('tv')]);
+    expect(movieRes.status).toBe(200);
+    expect(tvRes.status).toBe(200);
+
+    const pending = (db.prepare("SELECT id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ id: number }>).map(r => r.id);
+    expect(pending).toContain(oldMovieId);
+  });
+
   it('keeps the old pending rows when the generate produced no new picks', async () => {
     const db = setupDb();
     const oldId = addRec(db, 1, addTitle(db, 711), 'pending');

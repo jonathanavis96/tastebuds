@@ -40,6 +40,32 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // (spawns `claude -p`), so it gets its own stricter budget on top.
   const generateLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5, keyPrefix: 'generate' });
   api.use('/generate', generateLimiter);
+  // One /generate at a time per profile. A generate decides whether to clear the
+  // profile's old pending picks by looking for pending rows newer than the ones it
+  // started with, so an overlapping generate for the same profile could otherwise
+  // see the other call's picks as its own and clear picks it should have kept.
+  const generateQueue = new Map<number, Promise<void>>();
+  api.use('/generate', async (c, next) => {
+    let profileId: unknown;
+    try {
+      profileId = (await c.req.json<{ profileId?: unknown }>())?.profileId;
+    } catch {
+      return next(); // the handler reports the bad body
+    }
+    if (typeof profileId !== 'number') return next();
+    const previous = generateQueue.get(profileId) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.then(() => mine);
+    generateQueue.set(profileId, tail);
+    await previous;
+    try {
+      await next();
+    } finally {
+      release();
+      if (generateQueue.get(profileId) === tail) generateQueue.delete(profileId);
+    }
+  });
 
   api.get('/profiles', (c) => {
     const profiles = getAllProfiles(db);
