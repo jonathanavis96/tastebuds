@@ -334,10 +334,12 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Picks empty. Shown/dismissed recs and watch history are untouched, and so is a
     // pending pick the profile has watched, rated or watchlisted (its row carries the
     // predicted_rating the calibration widget needs).
-    if (existingPending.length > 0) {
+    // Surprise Me appends to the list and never replaces it (see App.svelte), and a
+    // media-filtered generate replaces only picks of that media type.
+    if (existingPending.length > 0 && body.surprise !== true) {
       const lastOldId = existingPending.reduce((m, r) => Math.max(m, r.id), 0);
       const hasNewPick = getRecommendations(db, body.profileId, 'pending').some(r => r.id > lastOldId);
-      if (hasNewPick) clearPendingRecommendations(db, body.profileId, lastOldId);
+      if (hasNewPick) clearPendingRecommendations(db, body.profileId, lastOldId, mediaType || undefined);
     }
 
     // OMDb enrichment + RT URL/score resolution — non-fatal; OMDb is the authority

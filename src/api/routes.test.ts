@@ -881,6 +881,55 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     expect(getCalibration(db, 1)).toEqual({ count: 1, avgError: 2, withinOne: 0 });
   });
 
+  it('Surprise Me appends: the old pending rows stay alongside the new picks', async () => {
+    const db = setupDb();
+    const [oldT, freshT] = [731, 732].map(id => addTitle(db, id));
+    const oldId = addRec(db, 1, oldT, 'pending');
+    vi.mocked(curateCandidates).mockImplementation(async () => {
+      upsertRecommendation(db, { profile_id: 1, title_id: freshT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
+      return [] as any;
+    });
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, surprise: true }),
+    });
+    expect(res.status).toBe(200);
+
+    const pending = db.prepare("SELECT id, title_id FROM recommendations WHERE profile_id = 1 AND state = 'pending' ORDER BY id").all() as Array<{ id: number; title_id: number }>;
+    expect(pending.map(r => r.id)).toContain(oldId);
+    expect(pending.map(r => r.title_id)).toEqual([oldT, freshT]);
+  });
+
+  it('a media-filtered generate replaces only picks of that media type', async () => {
+    const db = setupDb();
+    const [oldMovieT, freshMovieT] = [741, 742].map(id => addTitle(db, id));
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
+      VALUES (743, 'tv', 'Show', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 45, 7.0, 1000, 'Returning Series', 1700000000)`).run();
+    const oldTvT = (db.prepare("SELECT id FROM titles WHERE tmdb_id = 743 AND media_type = 'tv'").get() as { id: number }).id;
+    const oldMovieId = addRec(db, 1, oldMovieT, 'pending');
+    const oldTvId = addRec(db, 1, oldTvT, 'pending');
+    vi.mocked(curateCandidates).mockImplementation(async () => {
+      upsertRecommendation(db, { profile_id: 1, title_id: freshMovieT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
+      return [] as any;
+    });
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, mediaType: 'movie' }),
+    });
+    expect(res.status).toBe(200);
+
+    const pending = (db.prepare("SELECT id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ id: number }>).map(r => r.id);
+    expect(pending).not.toContain(oldMovieId);
+    expect(pending).toContain(oldTvId);
+    expect(pending).toHaveLength(2);
+  });
+
   it('keeps the old pending rows when the generate produced no new picks', async () => {
     const db = setupDb();
     const oldId = addRec(db, 1, addTitle(db, 711), 'pending');

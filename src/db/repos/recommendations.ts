@@ -44,7 +44,9 @@ export function getRecommendations(
 /**
  * Remove a profile's existing pending recommendations so a fresh generate replaces
  * them (no duplicate accumulation). With `upToId`, only pending rows with
- * id <= upToId go, so picks written after that point survive.
+ * id <= upToId go, so picks written after that point survive. With `mediaType`,
+ * only pending rows for titles of that media type go, so a Movies-only generate
+ * leaves the TV picks alone.
  *
  * A pending pick whose title the profile has watched, rated or watchlisted is kept:
  * rating a pick never moves it out of 'pending', and its row holds the
@@ -55,13 +57,21 @@ export function clearPendingRecommendations(
   db: InstanceType<typeof Database>,
   profileId: number,
   upToId?: number,
+  mediaType?: 'movie' | 'tv',
 ): void {
-  const untouched = 'AND title_id NOT IN (SELECT title_id FROM watch_events WHERE profile_id = ?)';
-  if (upToId === undefined) {
-    db.prepare(`DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' ${untouched}`).run(profileId, profileId);
-    return;
+  let sql = "DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending'";
+  const params: Array<number | string> = [profileId];
+  if (upToId !== undefined) {
+    sql += ' AND id <= ?';
+    params.push(upToId);
   }
-  db.prepare(`DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' AND id <= ? ${untouched}`).run(profileId, upToId, profileId);
+  if (mediaType !== undefined) {
+    sql += ' AND title_id IN (SELECT id FROM titles WHERE media_type = ?)';
+    params.push(mediaType);
+  }
+  sql += ' AND title_id NOT IN (SELECT title_id FROM watch_events WHERE profile_id = ?)';
+  params.push(profileId);
+  db.prepare(sql).run(...params);
 }
 
 export interface Calibration {
