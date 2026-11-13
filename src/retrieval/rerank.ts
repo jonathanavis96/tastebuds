@@ -1,12 +1,12 @@
 import type Database from 'better-sqlite3';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
-import { parsePrefs } from './prefs.js';
+import { parsePrefs, type PrefsJson } from './prefs.js';
 import type { CandidateTitle } from './retrieve.js';
 
 /** Per-genre taste in [-1, 1]: +1 loves it, −1 hates it, 0 / absent = no signal. */
 export type GenreAffinity = Record<string, number>;
 
-/** A genre at or below this affinity for EITHER partner is vetoed from Joint picks. */
+/** A genre at or below this affinity is vetoed (solo, and for Joint see jointGenreAffinity). */
 export const GENRE_VETO_THRESHOLD = -0.35;
 
 /** Ratings a genre needs before its affinity is fully trusted (Bayesian shrinkage). */
@@ -14,9 +14,8 @@ const AFFINITY_SHRINK_K = 3;
 /** Stated loved_genres prefs contribute this much when no ratings exist for the genre. */
 const LOVED_PREF_AFFINITY = 0.4;
 
-/** Mirrors the taste-vector blend: what the couple rated together dominates. */
+/** Mirrors the taste-vector blend: what the couple rated together dominates; the rest is split between the partners. */
 const JOINT_OWN_WEIGHT = 0.65;
-const JOINT_PARTNER_WEIGHT = 0.175;
 
 export interface RerankWeights {
   similarity: number;
@@ -65,7 +64,18 @@ export function genreAffinityForProfile(
     FROM watch_events we JOIN titles t ON t.id = we.title_id
     WHERE we.profile_id = ? AND we.rating IS NOT NULL
   `).all(profileId) as RatedGenreRow[];
+  const sig = getTasteSignature(db, profileId);
+  return genreAffinityFromRatings(rows, sig ? parsePrefs(sig.prefs) : {});
+}
 
+/**
+ * The pure half of genreAffinityForProfile: the same maths over rows already in
+ * memory, so the offline evaluation (src/eval) scores exactly what production does.
+ */
+export function genreAffinityFromRatings(
+  rows: Array<{ genres: string; rating: number }>,
+  prefs: Pick<PrefsJson, 'loved_genres' | 'hated_genres'>,
+): GenreAffinity {
   const affinity: GenreAffinity = {};
   if (rows.length > 0) {
     const overall = rows.reduce((s, r) => s + r.rating, 0) / rows.length;
@@ -85,8 +95,6 @@ export function genreAffinityForProfile(
     }
   }
 
-  const sig = getTasteSignature(db, profileId);
-  const prefs = sig ? parsePrefs(sig.prefs) : {};
   for (const g of prefs.hated_genres ?? []) affinity[g] = -1;
   for (const g of prefs.loved_genres ?? []) {
     if (!(g in affinity)) affinity[g] = LOVED_PREF_AFFINITY;
@@ -95,28 +103,73 @@ export function genreAffinityForProfile(
 }
 
 /**
- * Joint affinity with mutual veto: a genre either partner sits at or below the
- * veto threshold is excluded outright; the rest blend the couple's own
+ * Together-ratings of a genre the couple needs before their OWN verdict on it
+ * replaces the partners' solo verdicts in the Joint veto.
+ */
+export const JOINT_VETO_MIN_TOGETHER = 5;
+
+export interface JointVetoEvidence {
+  /** How many titles of each genre the couple has rated together. */
+  ownCounts?: Record<string, number>;
+  /** Genres someone listed as hated (prefs): always vetoed, whatever the ratings say. */
+  statedHated?: Iterable<string>;
+}
+
+/**
+ * Joint affinity with mutual veto. A genre is excluded from Joint picks when
+ * either partner sits at or below the veto threshold, EXCEPT once the couple
+ * has rated at least JOINT_VETO_MIN_TOGETHER titles of that genre together:
+ * from then on their together-ratings decide (vetoed only if the couple's own
+ * affinity is at or below the threshold). Why: a solo dislike measured on one
+ * kind of title (sitcoms watched alone) was vetoing the same genre for films
+ * the couple rates highly together (comedy-thrillers, dark comedies). A stated
+ * hated genre stays an absolute veto. The rest blend the couple's own
  * together-rated affinity with each partner's solo affinity.
  */
 export function jointGenreAffinity(
   a: GenreAffinity,
   b: GenreAffinity,
   own: GenreAffinity,
+  evidence: JointVetoEvidence = {},
+  ownWeight: number = JOINT_OWN_WEIGHT,
 ): { affinity: GenreAffinity; vetoed: Set<string> } {
   const genres = new Set([...Object.keys(a), ...Object.keys(b), ...Object.keys(own)]);
+  const stated = new Set([...(evidence.statedHated ?? [])].map(g => g.toLowerCase()));
+  const partnerWeight = (1 - ownWeight) / 2;
   const affinity: GenreAffinity = {};
   const vetoed = new Set<string>();
   for (const g of genres) {
     const av = a[g] ?? 0;
     const bv = b[g] ?? 0;
-    if (av <= GENRE_VETO_THRESHOLD || bv <= GENRE_VETO_THRESHOLD) {
+    const together = evidence.ownCounts?.[g] ?? 0;
+    const veto = stated.has(g.toLowerCase())
+      || (together >= JOINT_VETO_MIN_TOGETHER
+        ? (own[g] ?? 0) <= GENRE_VETO_THRESHOLD
+        : av <= GENRE_VETO_THRESHOLD || bv <= GENRE_VETO_THRESHOLD);
+    if (veto) {
       vetoed.add(g);
       continue;
     }
-    affinity[g] = JOINT_OWN_WEIGHT * (own[g] ?? 0) + JOINT_PARTNER_WEIGHT * av + JOINT_PARTNER_WEIGHT * bv;
+    affinity[g] = ownWeight * (own[g] ?? 0) + partnerWeight * av + partnerWeight * bv;
   }
   return { affinity, vetoed };
+}
+
+/** How many rated titles carry each genre. */
+export function genreRatingCounts(rows: Array<{ genres: string }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const r of rows) for (const g of parseGenres(r.genres)) counts[g] = (counts[g] ?? 0) + 1;
+  return counts;
+}
+
+/** genreRatingCounts over a profile's rated watch events. */
+export function genreRatingCountsForProfile(db: InstanceType<typeof Database>, profileId: number): Record<string, number> {
+  const rows = db.prepare(`
+    SELECT t.genres AS genres
+    FROM watch_events we JOIN titles t ON t.id = we.title_id
+    WHERE we.profile_id = ? AND we.rating IS NOT NULL
+  `).all(profileId) as Array<{ genres: string }>;
+  return genreRatingCounts(rows);
 }
 
 /**
@@ -149,6 +202,13 @@ function titleAffinity(genres: string[], affinity: GenreAffinity): number {
   return sum / genres.length;
 }
 
+export interface RerankOverrides<T> {
+  /** Per-title taste in [-1, 1]; defaults to the mean genre affinity of the title's genres. */
+  affinityOf?: (c: T, genres: string[]) => number;
+  /** Distance-like taste score (lower = closer) replacing c.score in the similarity slot; null = use c.score. */
+  distanceOf?: (c: T) => number | null;
+}
+
 export type RankedCandidate<T extends CandidateTitle = CandidateTitle> = T & { rank_score: number };
 
 /**
@@ -162,7 +222,9 @@ export function rerank<T extends CandidateTitle>(
   affinity: GenreAffinity,
   vetoed: Set<string>,
   weights: RerankWeights = DEFAULT_RERANK_WEIGHTS,
+  overrides: RerankOverrides<T> = {},
 ): RankedCandidate<T>[] {
+  const affinityOf = overrides.affinityOf ?? ((_c: T, genres: string[]) => titleAffinity(genres, affinity));
   const ranked: RankedCandidate<T>[] = [];
   // Same exact, case-insensitive match as hatedGenreClause in retrieve.ts.
   const vetoedLower = new Set([...vetoed].map(g => g.toLowerCase()));
@@ -174,15 +236,22 @@ export function rerank<T extends CandidateTitle>(
   // A missing distance (NULL from SQLite, or NaN) means "no similarity signal":
   // it must not join the min/max (null would read as distance 0, the best match).
   const hasDist = (d: unknown): d is number => typeof d === 'number' && Number.isFinite(d);
-  const dists = kept.map(c => c.score).filter(hasDist);
+  // The similarity slot uses overrides.distanceOf when it gives a value (nearest-
+  // neighbour taste), else the vector-search distance in c.score.
+  const distOf = new Map<T, unknown>(kept.map(c => {
+    const d = overrides.distanceOf?.(c);
+    return [c, hasDist(d) ? d : c.score];
+  }));
+  const dists = kept.map(c => distOf.get(c)).filter(hasDist);
   const minDist = Math.min(...dists);
   const maxDist = Math.max(...dists);
   const range = maxDist - minDist;
   for (const c of kept) {
     const genres = parseGenres(c.genres);
-    const similarity = !hasDist(c.score) ? 0
-      : range > 1e-9 ? (maxDist - c.score) / range : clamp(1 - c.score, 0, 1);
-    const aff = (titleAffinity(genres, affinity) + 1) / 2; // [-1,1] → [0,1]
+    const d = distOf.get(c);
+    const similarity = !hasDist(d) ? 0
+      : range > 1e-9 ? (maxDist - d) / range : clamp(1 - d, 0, 1);
+    const aff = (clamp(affinityOf(c, genres), -1, 1) + 1) / 2; // [-1,1] → [0,1]
     const quality = qualityScore(c.vote_average, c.vote_count, c.media_type);
     const pop = popularityScore(c.popularity);
     const rank_score =

@@ -13,6 +13,7 @@ import {
   qualityScore,
   rerank,
   GENRE_VETO_THRESHOLD,
+  JOINT_VETO_MIN_TOGETHER,
 } from './rerank.js';
 import type { CandidateTitle } from './retrieve.js';
 
@@ -105,6 +106,40 @@ describe('jointGenreAffinity', () => {
   it('uses the threshold constant, not a mere negative', () => {
     const { vetoed } = jointGenreAffinity({ Drama: GENRE_VETO_THRESHOLD + 0.01 }, {}, {});
     expect(vetoed.size).toBe(0);
+  });
+
+  it('lets enough together-ratings overrule one partner\'s solo veto', () => {
+    const solo = { Comedy: -0.4 };
+    const below = jointGenreAffinity(solo, {}, { Comedy: 0 }, { ownCounts: { Comedy: JOINT_VETO_MIN_TOGETHER - 1 } });
+    expect(below.vetoed.has('Comedy')).toBe(true);
+    const enough = jointGenreAffinity(solo, {}, { Comedy: 0 }, { ownCounts: { Comedy: JOINT_VETO_MIN_TOGETHER } });
+    expect(enough.vetoed.has('Comedy')).toBe(false);
+    expect(enough.affinity.Comedy).toBeCloseTo(0.175 * -0.4, 5);
+  });
+
+  it('vetoes when the couple itself rates the genre low together', () => {
+    const { vetoed } = jointGenreAffinity({}, {}, { Horror: -0.5 }, { ownCounts: { Horror: 9 } });
+    expect(vetoed.has('Horror')).toBe(true);
+  });
+
+  it('keeps a stated hated genre vetoed whatever the together-ratings say', () => {
+    const { vetoed } = jointGenreAffinity({ Horror: -1 }, {}, { Horror: 0.5 }, {
+      ownCounts: { Horror: 20 }, statedHated: ['horror'],
+    });
+    expect(vetoed.has('Horror')).toBe(true);
+  });
+});
+
+describe('rerank overrides', () => {
+  it('ranks by distanceOf when given, falling back to score when it returns null', () => {
+    const a = cand({ id: 1, title: 'A', score: 0.2 });
+    const b = cand({ id: 2, title: 'B', score: 0.4 });
+    const byScore = rerank([a, b], {}, new Set());
+    expect(byScore[0].id).toBe(1);
+    const flipped = rerank([a, b], {}, new Set(), DEFAULT_RERANK_WEIGHTS, { distanceOf: c => (c.id === 1 ? 0.9 : 0.1) });
+    expect(flipped[0].id).toBe(2);
+    const fallback = rerank([a, b], {}, new Set(), DEFAULT_RERANK_WEIGHTS, { distanceOf: () => null });
+    expect(fallback[0].id).toBe(1);
   });
 });
 

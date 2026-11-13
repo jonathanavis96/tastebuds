@@ -6,6 +6,7 @@
   import WatchlistView from './components/WatchlistView.svelte';
   import WatchedHistory from './components/WatchedHistory.svelte';
   import DetailModal from './components/DetailModal.svelte';
+  import TasteChart from './components/TasteChart.svelte';
   import CategoryLegend from './components/CategoryLegend.svelte';
   import { compareTimestamps } from './lib/time.js';
   import type { Profile, Recommendation, WatchEvent, MediaFilter, DismissReason } from './lib/types.js';
@@ -65,6 +66,8 @@
   let watchlist = $state<WatchEvent[]>([]);
   let watched = $state<WatchEvent[]>([]);
   let calibration = $state<Calibration | null>(null);
+  /** Profile whose taste chart is open (tap the active profile pill), or null. */
+  let tasteFor = $state<number | null>(null);
   let tab = $state<'recs' | 'watchlist' | 'history'>(
     savedTab === 'watchlist' || savedTab === 'history' || savedTab === 'recs' ? savedTab : 'recs',
   );
@@ -410,7 +413,7 @@
     <p class="tag">Picked for how you actually watch</p>
   </header>
 
-  <ProfileSwitcher {profiles} {activeProfileId} onSelect={switchProfile} />
+  <ProfileSwitcher {profiles} {activeProfileId} onSelect={switchProfile} onOpenTaste={(id) => (tasteFor = id)} />
 
   <nav class="tab-bar">
     <button class:active={tab === 'recs'} onclick={() => tab = 'recs'}>Picks</button>
@@ -521,6 +524,13 @@
     {/if}
   {/if}
 </div>
+
+  {#if tasteFor != null}
+    {@const tp = profiles.find(p => p.id === tasteFor)}
+    {#if tp}
+      <TasteChart profileId={tp.id} profileName={tp.name} isJoint={tp.is_derived === 1} onClose={() => (tasteFor = null)} />
+    {/if}
+  {/if}
 
 {#if modalItem}
   <DetailModal

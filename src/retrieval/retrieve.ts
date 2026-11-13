@@ -11,8 +11,10 @@ import { getRecommendations } from '../db/repos/recommendations.js';
 import { getCachedEmbedding, putCachedEmbedding } from '../db/repos/embeddingCache.js';
 import { blendVectors } from './blend.js';
 import { hardFilterSql, withWidening, type HardFilters } from './filters.js';
+import { loadTasteNeighbours, blendedNeighbourDistance, unitVec, type TasteNeighbours } from './neighbours.js';
 import {
   genreAffinityForProfile,
+  genreRatingCountsForProfile,
   jointGenreAffinity,
   rerank,
   GENRE_VETO_THRESHOLD,
@@ -63,8 +65,8 @@ export interface RetrieveOpts {
  * (~35%) is your individual tastes — because a film you'd each skip alone can
  * still be a great joint watch.
  */
-const JOINT_OWN_WEIGHT = 0.65;
-const JOINT_INDIVIDUAL_WEIGHT = 0.35;
+export const JOINT_OWN_WEIGHT = 0.65;
+export const JOINT_INDIVIDUAL_WEIGHT = 0.35;
 
 /**
  * Taste vector = (mean of liked titles) − NEGATIVE_WEIGHT × (mean of disliked titles).
@@ -74,9 +76,9 @@ const JOINT_INDIVIDUAL_WEIGHT = 0.35;
  * — positives, hence a strong 0.6 weight (tunable). Anything in between the two
  * thresholds (a 3) is treated as neutral and ignored.
  */
-const LIKED_MIN_RATING = 4;
-const DISLIKED_MAX_RATING = 2;
-const NEGATIVE_WEIGHT = 0.6;
+export const LIKED_MIN_RATING = 4;
+export const DISLIKED_MAX_RATING = 2;
+export const NEGATIVE_WEIGHT = 0.6;
 
 /**
  * Per-item weights inside the negative term — how hard each kind of "no" pushes.
@@ -84,9 +86,9 @@ const NEGATIVE_WEIGHT = 0.6;
  * recommendation) milder still — Jonathan's call: a touch under a 2★. These are
  * relative weights blended into the weighted-mean negative direction.
  */
-const DISLIKE_1STAR_WEIGHT = 1.0;
-const DISLIKE_2STAR_WEIGHT = 0.5;
-const DISMISS_WEIGHT = 0.3;
+export const DISLIKE_1STAR_WEIGHT = 1.0;
+export const DISLIKE_2STAR_WEIGHT = 0.5;
+export const DISMISS_WEIGHT = 0.3;
 
 /**
  * When the user types a free-text request ("mind-bending sci-fi"), the candidate
@@ -125,6 +127,29 @@ function meanVector(vectors: number[][]): number[] {
   }
   for (let i = 0; i < dim; i++) mean[i] /= vectors.length;
   return mean;
+}
+
+/**
+ * The pure Rocchio step: mean(liked) − NEGATIVE_WEIGHT × weighted-mean(negatives).
+ * Shared by refreshTasteVector and the offline evaluation (src/eval), so both
+ * build the taste vector the same way. `liked` must be non-empty.
+ */
+export function rocchioVector(
+  liked: number[][],
+  negatives: Array<{ weight: number; vec: number[] }>,
+): number[] {
+  const meanVec = meanVector(liked);
+  const dim = meanVec.length;
+  // Subtract the weighted-mean negative direction (count-independent, like the liked mean).
+  const totalNegWeight = negatives.reduce((sum, n) => sum + n.weight, 0);
+  if (totalNegWeight > 0) {
+    for (let i = 0; i < dim; i++) {
+      let neg = 0;
+      for (const n of negatives) neg += n.weight * n.vec[i];
+      meanVec[i] -= NEGATIVE_WEIGHT * (neg / totalNegWeight);
+    }
+  }
+  return meanVec;
 }
 
 /**
@@ -204,18 +229,7 @@ export async function refreshTasteVector(
     negatives.push({ weight: DISMISS_WEIGHT, vec: await vectorForTitle(title, null) });
   }
 
-  const likedMean = meanVector(likedVecs);
-  const dim = likedMean.length;
-  const meanVec = likedMean.slice();
-  // Subtract the weighted-mean negative direction (count-independent, like the liked mean).
-  const totalNegWeight = negatives.reduce((sum, n) => sum + n.weight, 0);
-  if (totalNegWeight > 0) {
-    for (let i = 0; i < dim; i++) {
-      let neg = 0;
-      for (const n of negatives) neg += n.weight * n.vec[i];
-      meanVec[i] -= NEGATIVE_WEIGHT * (neg / totalNegWeight);
-    }
-  }
+  const meanVec = rocchioVector(likedVecs, negatives);
 
   const tasteVectorBuf = Buffer.from(new Float32Array(meanVec).buffer);
 
@@ -269,11 +283,42 @@ function soloVetoes(affinity: GenreAffinity): Set<string> {
 interface TasteContext {
   affinity: GenreAffinity;
   vetoed: Set<string>;
+  /**
+   * Nearest-neighbour taste distance for a candidate (src/retrieval/neighbours.ts),
+   * used in rerank's similarity slot in place of the vector-search distance.
+   * Absent for request paths, where similarity must stay relevance to the request.
+   */
+  distanceOf?: (c: CandidateTitle) => number | null;
+}
+
+const NEIGHBOUR_SELECTION = {
+  likedMin: LIKED_MIN_RATING,
+  dislikedMax: DISLIKED_MAX_RATING,
+  oneStar: DISLIKE_1STAR_WEIGHT,
+  twoStar: DISLIKE_2STAR_WEIGHT,
+  dismissed: DISMISS_WEIGHT,
+};
+
+/** Neighbour distance over one or more weighted profiles, loaded on first use (wildcard-only paths never pay for it). */
+function lazyNeighbourDistance(
+  db: InstanceType<typeof Database>,
+  parts: Array<{ profileId: number; weight: number }>,
+): (c: CandidateTitle) => number | null {
+  let loaded: Array<{ neighbours: TasteNeighbours; weight: number }> | undefined;
+  return (c) => {
+    if (!c.embedding) return null;
+    loaded ??= parts.map(p => ({ neighbours: loadTasteNeighbours(db, p.profileId, NEIGHBOUR_SELECTION), weight: p.weight }));
+    return blendedNeighbourDistance(loaded, unitVec(c.embedding));
+  };
 }
 
 function soloTaste(db: InstanceType<typeof Database>, profileId: number): TasteContext {
   const affinity = genreAffinityForProfile(db, profileId);
-  return { affinity, vetoed: soloVetoes(affinity) };
+  return {
+    affinity,
+    vetoed: soloVetoes(affinity),
+    distanceOf: lazyNeighbourDistance(db, [{ profileId, weight: 1 }]),
+  };
 }
 
 function jointTaste(
@@ -282,16 +327,29 @@ function jointTaste(
   samId: number,
   jointId: number | undefined,
 ): TasteContext {
-  return jointGenreAffinity(
+  const statedHated = [alexId, samId, ...(jointId != null ? [jointId] : [])]
+    .flatMap(id => parsePrefs(getTasteSignature(db, id)?.prefs).hated_genres ?? []);
+  const { affinity, vetoed } = jointGenreAffinity(
     genreAffinityForProfile(db, alexId),
     genreAffinityForProfile(db, samId),
     jointId != null ? genreAffinityForProfile(db, jointId) : {},
+    { ownCounts: jointId != null ? genreRatingCountsForProfile(db, jointId) : {}, statedHated },
   );
+  // Same split as the taste-vector blend: the couple's own history leads, the partners share the rest.
+  const parts = [
+    ...(jointId != null ? [{ profileId: jointId, weight: JOINT_OWN_WEIGHT }] : []),
+    { profileId: alexId, weight: JOINT_INDIVIDUAL_WEIGHT / 2 },
+    { profileId: samId, weight: JOINT_INDIVIDUAL_WEIGHT / 2 },
+  ];
+  return { affinity, vetoed, distanceOf: lazyNeighbourDistance(db, parts) };
 }
 
 /** Rerank then trim, dropping the rank_score so callers see plain CandidateTitle rows (score = distance). */
 function top<T extends CandidateTitle>(rows: T[], taste: TasteContext, limit: number, weights?: RerankWeights): T[] {
-  return rerank(rows, taste.affinity, taste.vetoed, weights).slice(0, limit).map(({ rank_score: _r, ...rest }) => rest as unknown as T);
+  // Wildcard weights ignore similarity, so skip the neighbour work there.
+  const distanceOf = (weights?.similarity ?? 1) > 0 ? taste.distanceOf : undefined;
+  return rerank(rows, taste.affinity, taste.vetoed, weights, { distanceOf })
+    .slice(0, limit).map(({ rank_score: _r, ...rest }) => rest as unknown as T);
 }
 
 /**
