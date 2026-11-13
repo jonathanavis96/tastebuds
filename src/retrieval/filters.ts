@@ -220,8 +220,18 @@ export function titleIdsPassing(
   const ids = [...new Set(titleIds)];
   if (ids.length === 0) return new Set();
   const { sql, params } = hardFilterSql(f, 't');
-  const rows = db.prepare(
-    `SELECT t.id AS id FROM titles t WHERE t.id IN (${ids.map(() => '?').join(',')})${sql}`,
-  ).all(...ids, ...params) as Array<{ id: number }>;
-  return new Set(rows.map(r => r.id));
+  // Chunk the IN list: a profile can hold tens of thousands of pending recs, and
+  // one statement binding them all exceeds SQLite's bound-variable limit.
+  const passing = new Set<number>();
+  for (let i = 0; i < ids.length; i += TITLE_ID_CHUNK) {
+    const chunk = ids.slice(i, i + TITLE_ID_CHUNK);
+    const rows = db.prepare(
+      `SELECT t.id AS id FROM titles t WHERE t.id IN (${chunk.map(() => '?').join(',')})${sql}`,
+    ).all(...chunk, ...params) as Array<{ id: number }>;
+    for (const r of rows) passing.add(r.id);
+  }
+  return passing;
 }
+
+/** IDs bound per statement in `titleIdsPassing`; well under SQLite's oldest 999-variable default, leaving room for filter params. */
+const TITLE_ID_CHUNK = 500;
