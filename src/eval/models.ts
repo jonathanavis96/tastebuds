@@ -192,30 +192,57 @@ export function scoreJoint(
   w: JointWeights = TODAY_JOINT,
 ): number[] {
   const partnerShare = 1 - w.own;
-  const { affinity, vetoed } = jointGenreAffinity(a.affinity, b.affinity, own.affinity, {
-    ownCounts: opts.vetoOverride ? own.genreCounts : undefined,
-    statedHated: [...own.statedHated, ...a.statedHated, ...b.statedHated],
-  }, w.own);
-  const partnerVec = blendOrNull(a.vector, 0.5, b.vector, 0.5);
-  const jointVec = own.vector && partnerVec && w.own < 1 && w.own > 0
-    ? blendVectors(own.vector, w.own, partnerVec, partnerShare)
-    : w.own >= 1 ? own.vector ?? partnerVec : w.own <= 0 ? partnerVec : own.vector ?? partnerVec;
+  // Like the solo scorer, a title is scored with each person's movie- or
+  // series-only taste when one was built (the `media` model); the veto stays
+  // the one from the unsplit tastes.
+  const build = (o: SoloTaste, x: SoloTaste, y: SoloTaste) => {
+    const { affinity, vetoed } = jointGenreAffinity(x.affinity, y.affinity, o.affinity, {
+      ownCounts: opts.vetoOverride ? o.genreCounts : undefined,
+      statedHated: [...own.statedHated, ...a.statedHated, ...b.statedHated],
+    }, w.own);
+    const partnerVec = blendOrNull(x.vector, 0.5, y.vector, 0.5);
+    const vector = o.vector && partnerVec && w.own < 1 && w.own > 0
+      ? blendVectors(o.vector, w.own, partnerVec, partnerShare)
+      : w.own >= 1 ? o.vector ?? partnerVec : w.own <= 0 ? partnerVec : o.vector ?? partnerVec;
+    return { o, x, y, affinity, vetoed, vector };
+  };
+  const base = build(own, a, b);
+  const perMedia = new Map<string, ReturnType<typeof build>>();
+  const tasteFor = (t: EvalTitle): ReturnType<typeof build> => {
+    const m = t.media_type;
+    if (!own.byMedia?.[m] && !a.byMedia?.[m] && !b.byMedia?.[m]) return base;
+    let hit = perMedia.get(m);
+    if (!hit) {
+      const pick = (s: SoloTaste) => s.byMedia?.[m] ?? s;
+      hit = build(pick(own), pick(a), pick(b));
+      perMedia.set(m, hit);
+    }
+    return hit;
+  };
+  const vetoed = base.vetoed;
 
-  const distance = (t: EvalTitle): number | null => (jointVec ? cosineDistance(jointVec, t.vec) : null);
+  const distance = (t: EvalTitle): number | null => {
+    const v = tasteFor(t).vector;
+    return v ? cosineDistance(v, t.vec) : null;
+  };
   const knn = opts.knn
-    ? (t: EvalTitle) => blendedNeighbourDistance([
-      { neighbours: own, weight: w.own },
-      { neighbours: a, weight: partnerShare / 2 },
-      { neighbours: b, weight: partnerShare / 2 },
-    ], t.vec)
+    ? (t: EvalTitle) => {
+      const j = tasteFor(t);
+      return blendedNeighbourDistance([
+        { neighbours: j.o, weight: w.own },
+        { neighbours: j.x, weight: partnerShare / 2 },
+        { neighbours: j.y, weight: partnerShare / 2 },
+      ], t.vec);
+    }
     : null;
   const affinityOf = (t: EvalTitle, genres: string[]): number => {
+    const j = tasteFor(t);
     if (opts.learned) {
-      const parts = [own, a, b].map(s => (s.learned ? s.learned.predict(t) : 0));
+      const parts = [j.o, j.x, j.y].map(s => (s.learned ? s.learned.predict(t) : 0));
       return w.own * parts[0] + (partnerShare / 2) * (parts[1] + parts[2]);
     }
     if (genres.length === 0) return 0;
-    return genres.reduce((s, g) => s + (affinity[g] ?? 0), 0) / genres.length;
+    return genres.reduce((s, g) => s + (j.affinity[g] ?? 0), 0) / genres.length;
   };
   return rankBatch(batch, distance, knn, affinityOf, vetoed, opts);
 }
