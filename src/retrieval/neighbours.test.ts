@@ -5,6 +5,8 @@ import { runMigrations } from '../db/migrate.js';
 import { upsertTitle } from '../db/repos/titles.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
+import { putCachedEmbedding } from '../db/repos/embeddingCache.js';
+import { createHash } from 'node:crypto';
 import { NEIGHBOUR_K, neighbourDistance, blendedNeighbourDistance, loadTasteNeighbours, unitVec } from './neighbours.js';
 
 const SEL = { likedMin: 4, dislikedMax: 2, oneStar: 1, twoStar: 0.5, dismissed: 0.3 };
@@ -65,6 +67,34 @@ describe('loadTasteNeighbours', () => {
       VALUES (?, ?, 'core', 0, '', 'dismissed')`).run(pid, tid);
     dismiss(neutral); // rated 3★: the rating wins, so no negative
     dismiss(dismissedOnly);
+
+    const n = loadTasteNeighbours(db, pid, SEL);
+    expect(n.liked).toHaveLength(1);
+    expect(n.negatives.map(x => x.weight).sort()).toEqual([0.3, 1]);
+  });
+
+  it('uses the cached embedding for a title with no stored embedding, rated or dismissed', () => {
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    runMigrations(db);
+    upsertProfile(db, { name: 'P', media_weighting: 0.5, is_derived: 0, config: '{}' });
+    const pid = (db.prepare('SELECT id FROM profiles').get() as { id: number }).id;
+    const title = (n: number, synopsis: string) => {
+      upsertTitle(db, {
+        tmdb_id: n, media_type: 'movie', title: `t${n}`, year: 2015, genres: '[]', keywords: '[]', cast: '[]',
+        synopsis, poster_path: null, embedding: null, updated_at: '',
+      });
+      const hash = createHash('sha256').update(`t${n} — ${synopsis}`).digest('hex');
+      putCachedEmbedding(db, hash, Buffer.from(new Float32Array([n, 1]).buffer));
+      return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(n) as { id: number }).id;
+    };
+    const liked = title(1, 'a');
+    const disliked = title(2, 'b');
+    const dismissed = title(3, 'c');
+    upsertWatchEvent(db, { profile_id: pid, title_id: liked, status: 'watched', rating: 5, watched_at: null });
+    upsertWatchEvent(db, { profile_id: pid, title_id: disliked, status: 'watched', rating: 1, watched_at: null });
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, state)
+      VALUES (?, ?, 'core', 0, '', 'dismissed')`).run(pid, dismissed);
 
     const n = loadTasteNeighbours(db, pid, SEL);
     expect(n.liked).toHaveLength(1);

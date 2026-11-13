@@ -94,8 +94,10 @@ interface EventRow {
  * The liked and disliked titles of a profile, chosen and weighted exactly as
  * refreshTasteVector chooses them (liked ≥ likedMin; disliked ≤ dislikedMax, 1★
  * stronger than 2★; "Not interested" milder still; a rating outranks a dismissal).
- * A rating with a note uses the note-aware embedding when it is cached, else the
- * title's own embedding.
+ * Vectors are resolved the way refreshTasteVector resolves them, from the database
+ * only: a title with no note uses its stored embedding; a note, or a title with no
+ * stored embedding, uses the cached embedding of "title — synopsis[ — note]". A note
+ * whose embedding is not cached falls back to the stored embedding.
  */
 export function loadTasteNeighbours(
   db: InstanceType<typeof Database>,
@@ -108,12 +110,11 @@ export function loadTasteNeighbours(
     WHERE we.profile_id = ? AND we.rating IS NOT NULL
   `).all(profileId) as EventRow[];
   const cache = db.prepare('SELECT vec FROM embedding_cache WHERE text_hash = ?');
-  const vecFor = (r: EventRow): Float32Array | null => {
-    if (r.note) {
-      const text = [r.title, r.synopsis, r.note].filter(Boolean).join(' — ');
-      const hit = cache.get(createHash('sha256').update(text).digest('hex')) as { vec: Buffer } | undefined;
-      if (hit) return unitVec(hit.vec);
-    }
+  const vecFor = (r: Omit<EventRow, 'rating'>): Float32Array | null => {
+    if (!r.note && r.embedding) return unitVec(r.embedding);
+    const text = [r.title, r.synopsis, r.note].filter(Boolean).join(' — ');
+    const hit = cache.get(createHash('sha256').update(text).digest('hex')) as { vec: Buffer } | undefined;
+    if (hit) return unitVec(hit.vec);
     return r.embedding ? unitVec(r.embedding) : null;
   };
 
@@ -130,14 +131,16 @@ export function loadTasteNeighbours(
     else out.negatives.push({ weight: rating <= 1.5 ? w.oneStar : w.twoStar, vec });
   }
   const dismissed = db.prepare(`
-    SELECT DISTINCT r.title_id, t.embedding
+    SELECT DISTINCT r.title_id, t.title, t.synopsis, t.embedding
     FROM recommendations r JOIN titles t ON t.id = r.title_id
     WHERE r.profile_id = ? AND r.state = 'dismissed'
-  `).all(profileId) as Array<{ title_id: number; embedding: Buffer | null }>;
+  `).all(profileId) as Array<{ title_id: number; title: string; synopsis: string | null; embedding: Buffer | null }>;
   for (const d of dismissed) {
-    if (seen.has(d.title_id) || !d.embedding) continue;
+    if (seen.has(d.title_id)) continue;
+    const vec = vecFor({ ...d, note: null });
+    if (!vec) continue;
     seen.add(d.title_id);
-    out.negatives.push({ weight: w.dismissed, vec: unitVec(d.embedding) });
+    out.negatives.push({ weight: w.dismissed, vec });
   }
   return out;
 }
