@@ -19,6 +19,7 @@ import { resolveRtUrl } from '../rt/resolve.js';
 import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
 import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
+import { tasteChartForProfile } from '../retrieval/tasteChart.js';
 
 /** How long a pending pick waits before Rotten Tomatoes is tried for it again. */
 const RT_RETRY_SECONDS = 30 * 24 * 60 * 60;
@@ -70,6 +71,15 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   api.get('/profiles', (c) => {
     const profiles = getAllProfiles(db);
     return c.json(profiles);
+  });
+
+  // Per-profile taste chart (radar): genre spokes chosen from the household's ratings. DB-only.
+  api.get('/taste-chart/:profileId', (c) => {
+    const id = Number(c.req.param('profileId'));
+    if (!Number.isInteger(id)) return c.json({ error: 'Invalid profileId' }, 400);
+    const chart = tasteChartForProfile(db, id);
+    if (!chart) return c.json({ error: 'Profile not found' }, 404);
+    return c.json(chart);
   });
 
   // Catalogue size readout for the header — total titles + movie/series split.

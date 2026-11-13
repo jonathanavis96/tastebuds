@@ -1,4 +1,4 @@
-import type { Profile, Recommendation, WatchEvent, DismissReason } from './types.js';
+import type { Profile, Recommendation, WatchEvent, DismissReason, TasteChart } from './types.js';
 
 const BASE = '/api';
 
@@ -47,6 +47,12 @@ export interface Calibration {
 export async function getCalibration(profileId: number): Promise<Calibration> {
   const res = await fetch(`${BASE}/calibration/${profileId}`);
   if (!res.ok) throw new Error(`getCalibration failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getTasteChart(profileId: number): Promise<TasteChart> {
+  const res = await fetch(`${BASE}/taste-chart/${profileId}`);
+  if (!res.ok) throw new Error(`getTasteChart failed: ${res.status}`);
   return res.json();
 }
 

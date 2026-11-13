@@ -85,3 +85,18 @@ export const DISMISS_REASON_TILES: Array<{ key: DismissReason; label: string }> 
   { key: 'cast_vibe', label: 'Cast/vibe' },
   { key: 'not_in_mood', label: 'Not in the mood' },
 ];
+
+/** One shape on the taste chart: stars above/below this profile's usual rating, per genre spoke. */
+export interface TasteSeries {
+  profileId: number;
+  label: string;
+  kind: 'person' | 'together';
+  lifts: Array<number | null>;
+  counts: number[];
+  total: number;
+}
+
+export interface TasteChart {
+  axes: string[];
+  series: TasteSeries[];
+}

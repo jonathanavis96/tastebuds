@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "seed": "tsx src/seed/seedProfiles.ts",
     "harvest": "tsx src/harvest/harvest.ts",
-    "backfill:meta": "tsx src/harvest/backfillMetaCli.ts"
+    "backfill:meta": "tsx src/harvest/backfillMetaCli.ts",
+    "eval:taste": "tsx src/eval/tasteEval.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.6",
