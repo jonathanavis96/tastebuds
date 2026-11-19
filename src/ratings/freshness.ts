@@ -72,7 +72,7 @@ async function refreshRt(
 export async function ensureFreshRatings(
   db: InstanceType<typeof Database>,
   titleIds: number[],
-  config: Pick<Config, 'dbPath' | 'omdbApiKey'>,
+  config: Pick<Config, 'dbPath'>,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   if (titleIds.length === 0) return;

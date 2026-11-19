@@ -161,3 +161,21 @@ describe('refreshRtScores', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(35);
   });
 });
+
+describe('refreshRtScores order among titles never tried', () => {
+  it('reads the newest titles first', async () => {
+    const db = createTestDb();
+    insertTitle(db, 1, 'Older Show', 2012, { url: 'https://www.rottentomatoes.com/tv/older_show' });
+    insertTitle(db, 2, 'Newer Show', 2026, { url: 'https://www.rottentomatoes.com/tv/newer_show' });
+    const asked: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      asked.push(String(url));
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    await refreshRtScores(db, { cap: 1, fetchImpl, pauseMs: 0 });
+
+    expect(asked).toEqual(['https://www.rottentomatoes.com/tv/newer_show']);
+  });
+});
+
