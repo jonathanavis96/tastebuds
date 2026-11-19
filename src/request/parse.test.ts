@@ -217,6 +217,8 @@ describe('year windows', () => {
     ['classic westerns', null, null, 'any'],
     ['best horror of all time', null, null, 'any'],
     ['old movies', null, null, 'any'],
+    ['scary sci-fi thriller, any year', null, null, 'any'],
+    ['thrillers from any era', null, null, 'any'],
     ['this year', 2026, 2026, 'stated'],
     ['last year', 2025, 2025, 'stated'],
     ['the latest comedies', 2025, null, 'recent'],

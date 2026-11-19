@@ -275,7 +275,10 @@ const GOOD_RATING_WORDS = [
 const HIDDEN_GEM_WORDS = ['hidden gem', 'underrated', 'lesser known', 'under the radar', 'overlooked'];
 const NEW_WORDS = ['new', 'newest', 'latest', 'just released', 'brand new', 'new release', 'newly released'];
 const RECENT_WORDS = ['recent', 'recently', 'recently released'];
-const ANY_YEAR_WORDS = ['classic', 'old', 'older', 'oldie', 'vintage', 'retro', 'of all time', 'all time', 'old school'];
+const ANY_YEAR_WORDS = [
+  'classic', 'old', 'older', 'oldie', 'vintage', 'retro', 'of all time', 'all time', 'old school',
+  'any year', 'any era', 'any decade', 'any age', 'all years', 'all eras', 'from any year', 'from any era',
+];
 
 export type Entry =
   | ({ kind: 'genre' } & GenreWord)
