@@ -76,6 +76,23 @@ describe('refineRulesWithModel', () => {
     expect(rules.must[0].terms).toEqual(expect.arrayContaining(['time loop', 'chess', 'grandmaster']));
   });
 
+  it('does not repeat a subject the parser already named', async () => {
+    const spawn = answering({
+      ...EMPTY,
+      subjects: [{ label: 'medical', terms: ['medical', 'clinic'] }, { label: 'chess', terms: ['chess'] }],
+    });
+    const { rules } = await refine('medical dramas about chess', spawn);
+    expect(rules.must.map((c) => c.label)).toEqual(['Medical, chess', 'Drama']);
+    expect(rules.must[0].terms).toEqual(expect.arrayContaining(['hospital', 'clinic', 'chess']));
+  });
+
+  it('does not turn a genre word inside a reference into a genre rule', async () => {
+    const spawn = answering({ ...EMPTY, corrections: { genres: ['Drama'] } });
+    const { rules } = await refine('the drama type of movie, about chess', spawn);
+    expect(rules.similarTo).toEqual(['the drama']);
+    expect(rules.must).toEqual([]);
+  });
+
   it('adds exclusions and references the request names', async () => {
     const spawn = answering({
       subjects: [],

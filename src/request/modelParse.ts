@@ -169,8 +169,12 @@ function addSubjects(rules: RequestRules, subjects: RuleClause[]): void {
   if (subjects.length === 0) return;
   const at = rules.must.findIndex((c) => c.genres.length === 0);
   const existing = at >= 0 ? rules.must[at] : null;
+  const labels = existing ? existing.label.split(', ') : [];
+  for (const s of subjects) {
+    if (!labels.some((l) => l.toLowerCase() === s.label.toLowerCase())) labels.push(s.label);
+  }
   const merged: RuleClause = {
-    label: [existing?.label, ...subjects.map((s) => s.label)].filter(Boolean).join(', '),
+    label: labels.join(', '),
     genres: [],
     terms: [...new Set([...(existing?.terms ?? []), ...subjects.flatMap((s) => s.terms)])],
   };
@@ -205,6 +209,12 @@ function applyCorrections(rules: RequestRules, base: RequestRules, c: Record<str
   if (base.language === null && typeof c.language === 'string' && /^[a-z]{2}$/.test(c.language)) rules.language = c.language;
   const named = new Set([...rules.must, ...rules.mustNot].flatMap((cl) => cl.genres));
   const genres = Array.isArray(c.genres) ? c.genres : [];
-  const added = [...new Set(genres)].filter((g): g is CanonGenre => CANON_GENRES.includes(g as CanonGenre) && !named.has(g as CanonGenre));
+  const added = [...new Set(genres)].filter((g): g is CanonGenre =>
+    CANON_GENRES.includes(g as CanonGenre) && !named.has(g as CanonGenre) && !insideReference(g as CanonGenre, base));
   for (const g of added.slice(0, Math.max(0, genreRoom))) rules.must.push({ label: g, genres: [g], terms: [] });
+}
+
+/** "the drama type of movie" names a title; its genre word is not a genre rule. */
+function insideReference(genre: CanonGenre, base: RequestRules): boolean {
+  return base.similarTo.some((ref) => ref.toLowerCase().includes(genre.toLowerCase()));
 }
