@@ -5,7 +5,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
 import { getAllProfiles, patchProfileConfig } from '../db/repos/profiles.js';
-import { updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
+import { archivePendingBeyond, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
 import { upsertWatchEvent, getWatchEvents, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
 import { getTitleById, countTitles } from '../db/repos/titles.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
@@ -155,6 +155,14 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Hide any title the profile has ENGAGED with — watched OR on the watchlist.
     // A watched title is done; a watchlisted title is already chosen. Neither should
     // remain in Picks. (Was watched-only before, so watchlist items leaked through.)
+    return c.json(feedFor(db, config, profileId));
+  });
+
+  // "Clear list": every pick leaves Picks (kept as 'shown', see archivePendingBeyond).
+  api.post('/recommendations/:profileId/clear', (c) => {
+    const profileId = parseInt(c.req.param('profileId'));
+    if (isNaN(profileId)) return c.json({ error: 'Invalid profileId' }, 400);
+    archivePendingBeyond(db, profileId, 0);
     return c.json(feedFor(db, config, profileId));
   });
 

@@ -156,7 +156,7 @@ describe('generatePicks for a request', () => {
     expect(out.feed.recs[0].tags).toEqual(['Thriller']);
   });
 
-  it('stores nothing and keeps the older picks when nothing matches, but returns an empty feed with the summary', async () => {
+  it('stores nothing and keeps the older picks when nothing matches, heading the list with what was asked', async () => {
     const db = setupDb();
     const kept = seed(db, 'Earlier Pick');
     upsertRecommendation(db, { profile_id: 1, title_id: kept, category: 'Top pick', score: 0.1, why_blurb: 'w', request_text: null, state: 'pending' });
@@ -164,10 +164,15 @@ describe('generatePicks for a request', () => {
 
     const out = await generatePicks(db, config, { profileId: 1, request: 'Western 2025' }, deps({ spawnFn: spawn }));
 
-    expect(out.ok && out.feed).toEqual({
-      recs: [],
-      request: expect.objectContaining({ text: 'Western 2025', matched: 0, note: expect.stringContaining('Nothing in the library matches') }),
-    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const summary = expect.objectContaining({ text: 'Western 2025', matched: 0, note: expect.stringContaining('Nothing in the library matches') });
+    expect(out.feed.request).toEqual(summary);
+    expect(out.feed.sections).toEqual([
+      { text: 'Western 2025', summary, recIds: [] },
+      { text: null, summary: null, recIds: [expect.any(Number)] },
+    ]);
+    expect(out.feed.recs.map(r => r.title)).toEqual(['Earlier Pick']);
     expect(stored(db).map(r => r.title)).toEqual(['Earlier Pick']);
     expect(curationCalls()).toBe(0);
   });
@@ -300,55 +305,58 @@ describe('generatePicks for a request', () => {
     expect(out.ok && out.feed.request?.understood).toContain('Series');
   });
 
-  describe('asked again while its picks are still in the feed', () => {
-    const ask = (db: InstanceType<typeof Database>) =>
-      generatePicks(db, config, { profileId: 1, request: 'Thriller new 2025', mediaType: 'movie' }, deps());
+  describe('the list grows', () => {
+    const ask = (db: InstanceType<typeof Database>, request = 'Thriller new 2025') =>
+      generatePicks(db, config, { profileId: 1, request, mediaType: 'movie' }, deps());
 
-    it('shows the same titles again when nothing else matches, not an empty list', async () => {
-      const db = setupDb();
-      for (let i = 0; i < 6; i++) seed(db, `Thriller ${i}`);
-
-      await ask(db);
-      const first = stored(db);
-      const out = await ask(db);
-
-      const second = stored(db);
-      expect(second.map(r => r.title).sort()).toEqual(first.map(r => r.title).sort());
-      expect(second).toHaveLength(6);
-      // Stored again with the new batch, not left as the old rows.
-      expect(Math.min(...second.map(r => r.id))).toBeGreaterThan(Math.max(...first.map(r => r.id)));
-      expect(out.ok && out.feed.recs).toHaveLength(6);
-      expect(out.ok && out.feed.request).toMatchObject({ matched: 6 });
-    });
-
-    it('shows only new titles while enough of them match', async () => {
+    it('asked again, adds the next new titles below the earlier ones', async () => {
       const db = setupDb();
       for (let i = 0; i < 24; i++) seed(db, `Thriller ${i}`);
 
-      await ask(db);
-      const first = new Set(stored(db).map(r => r.title));
-      const out = await ask(db);
+      const first = await ask(db);
+      const second = await ask(db);
 
-      const second = stored(db).map(r => r.title);
-      expect(second).toHaveLength(10);
-      expect(second.filter(t => first.has(t))).toEqual([]);
-      expect(out.ok && out.feed.request).toMatchObject({ matched: 24 });
+      if (!first.ok || !second.ok) throw new Error('generate failed');
+      const firstIds = first.feed.sections[0].recIds;
+      expect(firstIds).toHaveLength(10);
+      expect(second.feed.sections).toHaveLength(1);
+      const ids = second.feed.sections[0].recIds;
+      expect(ids).toHaveLength(20);
+      expect(ids.slice(0, 10)).toEqual(firstIds);
+      expect(new Set(stored(db).map(r => r.title)).size).toBe(20);
+      expect(second.feed.request).toMatchObject({ matched: 24, note: null });
     });
 
-    it('keeps every new title and fills the rest with the best of those already shown', async () => {
+    it('asked again with every match already listed, says so instead of "nothing matches"', async () => {
       const db = setupDb();
-      for (let i = 0; i < 14; i++) seed(db, `Thriller ${i}`);
-      // The model prefers whatever is listed last: it still cannot drop a new title.
-      const { spawn } = fakeClaude({ order: ids => [...ids].reverse() });
+      for (let i = 0; i < 6; i++) seed(db, `Thriller ${i}`);
+      await ask(db);
+      const before = stored(db).map(r => r.id);
+      const { spawn, curationCalls } = fakeClaude();
+
+      const out = await generatePicks(db, config, { profileId: 1, request: 'Thriller new 2025', mediaType: 'movie' }, deps({ spawnFn: spawn }));
+
+      expect(stored(db).map(r => r.id)).toEqual(before);
+      expect(curationCalls()).toBe(0);
+      expect(out.ok && out.feed.request).toMatchObject({
+        matched: 6,
+        note: 'All 6 titles that match this are already in your list. Asking for a wider year range, fewer genres or themes, or both films and series would show more.',
+      });
+      expect(out.ok && out.feed.sections[0].recIds).toHaveLength(6);
+    });
+
+    it('puts a different request on top and keeps the earlier picks below it', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 12; i++) seed(db, `Thriller ${i}`);
+      for (let i = 0; i < 12; i++) seed(db, `Comedy ${i}`, { genres: '["Comedy"]' });
 
       await ask(db);
-      const first = new Set(stored(db).map(r => r.title));
-      await generatePicks(db, config, { profileId: 1, request: 'Thriller new 2025', mediaType: 'movie' }, deps({ spawnFn: spawn }));
+      const out = await ask(db, 'comedy');
 
-      const second = stored(db).map(r => r.title);
-      expect(second).toHaveLength(10);
-      expect(second.filter(t => !first.has(t))).toHaveLength(4);
-      expect(new Set(second).size).toBe(10);
+      if (!out.ok) throw new Error('generate failed');
+      expect(out.feed.sections.map(s => s.text)).toEqual(['comedy', 'Thriller new 2025']);
+      expect(out.feed.recs.slice(0, 10).every(r => String(r.title).startsWith('Comedy'))).toBe(true);
+      expect(out.feed.recs.slice(10).every(r => String(r.title).startsWith('Thriller'))).toBe(true);
     });
   });
 });

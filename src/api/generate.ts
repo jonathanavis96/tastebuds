@@ -8,7 +8,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 import { getProfile } from '../db/repos/profiles.js';
-import { clearPendingForTitles, clearPendingRecommendations, getRecommendations, upsertRecommendation } from '../db/repos/recommendations.js';
+import { archivePendingBeyond, getRecommendations, upsertRecommendation } from '../db/repos/recommendations.js';
 import { getEngagedTitleIds } from '../db/repos/watchEvents.js';
 import { getTitleById } from '../db/repos/titles.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
@@ -26,7 +26,6 @@ import {
 import { titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import {
   FULL_SET,
-  MAX_OLDER_PICKS,
   findReferenceTitles,
   olderRoom,
   requestSlate,
@@ -45,8 +44,14 @@ import { titleObeys } from '../request/enforce.js';
 import type { RequestRules, RequestSummary } from '../request/rules.js';
 import { engagementMemberIds, feedFor, hardFiltersFor, soloProfileIds, type FeedResponse } from './feed.js';
 
-/** Below this many matching titles, TMDB is asked for more before picking. */
+/** Below this many matching titles not yet in the list, TMDB is asked for more before picking. */
 export const DISCOVERY_THRESHOLD = 30;
+
+/**
+ * The most picks a Picks list holds. Each generate adds to the list; past this,
+ * the oldest leave it, so the page stays quick to load and scroll.
+ */
+export const PICKS_LIST_LIMIT = 60;
 
 export interface GenerateBody {
   profileId?: unknown;
@@ -79,15 +84,14 @@ interface Context {
   hardFilters: HardFilters;
   /** The profile's own IMDb setting, when it has one. */
   minImdbRating: number | undefined;
-  /** Pending, dismissed and engaged titles: left out of a call without a request. */
+  /** Titles already in the list, dismissed or engaged: never picked again. */
   excludeTitleIds: number[];
-  /** Dismissed and engaged titles: no request brings them back. */
+  /** Dismissed and engaged titles, which do not count as matching a request. */
   neverTitleIds: number[];
-  /** Titles of the pending picks, which a request offers again only when too few others match. */
+  /** Titles already in the list: they count as matching a request but are not offered again. */
   pendingTitleIds: Set<number>;
   /** Highest pending id before this call: rows after it are this call's picks. */
   lastOldId: number;
-  hadPending: boolean;
   deps: GenerateDeps;
 }
 
@@ -114,7 +118,7 @@ export async function generatePicks(
   const request = body.request?.trim();
   if (request && body.surprise !== true) return { ok: true, feed: await generateForRequest(ctx, request) };
   await generateFromPool(ctx, body);
-  return { ok: true, feed: { recs: feedFor(db, config, profileId).recs, request: null } };
+  return { ok: true, feed: feedFor(db, config, profileId) };
 }
 
 function buildContext(db: Database, config: Config, profile: ProfileRow, body: GenerateBody, deps: GenerateDeps): Context {
@@ -161,7 +165,6 @@ function buildContext(db: Database, config: Config, profile: ProfileRow, body: G
     mediaType: body.mediaType === 'movie' || body.mediaType === 'tv' ? body.mediaType : undefined,
     hardFilters: hardFiltersFor(db, config, memberIds),
     lastOldId: existingPending.reduce((m, r) => Math.max(m, r.id), 0),
-    hadPending: existingPending.length > 0,
   };
 }
 
@@ -181,16 +184,12 @@ function takeBatch(ctx: Context): number[] {
 }
 
 /**
- * A fresh generate replaces the profile's pending set. The old rows go only once
- * this call has written at least one new pick (they were excluded from the
- * candidates, so no new pick collides with one), so a failed or empty generate
- * never leaves Picks empty. Shown/dismissed recs and watch history are untouched,
- * and so is a pending pick the profile has watched, rated or watchlisted (its row
- * carries the predicted_rating the calibration widget needs). A generate for
- * films or for series (`mediaType`) replaces only picks of that media type.
+ * A generate adds to the list instead of replacing it, so nothing on the screen
+ * disappears when a request fails or finds nothing new; the list is trimmed to
+ * PICKS_LIST_LIMIT from the oldest end.
  */
-function replaceOldPending(ctx: Context, fresh: number[], mediaType: 'movie' | 'tv' | undefined = ctx.mediaType): void {
-  if (ctx.hadPending && fresh.length > 0) clearPendingRecommendations(ctx.db, ctx.profile.id, ctx.lastOldId, mediaType);
+function keepListShort(ctx: Context): void {
+  archivePendingBeyond(ctx.db, ctx.profile.id, PICKS_LIST_LIMIT);
 }
 
 // ── Calls without a request ──────────────────────────────────────────────────
@@ -223,8 +222,7 @@ async function generateFromPool(ctx: Context, body: GenerateBody): Promise<void>
   await curateCandidates(pool, profile, ctx.sig, body.request?.trim() || null, config, db, ctx.deps.spawnFn, !ctx.mediaType, surprise);
 
   const fresh = takeBatch(ctx);
-  // Surprise Me appends to the list and never replaces it (see App.svelte).
-  if (!surprise) replaceOldPending(ctx, fresh);
+  keepListShort(ctx);
   await ensureFreshRatings(db, fresh, config, ctx.deps.fetchImpl);
 }
 
@@ -298,29 +296,26 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   }
 
   const olderCount = picks.filter(p => p.older).length;
-  const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, picks.length, olderCount) };
+  const inList = matched - planned.unseen;
+  const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, inList, picks.length, olderCount) };
   const ruleNote = olderCount > 0 ? olderPickNote(rules, matched) : null;
-  db.transaction(() => {
-    // A pending pick that was chosen again leaves its old row for one in this batch.
-    clearPendingForTitles(db, profile.id, picks.map(p => p.title.id));
-    for (const p of picks) {
-      upsertRecommendation(db, {
-        profile_id: profile.id,
-        title_id: p.title.id,
-        category: p.result.category,
-        score: p.title.score,
-        why_blurb: p.result.why,
-        request_text: text,
-        state: 'pending',
-        kind: 'core',
-        predicted_rating: p.result.predictedRating,
-        request_summary: JSON.stringify(summary),
-        rule_note: p.older ? ruleNote : null,
-      });
-    }
-  })();
-  // The media type the request ended up with (its own words, else the app's filter).
-  replaceOldPending(ctx, takeBatch(ctx), rules.mediaType ?? undefined);
+  for (const p of picks) {
+    upsertRecommendation(db, {
+      profile_id: profile.id,
+      title_id: p.title.id,
+      category: p.result.category,
+      score: p.title.score,
+      why_blurb: p.result.why,
+      request_text: text,
+      state: 'pending',
+      kind: 'core',
+      predicted_rating: p.result.predictedRating,
+      request_summary: JSON.stringify(summary),
+      rule_note: p.older ? ruleNote : null,
+    });
+  }
+  takeBatch(ctx);
+  keepListShort(ctx);
 
   const fmt = (name: string) => (stages.ms[name] == null ? '-' : `${stages.ms[name]}ms`);
   console.log(
@@ -330,9 +325,8 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
     `read=${fmt('read')} embed=${fmt('embed')} discovery=${fmt('discovery')} retrieval=${fmt('retrieval')} curation=${fmt('curation')} ratings=${fmt('ratings')}`,
   );
 
-  // Nothing matched: nothing was stored and the older picks stay as they are,
-  // but the feed is empty so the app shows that, not older picks as the answer.
-  return { recs: picks.length > 0 ? feedFor(db, config, profile.id).recs : [], request: summary };
+  // The summary just made heads its section, even when nothing new was added.
+  return feedFor(db, config, profile.id, summary);
 }
 
 function requestBase(ctx: Context): RequestBase {
@@ -362,25 +356,11 @@ function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, reque
     excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id)],
     affinity: base.affinity,
   }, now);
-  const unseen = all.inWindow.filter(t => !ctx.pendingTitleIds.has(t.id)).length;
-  const retrieval: RulesRetrieval = {
-    ...all,
-    inWindow: newTitlesFirst(all.inWindow, ctx.pendingTitleIds, FULL_SET),
-    older: newTitlesFirst(all.older, ctx.pendingTitleIds, MAX_OLDER_PICKS),
-  };
-  return { rules, retrieval, matched: all.inWindow.length, unseen };
-}
-
-/**
- * Asking again shows new titles while there are any: the pending picks are
- * offered only for the places the other titles cannot fill, best ranked first.
- * Leaving them out altogether made a repeated request with few matches answer
- * that nothing matched, with the matching titles on the screen.
- */
-function newTitlesFirst(ranked: CandidateTitle[], pending: Set<number>, places: number): CandidateTitle[] {
-  const unseen = ranked.filter(t => !pending.has(t.id));
-  if (unseen.length >= places) return unseen;
-  return [...unseen, ...ranked.filter(t => pending.has(t.id)).slice(0, places - unseen.length)];
+  // Titles already in the list count as matching, so asking again never answers
+  // "nothing matches" while they are on the screen, but only new ones are offered.
+  const notInList = (list: CandidateTitle[]) => list.filter(t => !ctx.pendingTitleIds.has(t.id));
+  const retrieval: RulesRetrieval = { ...all, inWindow: notInList(all.inWindow), older: notInList(all.older) };
+  return { rules, retrieval, matched: all.inWindow.length, unseen: retrieval.inWindow.length };
 }
 
 /** A language the request names replaces the household's language list for that request. */
@@ -484,17 +464,20 @@ function countPhrase(n: number): string {
 }
 
 /**
- * A plain sentence for the viewer when the list is short or older titles were
- * added, saying what would show more; null for a full list from the window.
+ * A plain sentence for the viewer when the batch is short or older titles were
+ * added, saying what would show more; null for a full batch from the window.
+ * `inList` of the `matched` titles were already in the list before this call.
  */
-function summaryNote(rules: RequestRules, olderRules: RequestRules | null, matched: number, picked: number, older: number): string | null {
+function summaryNote(rules: RequestRules, olderRules: RequestRules | null, matched: number, inList: number, picked: number, older: number): string | null {
   if (older > 0 && olderRules) {
     return `${capitalise(countPhrase(matched))} from ${rules.yearMin} on matched, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
       `${older === 1 ? 'was' : 'were'} added. Say "any year" to see older ones.`;
   }
   if (picked >= FULL_SET) return null;
-  const found = matched === 0 ? 'Nothing in the library matches all of this.'
-    : `${capitalise(countPhrase(Math.min(matched, picked)))} ${Math.min(matched, picked) === 1 ? 'matches' : 'match'} all of this.`;
+  let found: string;
+  if (matched === 0) found = 'Nothing in the library matches all of this.';
+  else if (picked === 0 && inList >= matched) found = `${matched === 1 ? 'The 1 title' : `All ${matched} titles`} that match this ${matched === 1 ? 'is' : 'are'} already in your list.`;
+  else found = `${capitalise(countPhrase(matched))} ${matched === 1 ? 'matches' : 'match'} all of this${inList > 0 ? `, ${inList} of them already in your list` : ''}.`;
   const looser = [
     rules.yearSource === 'default' ? 'any year' : rules.yearSource === 'any' ? null : 'a wider year range',
     rules.must.length > 0 ? 'fewer genres or themes' : null,

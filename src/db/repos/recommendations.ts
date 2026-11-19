@@ -51,50 +51,22 @@ export function getRecommendations(
 }
 
 /**
- * Remove a profile's existing pending recommendations so a fresh generate replaces
- * them (no duplicate accumulation). With `upToId`, only pending rows with
- * id <= upToId go, so picks written after that point survive. With `mediaType`,
- * only pending rows for titles of that media type go, so a Movies-only generate
- * leaves the TV picks alone.
- *
- * A pending pick whose title the profile has watched, rated or watchlisted is kept:
- * rating a pick never moves it out of 'pending', and its row holds the
- * predicted_rating that getCalibration pairs with the actual rating. Such picks are
- * already hidden from Picks, so keeping them does not bring them back into the feed.
+ * Keep a profile's Picks list to its newest `keep` picks: older pending picks
+ * move to 'shown'. The rows stay, so the predicted rating that getCalibration
+ * pairs with an actual rating is never lost, and the title can be picked again
+ * later. `keep` 0 empties the list ("Clear list").
  */
-export function clearPendingRecommendations(
+export function archivePendingBeyond(
   db: InstanceType<typeof Database>,
   profileId: number,
-  upToId?: number,
-  mediaType?: 'movie' | 'tv',
+  keep: number,
 ): void {
-  let sql = "DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending'";
-  const params: Array<number | string> = [profileId];
-  if (upToId !== undefined) {
-    sql += ' AND id <= ?';
-    params.push(upToId);
-  }
-  if (mediaType !== undefined) {
-    sql += ' AND title_id IN (SELECT id FROM titles WHERE media_type = ?)';
-    params.push(mediaType);
-  }
-  sql += ' AND title_id NOT IN (SELECT title_id FROM watch_events WHERE profile_id = ?)';
-  params.push(profileId);
-  db.prepare(sql).run(...params);
-}
-
-/**
- * Remove a profile's pending picks of these titles, so a title that is picked
- * again is stored with its new batch (the insert skips a title that is pending).
- */
-export function clearPendingForTitles(
-  db: InstanceType<typeof Database>,
-  profileId: number,
-  titleIds: number[],
-): void {
-  db.prepare(
-    "DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' AND title_id IN (SELECT value FROM json_each(?))",
-  ).run(profileId, JSON.stringify(titleIds));
+  db.prepare(`
+    UPDATE recommendations SET state = 'shown' WHERE id IN (
+      SELECT id FROM recommendations WHERE profile_id = ? AND state = 'pending'
+      ORDER BY julianday(created_at) DESC, id DESC LIMIT -1 OFFSET ?
+    )
+  `).run(profileId, keep);
 }
 
 export interface Calibration {

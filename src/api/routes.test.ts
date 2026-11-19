@@ -10,6 +10,7 @@ import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
 import { curateCandidates } from '../curation/curate.js';
 import { ensureFreshRatings } from '../ratings/freshness.js';
+import { PICKS_LIST_LIMIT } from './generate.js';
 
 // Module-level mocks: only affect tests that exercise /generate.
 // All other route tests do not call these modules so they are unaffected.
@@ -30,7 +31,11 @@ const mockConfig: Config = {
 const RECENT_YEAR = new Date().getFullYear() - 1;
 
 /** Feed response from GET /recommendations and POST /generate. */
-type Feed = { recs: Array<Record<string, unknown>>; request: unknown };
+type Feed = {
+  recs: Array<Record<string, unknown>>;
+  sections: Array<{ text: string | null; summary: unknown; recIds: number[] }>;
+  request: unknown;
+};
 
 function setupDb() {
   const db = new Database(':memory:');
@@ -90,7 +95,7 @@ describe('GET /api/recommendations/:profileId', () => {
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ recs: [], request: null });
+    expect(await res.json()).toEqual({ recs: [], sections: [], request: null });
   });
 
   it('hides stored picks whose title fails the loosest hard-filter floor, keeps widened-but-legit ones', async () => {
@@ -206,58 +211,72 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
   });
 });
 
-describe('feed response: the request summary stored with the newest pick', () => {
-  function addPick(db: ReturnType<typeof setupDb>, tmdbId: number, createdAt: string, summary: string | null, ruleNote: string | null = null): number {
+describe('feed response: the picks in one section per request', () => {
+  function addPick(db: ReturnType<typeof setupDb>, tmdbId: number, createdAt: string, text: string | null, summary: string | null, ruleNote: string | null = null): number {
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
       VALUES (?, 'movie', ?, ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(tmdbId, `Film ${tmdbId}`, RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, request_summary, rule_note, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'w', null, 'pending', ?, ?, ?)`).run(titleId, summary, ruleNote, createdAt);
-    return titleId;
+    return Number(db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, request_summary, rule_note, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'w', ?, 'pending', ?, ?, ?)`).run(titleId, text, summary, ruleNote, createdAt).lastInsertRowid);
   }
   const older = { text: 'comedy', understood: ['Comedy'], matched: 40, note: null };
   const newer = { text: 'thriller new 2025', understood: ['Thriller', '2025 or newer'], matched: 6, note: 'Only 6 titles match.' };
 
-  it('returns the summary of the newest visible pick once, beside the recs, and each pick\'s rule note', async () => {
+  it('puts the newest request first, gives each section its own summary, and keeps each pick\'s rule note', async () => {
     const db = setupDb();
-    addPick(db, 801, '2026-11-01T10:00:00.000Z', JSON.stringify(older), 'Released 2012: too few recent comedies matched.');
-    addPick(db, 802, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
+    const comedy = addPick(db, 801, '2026-11-01T10:00:00.000Z', 'comedy', JSON.stringify(older), 'Released 2012: too few recent comedies matched.');
+    const thriller = addPick(db, 802, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
 
     const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
-    expect(feed.request).toEqual(newer);
+    expect(feed.request).toBeNull();
+    expect(feed.sections).toEqual([
+      { text: 'thriller new 2025', summary: newer, recIds: [thriller] },
+      { text: 'comedy', summary: older, recIds: [comedy] },
+    ]);
     expect(feed.recs.map(r => r.tmdb_id)).toEqual([802, 801]);
     expect(feed.recs.map(r => r.rule_note)).toEqual([null, 'Released 2012: too few recent comedies matched.']);
     for (const r of feed.recs) expect(r).not.toHaveProperty('request_summary');
   });
 
-  it('skips a newest pick that is no longer visible', async () => {
+  it('adds a repeat of a request below its earlier picks, and moves that section to the top', async () => {
     const db = setupDb();
-    addPick(db, 811, '2026-11-01T10:00:00.000Z', JSON.stringify(older));
-    const watched = addPick(db, 812, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
-    upsertWatchEvent(db, { profile_id: 1, title_id: watched, status: 'watched', rating: 4, watched_at: null });
+    const first = addPick(db, 841, '2026-11-01T10:00:00.000Z', 'Thriller new 2025', JSON.stringify(newer));
+    const comedy = addPick(db, 842, '2026-11-02T10:00:00.000Z', 'comedy', JSON.stringify(older));
+    const again = addPick(db, 843, '2026-11-03T10:00:00.000Z', ' thriller NEW 2025', JSON.stringify({ ...newer, note: 'Asked again.' }));
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
 
     const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
-    expect(feed.request).toEqual(older);
+    expect(feed.sections.map(s => s.recIds)).toEqual([[first, again], [comedy]]);
+    expect(feed.sections[0].summary).toMatchObject({ note: 'Asked again.' });
   });
 
-  it('returns a null request when the newest pick has no summary or an unreadable one', async () => {
+  it('leaves out a pick that is no longer visible, and a section with nothing left', async () => {
+    const db = setupDb();
+    const comedy = addPick(db, 811, '2026-11-01T10:00:00.000Z', 'comedy', JSON.stringify(older));
+    const watched = addPick(db, 812, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
+    const watchedTitle = (db.prepare('SELECT title_id FROM recommendations WHERE id = ?').get(watched) as { title_id: number }).title_id;
+    upsertWatchEvent(db, { profile_id: 1, title_id: watchedTitle, status: 'watched', rating: 4, watched_at: null });
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.sections).toEqual([{ text: 'comedy', summary: older, recIds: [comedy] }]);
+  });
+
+  it('gives a section a null summary when its picks have none or an unreadable one', async () => {
     for (const stored of [null, '{not json', JSON.stringify({ text: 'x' }), 'null']) {
       const db = setupDb();
-      addPick(db, 821, '2026-11-01T10:00:00.000Z', JSON.stringify(older));
-      addPick(db, 822, '2026-11-02T10:00:00.000Z', stored);
+      addPick(db, 821, '2026-11-02T10:00:00.000Z', 'x', stored);
       const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
       const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
-      expect(feed.request).toBeNull();
-      expect(feed.recs).toHaveLength(2);
+      expect(feed.sections).toEqual([{ text: 'x', summary: null, recIds: [expect.any(Number)] }]);
     }
   });
 
   it('POST /generate without a request returns the same feed shape, with no request summary', async () => {
     vi.mocked(curateCandidates).mockResolvedValue([] as any);
     const db = setupDb();
-    addPick(db, 831, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
+    addPick(db, 831, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
 
     const res = await app.request('/api/generate', {
@@ -269,6 +288,7 @@ describe('feed response: the request summary stored with the newest pick', () =>
     const feed = await res.json() as Feed;
     expect(feed.request).toBeNull();
     expect(feed.recs.map(r => r.tmdb_id)).toEqual([831]);
+    expect(feed.sections).toHaveLength(1);
   });
 
   it('POST /generate reports a missing or unknown profile', async () => {
@@ -681,12 +701,11 @@ describe('POST /generate — ratings', () => {
   });
 });
 
-// ─── POST /generate — a fresh generate replaces the pending set ─────────────
-// Pending recs used to accumulate forever across /generate calls. A generate that
-// produces new picks now clears the profile's older pending rows; every other
-// row (shown/dismissed recs, other profiles' pending, watch history) is untouched.
+// ─── POST /generate — the Picks list grows, up to PICKS_LIST_LIMIT ──────────
+// Each generate adds its picks; past the limit the oldest move to 'shown', so
+// the list never piles up the way it once did, and no row is deleted.
 
-describe('POST /generate — replaces the profile\'s pending recommendations', () => {
+describe('POST /generate — adds to the profile\'s Picks list', () => {
   function addTitle(db: InstanceType<typeof Database>, tmdbId: number): number {
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
       VALUES (?, 'movie', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 1700000000)`).run(tmdbId, `T${tmdbId}`);
@@ -706,18 +725,11 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     vi.resetAllMocks();
   });
 
-  it('removes the old pending rows and keeps rated, watchlisted, shown and dismissed rows', async () => {
+  it('adds the new picks and keeps every older one', async () => {
     const db = setupDb();
-    const [oldA, oldB, shownT, dismissedT, ratedT, listedT, otherT, freshT] =
-      [701, 702, 703, 704, 705, 706, 707, 708].map(id => addTitle(db, id));
+    const [oldA, oldB, otherT, freshT] = [701, 702, 707, 708].map(id => addTitle(db, id));
     const oldIds = [addRec(db, 1, oldA, 'pending'), addRec(db, 1, oldB, 'pending')];
-    const keptIds = [
-      addRec(db, 1, shownT, 'shown'),
-      addRec(db, 1, dismissedT, 'dismissed'),
-      addRec(db, 2, otherT, 'pending'),          // another profile's pending set
-    ];
-    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 4, watched_at: new Date().toISOString() });
-    upsertWatchEvent(db, { profile_id: 1, title_id: listedT, status: 'watchlist', rating: null, watched_at: null });
+    const otherId = addRec(db, 2, otherT, 'pending');
 
     // The curator writes one fresh pick, as the real one does via upsertRecommendation.
     vi.mocked(curateCandidates).mockImplementation(async () => {
@@ -726,32 +738,22 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     });
 
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
-    const res = await generate(app);
-    expect(res.status).toBe(200);
+    expect((await generate(app)).status).toBe(200);
 
-    const remaining = (db.prepare('SELECT id FROM recommendations').all() as Array<{ id: number }>).map(r => r.id);
-    for (const id of oldIds) expect(remaining).not.toContain(id);
-    for (const id of keptIds) expect(remaining).toContain(id);
-    const pending = db.prepare("SELECT title_id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ title_id: number }>;
-    expect(pending.map(r => r.title_id)).toEqual([freshT]);
-
-    const events = db.prepare('SELECT title_id, status, rating FROM watch_events WHERE profile_id = 1 ORDER BY title_id').all();
-    expect(events).toEqual([
-      { title_id: ratedT, status: 'watched', rating: 4 },
-      { title_id: listedT, status: 'watchlist', rating: null },
-    ]);
+    const pending = (db.prepare("SELECT id, title_id FROM recommendations WHERE state = 'pending' ORDER BY id").all() as Array<{ id: number; title_id: number }>);
+    expect(pending.map(r => r.id)).toEqual(expect.arrayContaining([...oldIds, otherId]));
+    expect(pending.map(r => r.title_id)).toContain(freshT);
   });
 
-  it('keeps a rated or watched pick and its predicted rating, so calibration survives a fresh generate', async () => {
+  it('keeps the list to its limit: the oldest picks move to shown, with their predicted ratings', async () => {
     const db = setupDb();
-    const [ratedT, watchedT, untouchedT, freshT] = [721, 722, 723, 724].map(id => addTitle(db, id));
-    upsertRecommendation(db, { profile_id: 1, title_id: ratedT, category: 'Top pick', score: 0.9, why_blurb: 'r', request_text: null, state: 'pending', predicted_rating: 4 });
-    upsertRecommendation(db, { profile_id: 1, title_id: watchedT, category: 'Top pick', score: 0.9, why_blurb: 'w', request_text: null, state: 'pending', predicted_rating: 3 });
-    const untouchedId = addRec(db, 1, untouchedT, 'pending');
-    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 2, watched_at: new Date().toISOString() });
-    upsertWatchEvent(db, { profile_id: 1, title_id: watchedT, status: 'watched', rating: null, watched_at: new Date().toISOString() });
-    expect(getCalibration(db, 1).count).toBe(1);
-
+    const ids: number[] = [];
+    for (let i = 0; i < PICKS_LIST_LIMIT; i++) {
+      const t = addTitle(db, 900 + i);
+      ids.push(Number(db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, predicted_rating, created_at)
+        VALUES (1, ?, 'Top pick', 0.9, 'w', null, 'pending', 4, ?)`).run(t, `2026-10-01T10:${String(i).padStart(2, '0')}:00.000Z`).lastInsertRowid));
+    }
+    const freshT = addTitle(db, 990);
     vi.mocked(curateCandidates).mockImplementation(async () => {
       upsertRecommendation(db, { profile_id: 1, title_id: freshT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
       return [] as any;
@@ -760,14 +762,30 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
     expect((await generate(app)).status).toBe(200);
 
-    const rows = db.prepare('SELECT id, title_id, predicted_rating FROM recommendations WHERE profile_id = 1 ORDER BY title_id').all() as Array<{ id: number; title_id: number; predicted_rating: number | null }>;
-    expect(rows.map(r => r.id)).not.toContain(untouchedId);
-    expect(rows.map(r => [r.title_id, r.predicted_rating])).toEqual([
-      [ratedT, 4],
-      [watchedT, 3],
-      [freshT, null],
-    ]);
-    expect(getCalibration(db, 1)).toEqual({ count: 1, avgError: 2, withinOne: 0 });
+    const state = (id: number) => (db.prepare('SELECT state, predicted_rating FROM recommendations WHERE id = ?').get(id));
+    expect(db.prepare("SELECT COUNT(*) AS n FROM recommendations WHERE profile_id = 1 AND state = 'pending'").get()).toEqual({ n: PICKS_LIST_LIMIT });
+    expect(state(ids[0])).toEqual({ state: 'shown', predicted_rating: 4 });
+    expect(state(ids[1])).toEqual({ state: 'pending', predicted_rating: 4 });
+  });
+
+  it('Clear list empties Picks for that profile only, keeping the rows and their predicted ratings', async () => {
+    const db = setupDb();
+    const [mineT, ratedT, otherT] = [761, 762, 763].map(id => addTitle(db, id));
+    addRec(db, 1, mineT, 'pending');
+    upsertRecommendation(db, { profile_id: 1, title_id: ratedT, category: 'Top pick', score: 0.9, why_blurb: 'r', request_text: null, state: 'pending', predicted_rating: 4 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 2, watched_at: new Date().toISOString() });
+    const otherId = addRec(db, 2, otherT, 'pending');
+    const before = getCalibration(db, 1);
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const res = await app.request('/api/recommendations/1/clear', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ recs: [], sections: [], request: null });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM recommendations WHERE profile_id = 1 AND state = 'shown'").get()).toEqual({ n: 2 });
+    expect(db.prepare('SELECT state FROM recommendations WHERE id = ?').get(otherId)).toEqual({ state: 'pending' });
+    expect(getCalibration(db, 1)).toEqual(before);
+    expect((await app.request('/api/recommendations/x/clear', { method: 'POST' })).status).toBe(400);
   });
 
   it('Surprise Me appends: the old pending rows stay alongside the new picks', async () => {
@@ -790,33 +808,6 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     const pending = db.prepare("SELECT id, title_id FROM recommendations WHERE profile_id = 1 AND state = 'pending' ORDER BY id").all() as Array<{ id: number; title_id: number }>;
     expect(pending.map(r => r.id)).toContain(oldId);
     expect(pending.map(r => r.title_id)).toEqual([oldT, freshT]);
-  });
-
-  it('a media-filtered generate replaces only picks of that media type', async () => {
-    const db = setupDb();
-    const [oldMovieT, freshMovieT] = [741, 742].map(id => addTitle(db, id));
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
-      VALUES (743, 'tv', 'Show', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 45, 7.0, 1000, 'Returning Series', 1700000000)`).run();
-    const oldTvT = (db.prepare("SELECT id FROM titles WHERE tmdb_id = 743 AND media_type = 'tv'").get() as { id: number }).id;
-    const oldMovieId = addRec(db, 1, oldMovieT, 'pending');
-    const oldTvId = addRec(db, 1, oldTvT, 'pending');
-    vi.mocked(curateCandidates).mockImplementation(async () => {
-      upsertRecommendation(db, { profile_id: 1, title_id: freshMovieT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
-      return [] as any;
-    });
-
-    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
-    const res = await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1, mediaType: 'movie' }),
-    });
-    expect(res.status).toBe(200);
-
-    const pending = (db.prepare("SELECT id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ id: number }>).map(r => r.id);
-    expect(pending).not.toContain(oldMovieId);
-    expect(pending).toContain(oldTvId);
-    expect(pending).toHaveLength(2);
   });
 
   it('an overlapping generate for the same profile does not count the other call\'s picks as its own', async () => {

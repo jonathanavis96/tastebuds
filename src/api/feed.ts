@@ -14,8 +14,19 @@ import { defaultHardFilters, floorFilters, languagesFromHistory, titleIdsPassing
 import { titleTags } from '../request/tags.js';
 import type { RequestSummary } from '../request/rules.js';
 
+/** One request's picks in the list, or (text null) the picks made without one. */
+export interface FeedSection {
+  text: string | null;
+  /** How the request was read, from its newest pick or the call just made. */
+  summary: RequestSummary | null;
+  recIds: number[];
+}
+
 export interface FeedResponse {
+  /** Every visible pick, in the order of `sections`. */
   recs: ReturnType<typeof enrichRec>[];
+  sections: FeedSection[];
+  /** The request this call just ran (POST /generate with a request); null otherwise. */
   request: RequestSummary | null;
 }
 
@@ -116,20 +127,56 @@ function visibleRecs(db: Database, config: Config, profileId: number, recs: Reco
   return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
 }
 
-/**
- * Newest batch first, as getRecommendations returns them, and within a batch
- * (one created_at, see takeBatch in generate.ts) in the order they were stored.
- */
-function inBatchOrder(recs: RecommendationRow[]): RecommendationRow[] {
-  const batchRank = new Map<string, number>();
-  recs.forEach((r, i) => { if (!batchRank.has(r.created_at)) batchRank.set(r.created_at, i); });
-  return [...recs].sort((a, b) => batchRank.get(a.created_at)! - batchRank.get(b.created_at)! || a.id - b.id);
+/** The same request typed again ("Thriller new 2025 " or "thriller NEW 2025") is the same section. */
+function sectionKey(text: string | null): string {
+  return text == null ? '' : text.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-/** The visible pending picks, newest batch first, and the stored summary of the request behind the newest of them. */
-export function feedFor(db: Database, config: Config, profileId: number): FeedResponse {
-  const visible = inBatchOrder(visibleRecs(db, config, profileId, getRecommendations(db, profileId, 'pending')));
-  return { recs: visible.map(r => enrichRec(db, r)), request: parseRequestSummary(visible[0]?.request_summary ?? null) };
+/**
+ * Picks grouped by the request that made them. The section with the newest
+ * batch comes first, so a new request, or the same one asked again, is at the
+ * top; within a section the older batches come first and each batch keeps the
+ * order it was stored in (rank order), so asking again adds below. `recs` is
+ * newest batch first, as getRecommendations returns them.
+ */
+function sectionsOf(recs: RecommendationRow[]): Array<{ text: string | null; rows: RecommendationRow[] }> {
+  const batchAge = new Map<string, number>();
+  recs.forEach((r, i) => { if (!batchAge.has(r.created_at)) batchAge.set(r.created_at, i); });
+  const sections = new Map<string, { text: string | null; rows: RecommendationRow[] }>();
+  for (const r of recs) {
+    const key = sectionKey(r.request_text);
+    if (!sections.has(key)) sections.set(key, { text: r.request_text?.trim() ?? null, rows: [] });
+    sections.get(key)!.rows.push(r);
+  }
+  for (const s of sections.values()) {
+    s.rows.sort((a, b) => batchAge.get(b.created_at)! - batchAge.get(a.created_at)! || a.id - b.id);
+  }
+  return [...sections.values()];
+}
+
+/**
+ * The visible pending picks in sections. `fresh` is the request just run: its
+ * summary heads its section, which comes first, even when the call added
+ * nothing (every match was already in the list, or nothing matched).
+ */
+export function feedFor(db: Database, config: Config, profileId: number, fresh: RequestSummary | null = null): FeedResponse {
+  const grouped = sectionsOf(visibleRecs(db, config, profileId, getRecommendations(db, profileId, 'pending')));
+  const sections = grouped.map(({ text, rows }) => ({
+    text,
+    // Within a section the newest batch is last; its summary is the current one.
+    summary: parseRequestSummary([...rows].reverse().find(r => r.request_summary != null)?.request_summary ?? null),
+    rows,
+  }));
+  if (fresh) {
+    const i = sections.findIndex(s => sectionKey(s.text) === sectionKey(fresh.text));
+    const own = i === -1 ? { text: fresh.text.trim(), summary: fresh, rows: [] } : { ...sections.splice(i, 1)[0], summary: fresh };
+    sections.unshift(own);
+  }
+  return {
+    recs: sections.flatMap(s => s.rows.map(r => enrichRec(db, r))),
+    sections: sections.map(s => ({ text: s.text, summary: s.summary, recIds: s.rows.map(r => r.id) })),
+    request: fresh,
+  };
 }
 
 /** The RequestSummary stored with a pick, or null when there is none or it does not parse. */
