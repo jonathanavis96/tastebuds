@@ -74,6 +74,61 @@ describe('discoverTitles', () => {
   });
 });
 
+describe('discoverTitles query parameters', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const params = () => new URL(String(vi.mocked(fetch).mock.calls[0][0])).searchParams;
+
+  it('sends a film release window, language, exclusions and paging', async () => {
+    await discoverTitles(
+      {
+        mediaType: 'movie', genreIds: [53], releasedFrom: '2025-01-01', releasedTo: '2026-11-19',
+        originalLanguage: 'en', withoutGenreIds: [27, 10749], withoutKeywordIds: [745],
+        sortBy: 'popularity.desc', page: 2, voteCountGte: 50,
+      },
+      mockConfig,
+    );
+    const p = params();
+    expect(p.get('with_genres')).toBe('53');
+    expect(p.get('primary_release_date.gte')).toBe('2025-01-01');
+    expect(p.get('primary_release_date.lte')).toBe('2026-11-19');
+    expect(p.get('with_original_language')).toBe('en');
+    expect(p.get('without_genres')).toBe('27|10749');
+    expect(p.get('without_keywords')).toBe('745');
+    expect(p.get('sort_by')).toBe('popularity.desc');
+    expect(p.get('page')).toBe('2');
+    expect(p.get('vote_count.gte')).toBe('50');
+  });
+
+  it('uses the first-air date for series', async () => {
+    await discoverTitles({ mediaType: 'tv', releasedFrom: '2025-01-01', releasedTo: '2026-11-19' }, mockConfig);
+    const p = params();
+    expect(p.get('first_air_date.gte')).toBe('2025-01-01');
+    expect(p.get('first_air_date.lte')).toBe('2026-11-19');
+    expect(p.has('primary_release_date.gte')).toBe(false);
+  });
+
+  it('joins ids with a comma for all and a pipe for any, URL-encoded', async () => {
+    await discoverTitles(
+      { mediaType: 'movie', genreIds: [53, 27], genreMatch: 'any', keywordIds: [4379, 4565] },
+      mockConfig,
+    );
+    const url = String(vi.mocked(fetch).mock.calls[0][0]);
+    expect(url).toContain('with_genres=53%7C27');
+    expect(url).toContain('with_keywords=4379%2C4565');
+    expect(params().get('with_genres')).toBe('53|27');
+  });
+
+  it('leaves out every parameter that was not given', async () => {
+    await discoverTitles({ mediaType: 'movie', genreIds: [] }, mockConfig);
+    expect([...params().keys()].sort()).toEqual(['api_key', 'page']);
+  });
+});
+
 describe('a stalled TMDB request', () => {
   beforeEach(() => vi.stubGlobal('fetch', vi.fn()));
   afterEach(() => vi.unstubAllGlobals());

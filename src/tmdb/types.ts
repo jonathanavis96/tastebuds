@@ -35,11 +35,27 @@ export interface TmdbTitleDetail extends TmdbTitle {
   status?: string;
 }
 
+/** 'all': a title must carry every id (TMDB comma). 'any': one of them is enough (TMDB pipe). */
+export type IdMatch = 'all' | 'any';
+
 export interface DiscoverOpts {
   mediaType: 'movie' | 'tv';
   genreIds?: number[];
-  /** TMDB keyword ids to pass as with_keywords= (comma-separated). */
+  /** How genreIds combine; 'all' when omitted. TMDB cannot mix the two in one parameter. */
+  genreMatch?: IdMatch;
+  /** TMDB keyword ids to pass as with_keywords=. */
   keywordIds?: number[];
+  /** How keywordIds combine; 'all' when omitted. */
+  keywordMatch?: IdMatch;
+  /** Titles carrying any of these genre ids are left out. */
+  withoutGenreIds?: number[];
+  /** Titles carrying any of these keyword ids are left out. */
+  withoutKeywordIds?: number[];
+  /** Inclusive release (film) or first-air (series) date bounds, YYYY-MM-DD. */
+  releasedFrom?: string;
+  releasedTo?: string;
+  /** ISO 639-1 original language, e.g. 'en'. */
+  originalLanguage?: string;
   page?: number;
   /** TMDB sort_by value, e.g. 'vote_count.desc', 'popularity.desc'. */
   sortBy?: string;

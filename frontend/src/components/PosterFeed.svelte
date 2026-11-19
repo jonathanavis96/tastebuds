@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Recommendation } from '../lib/types.js';
-  import { kindMeta } from '../lib/categories.js';
+  import { badgeLabel, kindMeta } from '../lib/categories.js';
 
   interface Props {
     recommendations?: Recommendation[];
@@ -16,15 +16,14 @@
   function posterUrl(titleId: number): string {
     return `/api/poster/${titleId}`;
   }
+
+  /** A card has room for the type pill and this many genre tags; the modal shows them all. */
+  const MAX_TAGS = 3;
 </script>
 
 <div class="poster-feed">
-  {#if recommendations.length === 0}
-    <p class="empty">No recommendations yet. Tap Generate!</p>
-  {/if}
   {#each recommendations as rec (rec.id)}
     {@const meta = kindMeta(rec)}
-    {@const badgeLabel = (rec.kind ?? 'core') === 'core' ? (rec.category || meta.label) : meta.label}
     {@const dismissed = dismissedIds.includes(rec.id)}
     <button
       class="poster-card"
@@ -40,13 +39,23 @@
         {#if dismissed}
           <span class="badge dismissed-badge">✗ Not interested</span>
         {:else}
-          <span class="badge" style="background:{meta.color};color:{meta.text}">{meta.icon} {badgeLabel}</span>
+          <span class="badge" style="background:{meta.color};color:{meta.text}">{meta.icon} {badgeLabel(rec)}</span>
         {/if}
       </div>
       <div class="poster-info">
         <span class="title">{rec.title ?? 'Unknown'}</span>
-        <span class="year">{rec.year ?? ''}</span>
-        {#if rec.media_type}<span class="pill type">{rec.media_type === 'tv' ? 'Series' : 'Movie'}</span>{/if}
+        <span class="meta">
+          {#if rec.year}<span class="year">{rec.year}</span>{/if}
+          {#if rec.imdb_rating}<span class="score imdb">{`IMDb ${rec.imdb_rating}`}</span>{/if}
+          {#if rec.rt_rating}<span class="score rt">{`🍅 ${rec.rt_rating}`}</span>{/if}
+        </span>
+        {#if rec.media_type || rec.tags?.length}
+          <span class="pills">
+            {#if rec.media_type}<span class="pill type">{rec.media_type === 'tv' ? 'Series' : 'Movie'}</span>{/if}
+            {#each (rec.tags ?? []).slice(0, MAX_TAGS) as tag}<span class="pill">{tag}</span>{/each}
+          </span>
+        {/if}
+        {#if rec.rule_note}<span class="rule-note">{rec.rule_note}</span>{/if}
         <span class="why">{rec.why_blurb}</span>
       </div>
     </button>
@@ -80,7 +89,7 @@
   .poster-card.wildcard { border-color: color-mix(in srgb, var(--kc) 45%, #21294a); }
   .poster-card.adversarial { border-color: color-mix(in srgb, var(--kc) 55%, #21294a); }
   /* "Not interested" — dimmed and desaturated, still tappable to undo. Stays in the
-     grid (no jump) until the next Generate replaces the list. */
+     grid (no jump) until the list next loads. */
   .poster-card.dismissed { border-color: #5a3a44; opacity: 0.55; }
   .poster-card.dismissed:hover { opacity: 0.8; }
   .poster-card.dismissed .poster-img-wrap img { filter: grayscale(0.7); }
@@ -98,10 +107,15 @@
   }
   .poster-info { padding: 0.55rem; display: flex; flex-direction: column; }
   .title { font-weight: 700; font-size: 0.85rem; color: #fff; line-height: 1.2; }
-  .year { font-size: 0.72rem; color: #888; margin-top: 1px; }
-  .pill { font-size: 0.68rem; background: #21213f; color: #b9b9d6; padding: 2px 7px; border-radius: 20px; margin-top: 3px; display: inline-block; }
+  .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.45rem; margin-top: 1px; font-size: 0.72rem; }
+  .year { color: #888; }
+  .score { font-weight: 700; white-space: nowrap; }
+  .score.imdb { color: #f5c518; }
+  .score.rt { color: #fa6e51; }
+  .pills { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+  .pill { font-size: 0.68rem; background: #21213f; color: #b9b9d6; padding: 2px 7px; border-radius: 20px; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pill.type { background: #0f3460; color: #8ec5ff; }
+  .rule-note { font-size: 0.68rem; color: #9a9ab8; margin-top: 4px; line-height: 1.3; }
   .why { font-size: 0.74rem; color: #aab; margin-top: 5px; line-height: 1.35;
          display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .empty { color: #888; text-align: center; padding: 2rem; grid-column: 1 / -1; }
 </style>

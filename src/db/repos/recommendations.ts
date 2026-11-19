@@ -1,22 +1,31 @@
 import type Database from 'better-sqlite3';
 import type { RecommendationRow } from '../types.js';
 
-type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating' | 'dismiss_reason'> & {
+type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating' | 'dismiss_reason' | 'request_summary' | 'rule_note'> & {
   kind?: 'core' | 'wildcard' | 'adversarial';
   predicted_rating?: number | null;
+  request_summary?: string | null;
+  rule_note?: string | null;
 };
 
 export function upsertRecommendation(
   db: InstanceType<typeof Database>,
   rec: UpsertRec,
 ): void {
-  const row = { ...rec, kind: rec.kind ?? 'core', predicted_rating: rec.predicted_rating ?? null, created_at: new Date().toISOString() };
+  const row = {
+    ...rec,
+    kind: rec.kind ?? 'core',
+    predicted_rating: rec.predicted_rating ?? null,
+    request_summary: rec.request_summary ?? null,
+    rule_note: rec.rule_note ?? null,
+    created_at: new Date().toISOString(),
+  };
   // At most one pending rec per (profile_id, title_id) — guarded by the partial
   // unique index (MIGRATE_005). A racing/duplicate pending insert is silently
   // skipped (DO NOTHING) rather than creating a duplicate row or throwing.
   db.prepare(`
-    INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, kind, predicted_rating, created_at)
-    VALUES (@profile_id, @title_id, @category, @score, @why_blurb, @request_text, @state, @kind, @predicted_rating, @created_at)
+    INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, kind, predicted_rating, request_summary, rule_note, created_at)
+    VALUES (@profile_id, @title_id, @category, @score, @why_blurb, @request_text, @state, @kind, @predicted_rating, @request_summary, @rule_note, @created_at)
     ON CONFLICT (profile_id, title_id) WHERE state = 'pending' DO NOTHING
   `).run(row);
 }
@@ -42,36 +51,22 @@ export function getRecommendations(
 }
 
 /**
- * Remove a profile's existing pending recommendations so a fresh generate replaces
- * them (no duplicate accumulation). With `upToId`, only pending rows with
- * id <= upToId go, so picks written after that point survive. With `mediaType`,
- * only pending rows for titles of that media type go, so a Movies-only generate
- * leaves the TV picks alone.
- *
- * A pending pick whose title the profile has watched, rated or watchlisted is kept:
- * rating a pick never moves it out of 'pending', and its row holds the
- * predicted_rating that getCalibration pairs with the actual rating. Such picks are
- * already hidden from Picks, so keeping them does not bring them back into the feed.
+ * Keep a profile's Picks list to its newest `keep` picks: older pending picks
+ * move to 'shown'. The rows stay, so the predicted rating that getCalibration
+ * pairs with an actual rating is never lost, and the title can be picked again
+ * later. `keep` 0 empties the list ("Clear list").
  */
-export function clearPendingRecommendations(
+export function archivePendingBeyond(
   db: InstanceType<typeof Database>,
   profileId: number,
-  upToId?: number,
-  mediaType?: 'movie' | 'tv',
+  keep: number,
 ): void {
-  let sql = "DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending'";
-  const params: Array<number | string> = [profileId];
-  if (upToId !== undefined) {
-    sql += ' AND id <= ?';
-    params.push(upToId);
-  }
-  if (mediaType !== undefined) {
-    sql += ' AND title_id IN (SELECT id FROM titles WHERE media_type = ?)';
-    params.push(mediaType);
-  }
-  sql += ' AND title_id NOT IN (SELECT title_id FROM watch_events WHERE profile_id = ?)';
-  params.push(profileId);
-  db.prepare(sql).run(...params);
+  db.prepare(`
+    UPDATE recommendations SET state = 'shown' WHERE id IN (
+      SELECT id FROM recommendations WHERE profile_id = ? AND state = 'pending'
+      ORDER BY julianday(created_at) DESC, id DESC LIMIT -1 OFFSET ?
+    )
+  `).run(profileId, keep);
 }
 
 export interface Calibration {

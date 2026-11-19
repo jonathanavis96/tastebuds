@@ -48,6 +48,38 @@ export interface Recommendation {
   imdb_rating?: string | null;
   rt_rating?: string | null;
   rt_url?: string | null;
+  imdb_votes?: number | null;
+  /** Canonical genres (the server's titleTags), in place of the raw TMDB genres. */
+  tags?: string[];
+  /** Why this pick bends the request's rules, e.g. an older title when too few recent ones matched. */
+  rule_note?: string | null;
+}
+
+/** What the server read a typed request as, mirrored from src/request/rules.ts. */
+export interface RequestSummary {
+  /** The request as typed. */
+  text: string;
+  /** One short chip per rule, in reading order: ["Thriller", "Films", "2025 or newer"]. */
+  understood: string[];
+  /** How many titles in the library satisfy every rule. */
+  matched: number;
+  note: string | null;
+}
+
+/** One request's picks in the list, or (text null) the picks made without one. */
+export interface FeedSection {
+  text: string | null;
+  summary: RequestSummary | null;
+  recIds: number[];
+}
+
+/** GET /recommendations, POST /generate and Clear list: the picks, in sections, newest request first. */
+export interface FeedResponse {
+  /** Every pick, in the order of `sections`. */
+  recs: Recommendation[];
+  sections: FeedSection[];
+  /** The request just run, on POST /generate with a request; otherwise null. */
+  request: RequestSummary | null;
 }
 
 export interface WatchEvent {

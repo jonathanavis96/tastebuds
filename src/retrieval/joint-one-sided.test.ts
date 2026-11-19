@@ -11,7 +11,7 @@ import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import {
   retrieveJointCandidatePool,
-  retrieveJointRequestCandidates,
+  jointRequestBase,
   retrieveJointCandidates,
 } from './retrieve.js';
 
@@ -42,7 +42,8 @@ function setup(alexVec: Buffer | null, samVec: Buffer | null) {
   return { db, a: ids[0], b: ids[1] };
 }
 
-const embed = async () => Array.from(new Float32Array(oneHot(3).buffer));
+/** Index of the largest component. */
+const argmax = (v: number[]) => v.indexOf(Math.max(...v));
 
 describe('Joint retrieval with one partner missing a taste vector', () => {
   it('pool ranks by the partner who has a vector', async () => {
@@ -51,9 +52,9 @@ describe('Joint retrieval with one partner missing a taste vector', () => {
     expect(pool.onTaste[0]?.title).toBe('F5');
   });
 
-  it('request path and joint candidates also fall back', async () => {
+  it('the request base and joint candidates also fall back', async () => {
     const { db, a, b } = setup(oneHot(2), null);
-    expect((await retrieveJointRequestCandidates(db, a, b, 'x', { mediaType: 'movie' }, cfg, embed)).length).toBeGreaterThan(0);
+    expect(argmax(jointRequestBase(db, a, b, 999).tasteVec!)).toBe(2);
     expect((await retrieveJointCandidates(db, a, b, {}, cfg))[0]?.title).toBe('F2');
   });
 
@@ -61,7 +62,8 @@ describe('Joint retrieval with one partner missing a taste vector', () => {
     const { db, a, b } = setup(null, null);
     const pool = await retrieveJointCandidatePool(db, a, b, {}, cfg);
     expect(pool.onTaste).toEqual([]);
-    expect(await retrieveJointRequestCandidates(db, a, b, 'x', {}, cfg, embed)).toEqual([]);
+    // A request then ranks on the request alone.
+    expect(jointRequestBase(db, a, b, 999).tasteVec).toBeNull();
     expect(await retrieveJointCandidates(db, a, b, {}, cfg)).toEqual([]);
   });
 });

@@ -52,6 +52,11 @@ export function mapTmdbToTitleRow(
     vote_average: detail.vote_average ?? null,
     status: detail.status ?? null,
     meta_checked_at: Math.floor(Date.now() / 1000),
+    imdb_votes: null,
+    imdb_synced_at: null,
+    imdb_genres: null,
+    imdb_id_checked_at: null,
+    rt_verified_at: null,
   };
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildCurationPrompt } from './prompt.js';
 import { curateCandidates, CURATION_TIMEOUT_MS } from './curate.js';
-import type { CandidateTitle } from '../retrieval/retrieve.js';
+import type { CandidateTitle, CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
@@ -33,30 +33,34 @@ const mockCandidates: CandidateTitle[] = [
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
     popularity: null, vote_count: null, rating_checked_at: null, rt_checked_at: null,
     original_language: null, runtime_minutes: null, vote_average: null, status: null, meta_checked_at: null,
+    imdb_votes: null, imdb_synced_at: null, imdb_genres: null, imdb_id_checked_at: null, rt_verified_at: null,
   },
 ];
 
+/** A pool holding only on-taste candidates. */
+const pool = (onTaste: CandidateTitle[]): CandidatePool => ({ onTaste, wildcards: [], adversarial: [] });
+
 describe('buildCurationPrompt', () => {
   it('includes profile name and candidate tmdb_id', () => {
-    const prompt = buildCurationPrompt(mockCandidates, mockProfile, mockSig, null);
+    const prompt = buildCurationPrompt(pool(mockCandidates), mockProfile, mockSig, null);
     expect(prompt).toContain('Alex');
     expect(prompt).toContain('tmdb_id:101');
     expect(prompt).toContain('"Dark"');
   });
 
   it('includes loved and hated genres', () => {
-    const prompt = buildCurationPrompt(mockCandidates, mockProfile, mockSig, null);
+    const prompt = buildCurationPrompt(pool(mockCandidates), mockProfile, mockSig, null);
     expect(prompt).toContain('Drama');
     expect(prompt).toContain('Horror');
   });
 
   it('includes user request when provided', () => {
-    const prompt = buildCurationPrompt(mockCandidates, mockProfile, mockSig, 'something like Severance');
+    const prompt = buildCurationPrompt(pool(mockCandidates), mockProfile, mockSig, 'something like Severance');
     expect(prompt).toContain('something like Severance');
   });
 
   it('omits user request block when null', () => {
-    const prompt = buildCurationPrompt(mockCandidates, mockProfile, mockSig, null);
+    const prompt = buildCurationPrompt(pool(mockCandidates), mockProfile, mockSig, null);
     expect(prompt).not.toContain('User request:');
   });
 
@@ -65,20 +69,20 @@ describe('buildCurationPrompt', () => {
     const candidates: CandidateTitle[] = [{
       ...mockCandidates[0], synopsis: longSynopsis,
     }];
-    const prompt = buildCurationPrompt(candidates, mockProfile, mockSig, null);
+    const prompt = buildCurationPrompt(pool(candidates), mockProfile, mockSig, null);
     // The synopsis in the prompt should be at most 100 chars of 'A's
     expect(prompt).toContain('A'.repeat(100));
     expect(prompt).not.toContain('A'.repeat(101));
   });
 
-  it('caps candidate list at 60 items', () => {
-    const manyCandidates: CandidateTitle[] = Array.from({ length: 70 }, (_, i) => ({
+  it('lists at most 20 on-taste candidates', () => {
+    const manyCandidates: CandidateTitle[] = Array.from({ length: 30 }, (_, i) => ({
       ...mockCandidates[0], id: i + 1, tmdb_id: 100 + i, title: `Film ${i}`,
     }));
-    const prompt = buildCurationPrompt(manyCandidates, mockProfile, mockSig, null);
-    // Item 60 present (index 59, tmdb_id 159), item 61 not present (index 60, tmdb_id 160)
-    expect(prompt).toContain('[tmdb_id:159]');
-    expect(prompt).not.toContain('[tmdb_id:160]');
+    const prompt = buildCurationPrompt(pool(manyCandidates), mockProfile, mockSig, null);
+    // Item 20 present (index 19, tmdb_id 119), item 21 not present (index 20, tmdb_id 120)
+    expect(prompt).toContain('[tmdb_id:119]');
+    expect(prompt).not.toContain('[tmdb_id:120]');
   });
 });
 
@@ -119,20 +123,20 @@ describe('curateCandidates', () => {
     const items = Array.from({ length: 12 }, (_, i) => ({
       tmdb_id: 101, why: `Reason ${i}`, category: 'Top pick',
     }));
-    const claudeOutput = JSON.stringify({ result: JSON.stringify(items) });
+    const claudeOutput = JSON.stringify({ structured_output: { items } });
     const spawnMock = makeSpawnMock(claudeOutput);
 
     const candidates: CandidateTitle[] = Array.from({ length: 12 }, (_, i) => ({
       ...mockCandidates[0], id: i + 1, tmdb_id: 101,
     }));
 
-    const results = await curateCandidates(candidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    const results = await curateCandidates(pool(candidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
     expect(results).toHaveLength(10);
     expect(results[0]).toMatchObject({ tmdbId: 101, why: 'Reason 0', category: 'Top pick' });
   });
 
   it('does not offer the model two candidates it could not tell apart by tmdb_id', async () => {
-    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const claudeOutput = JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } });
     const spawnMock = makeSpawnMock(claudeOutput);
     const run = vi.fn();
     const db = { prepare: vi.fn().mockReturnValue({ run }) } as unknown as Database;
@@ -142,7 +146,7 @@ describe('curateCandidates', () => {
       { ...mockCandidates[0], id: 8, media_type: 'tv', title: 'Lower Ranked Series' },
     ];
 
-    await curateCandidates(candidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    await curateCandidates(pool(candidates), mockProfile, mockSig, null, mockConfig, db, spawnMock);
 
     const prompt = (spawnMock.mock.calls[0][1] as string[])[1];
     expect(prompt).toContain('Better Ranked Film');
@@ -163,7 +167,7 @@ describe('curateCandidates', () => {
       const spawnMock = vi.fn().mockReturnValue(stalledProc(kill));
 
       const outcome = expect(
-        curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+        curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
       ).rejects.toThrow(/timed out/);
       await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS);
       await outcome;
@@ -178,7 +182,7 @@ describe('curateCandidates', () => {
       const spawnMock = vi.fn().mockReturnValue(stalledProc(kill));
 
       const outcome = expect(
-        curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+        curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
       ).rejects.toThrow(/timed out/);
       await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS + 10_000);
       await outcome;
@@ -189,11 +193,11 @@ describe('curateCandidates', () => {
     it('leaves a call that finishes in time alone', async () => {
       vi.useFakeTimers();
       const kill = vi.fn();
-      const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+      const claudeOutput = JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } });
       const spawnMock = makeSpawnMock(claudeOutput);
       spawnMock.mockReturnValue({ ...spawnMock(), kill });
 
-      await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+      await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
       await vi.advanceTimersByTimeAsync(CURATION_TIMEOUT_MS + 10_000);
 
       expect(kill).not.toHaveBeenCalled();
@@ -201,9 +205,9 @@ describe('curateCandidates', () => {
   });
 
   it('spawns claude with stdin ignored so it does not wait ~3s for stdin', async () => {
-    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const claudeOutput = JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } });
     const spawnMock = makeSpawnMock(claudeOutput);
-    await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
     expect(spawnMock).toHaveBeenCalledWith(
       'claude',
       expect.arrayContaining(['-p']),
@@ -212,13 +216,32 @@ describe('curateCandidates', () => {
   });
 
   it('pins the model to Sonnet 5 and requests structured output via --json-schema', async () => {
-    const claudeOutput = JSON.stringify({ result: JSON.stringify([{ tmdb_id: 101, why: 'x', category: 'y' }]) });
+    const claudeOutput = JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } });
     const spawnMock = makeSpawnMock(claudeOutput);
-    await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
     const args = spawnMock.mock.calls[0][1] as string[];
     expect(args[args.indexOf('--model') + 1]).toBe('claude-sonnet-5');
     const schema = JSON.parse(args[args.indexOf('--json-schema') + 1]) as { required: string[] };
     expect(schema.required).toEqual(['items']);
+  });
+
+  it('runs the lean call: its own system prompt, no tools, no MCP servers, no settings', async () => {
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } }));
+    await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('--system-prompt');
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args).toContain('--strict-mcp-config');
+    expect(args).toContain('--no-session-persistence');
+  });
+
+  it('retries once when the first answer is unusable', async () => {
+    const good = makeSpawnMock(JSON.stringify({ structured_output: { items: [{ tmdb_id: 101, why: 'x', category: 'y' }] } }));
+    const bad = makeSpawnMock('not valid json at all');
+    const spawnMock = vi.fn().mockImplementationOnce(bad).mockImplementationOnce(good);
+    const results = await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(results[0]).toMatchObject({ tmdbId: 101 });
   });
 
   it('prefers structured_output (already-parsed, quote-safe) over the result text', async () => {
@@ -227,21 +250,8 @@ describe('curateCandidates', () => {
     const items = [{ tmdb_id: 101, why: 'He said "hi" there', category: 'Top pick' }];
     const claudeOutput = JSON.stringify({ result: 'not json at all', structured_output: { items } });
     const spawnMock = makeSpawnMock(claudeOutput);
-    const results = await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
+    const results = await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
     expect(results[0]).toMatchObject({ tmdbId: 101, why: 'He said "hi" there' });
-  });
-
-  it('parses raw JSON array output (no outer wrapper)', async () => {
-    const items = [{ tmdb_id: 101, why: 'Great drama', category: 'Hidden gem' }];
-    // When outer.result is undefined, inner = stdout itself
-    // But JSON.parse(stdout) would try to parse the array as the outer...
-    // Actually: outer = JSON.parse('[...]') = array; outer.result = undefined; inner = stdout
-    const claudeOutput = JSON.stringify(items);
-    const spawnMock = makeSpawnMock(claudeOutput);
-
-    const results = await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock);
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({ tmdbId: 101, why: 'Great drama', category: 'Hidden gem' });
   });
 
   it('rejects when claude exits with non-zero code', async () => {
@@ -258,16 +268,30 @@ describe('curateCandidates', () => {
     });
 
     await expect(
-      curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+      curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
     ).rejects.toThrow('claude -p exited with code 1');
+  });
+
+  it('does not retry a refused login, and says why it failed', async () => {
+    const envelope = JSON.stringify({ is_error: true, api_error_status: 401, result: 'Failed to authenticate. API Error: 401 Invalid bearer token' });
+    const spawnMock = vi.fn().mockReturnValue({
+      stdout: { on: vi.fn((evt: string, cb: (data: Buffer) => void) => { if (evt === 'data') cb(Buffer.from(envelope)); }) },
+      stderr: { on: vi.fn() },
+      on: vi.fn((evt: string, cb: (code: number) => void) => { if (evt === 'close') cb(1); }),
+    });
+
+    await expect(
+      curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+    ).rejects.toThrow(/could not sign in: Failed to authenticate/);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
   });
 
   it('rejects on invalid JSON output', async () => {
     const spawnMock = makeSpawnMock('not valid json at all');
 
     await expect(
-      curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
-    ).rejects.toThrow('Failed to parse claude -p output');
+      curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+    ).rejects.toThrow('Unusable claude -p output');
   });
 
   it('rejects when spawn errors', async () => {
@@ -280,13 +304,13 @@ describe('curateCandidates', () => {
     });
 
     await expect(
-      curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+      curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
     ).rejects.toThrow('Failed to spawn claude');
   });
 
   it('calls upsertRecommendation for each matched result', async () => {
     const items = [{ tmdb_id: 101, why: 'Excellent', category: 'Top pick' }];
-    const claudeOutput = JSON.stringify({ result: JSON.stringify(items) });
+    const claudeOutput = JSON.stringify({ structured_output: { items } });
     const spawnMock = makeSpawnMock(claudeOutput);
 
     const runMock = vi.fn();
@@ -294,7 +318,7 @@ describe('curateCandidates', () => {
       prepare: vi.fn().mockReturnValue({ run: runMock }),
     } as unknown as Database;
 
-    await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, db, spawnMock);
     expect(runMock).toHaveBeenCalledOnce();
     expect(runMock).toHaveBeenCalledWith(expect.objectContaining({
       profile_id: 1,
@@ -307,7 +331,7 @@ describe('curateCandidates', () => {
 
   it('skips upsert when tmdb_id not found in candidates', async () => {
     const items = [{ tmdb_id: 999, why: 'Unknown', category: 'Top pick' }];
-    const claudeOutput = JSON.stringify({ result: JSON.stringify(items) });
+    const claudeOutput = JSON.stringify({ structured_output: { items } });
     const spawnMock = makeSpawnMock(claudeOutput);
 
     const runMock = vi.fn();
@@ -315,7 +339,7 @@ describe('curateCandidates', () => {
       prepare: vi.fn().mockReturnValue({ run: runMock }),
     } as unknown as Database;
 
-    const results = await curateCandidates(mockCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    const results = await curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, db, spawnMock);
     expect(results).toHaveLength(1);
     expect(runMock).not.toHaveBeenCalled();
   });
@@ -341,12 +365,12 @@ describe('curateCandidates', () => {
     const allCands = [...movieCandidates, ...tvCandidates];
 
     const llmItems = allCands.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items: llmItems } }));
 
     const runMock = vi.fn();
     const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
 
-    const results = await curateCandidates(allCands, mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
+    const results = await curateCandidates(pool(allCands), mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
 
     expect(results).toHaveLength(10);
     expect(runMock).toHaveBeenCalledTimes(10);
@@ -367,12 +391,12 @@ describe('curateCandidates', () => {
     }));
 
     const llmItems = tvCandidates.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items: llmItems } }));
 
     const runMock = vi.fn();
     const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
 
-    const results = await curateCandidates(tvCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock, false);
+    const results = await curateCandidates(pool(tvCandidates), mockProfile, mockSig, null, mockConfig, db, spawnMock, false);
 
     expect(results).toHaveLength(10);
     expect(runMock).toHaveBeenCalledTimes(10);
@@ -397,12 +421,12 @@ describe('curateCandidates', () => {
     const allCands = [...movieCandidates, ...tvCandidates];
 
     const llmItems = allCands.map((c, i) => ({ tmdb_id: c.tmdb_id, why: `Reason ${i}`, category: 'Top pick' }));
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(llmItems) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items: llmItems } }));
 
     const runMock = vi.fn();
     const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
 
-    const results = await curateCandidates(allCands, mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
+    const results = await curateCandidates(pool(allCands), mockProfile, mockSig, null, mockConfig, db, spawnMock, true);
 
     expect(results).toHaveLength(10);
     expect(runMock).toHaveBeenCalledTimes(10);

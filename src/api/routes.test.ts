@@ -8,18 +8,15 @@ import { upsertTitle } from '../db/repos/titles.js';
 import { upsertRecommendation, getCalibration } from '../db/repos/recommendations.js';
 import { createApiRoutes } from '../api/routes.js';
 import type { Config } from '../config.js';
-import { resolveRtUrl } from '../rt/resolve.js';
 import { curateCandidates } from '../curation/curate.js';
-import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
+import { ensureFreshRatings } from '../ratings/freshness.js';
+import { PICKS_LIST_LIMIT } from './generate.js';
 
 // Module-level mocks: only affect tests that exercise /generate.
 // All other route tests do not call these modules so they are unaffected.
-vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
+// The request path has its own tests with injected deps (generate.test.ts).
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
-vi.mock('../omdb/client.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../omdb/client.js')>()),
-  getOmdbRatings: vi.fn(),
-}));
+vi.mock('../ratings/freshness.js', () => ({ ensureFreshRatings: vi.fn() }));
 
 const mockConfig: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:11434',
@@ -28,6 +25,16 @@ const mockConfig: Config = {
   harvestDailyTarget: 500,
   requestLookupDailyBudget: 500,
   harvestMaxPage: 30,
+};
+
+/** A release year inside the feed's rolling recent window, whatever today's date. */
+const RECENT_YEAR = new Date().getFullYear() - 1;
+
+/** Feed response from GET /recommendations and POST /generate. */
+type Feed = {
+  recs: Array<Record<string, unknown>>;
+  sections: Array<{ text: string | null; summary: unknown; recIds: number[] }>;
+  request: unknown;
 };
 
 function setupDb() {
@@ -88,33 +95,36 @@ describe('GET /api/recommendations/:profileId', () => {
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toHaveLength(0);
+    expect(await res.json()).toEqual({ recs: [], sections: [], request: null });
   });
 
   it('hides stored picks whose title fails the loosest hard-filter floor, keeps widened-but-legit ones', async () => {
     const db = setupDb();
     const base = {
       media_type: 'movie' as const, genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's',
-      poster_path: null, embedding: null, updated_at: '2026-01-01', year: 2015, original_language: 'en',
-      runtime_minutes: 100, vote_average: 7.1, vote_count: 2000, status: 'Released', popularity: 20,
+      poster_path: null, embedding: null, updated_at: '2026-01-01', year: RECENT_YEAR, original_language: 'en',
+      runtime_minutes: 100, vote_average: 7.1, vote_count: 2000, status: 'Released', popularity: 20, imdb_rating: '7.2',
     };
-    upsertTitle(db, { ...base, tmdb_id: 1, title: 'Good Recent', year: 2015 });
-    upsertTitle(db, { ...base, tmdb_id: 2, title: 'Widened Eighties', year: 1984 }); // below strict 1995, above floor 1980
-    upsertTitle(db, { ...base, tmdb_id: 3, title: 'Unreleased Zero Votes', year: 2027, vote_count: 0, vote_average: 0, status: 'Post Production' });
+    upsertTitle(db, { ...base, tmdb_id: 1, title: 'Good Recent' });
+    upsertTitle(db, { ...base, tmdb_id: 2, title: 'Widened Lesser Known', runtime_minutes: 45, vote_count: 25 });
+    upsertTitle(db, { ...base, tmdb_id: 3, title: 'Unreleased Zero Votes', year: RECENT_YEAR + 2, vote_count: 0, vote_average: 0, status: 'Post Production' });
     upsertTitle(db, { ...base, tmdb_id: 4, title: 'Foreign Short', original_language: 'zh', runtime_minutes: 14 });
+    // No year floor: a request may ask for an old film, and its pick was checked against that request.
     upsertTitle(db, { ...base, tmdb_id: 5, title: 'Silent Era', year: 1927 });
+    upsertTitle(db, { ...base, tmdb_id: 6, title: 'No IMDb Rating', imdb_rating: null });
+    upsertTitle(db, { ...base, tmdb_id: 7, title: 'Few IMDb Votes' });
+    db.prepare('UPDATE titles SET imdb_votes = ?').run(1500);
+    db.prepare("UPDATE titles SET imdb_votes = 299 WHERE title = 'Few IMDb Votes'").run();
     const idOf = (t: string) => (db.prepare('SELECT id FROM titles WHERE title = ?').get(t) as { id: number }).id;
-    for (const t of ['Good Recent', 'Widened Eighties', 'Unreleased Zero Votes', 'Foreign Short', 'Silent Era']) {
+    for (const t of ['Good Recent', 'Widened Lesser Known', 'Unreleased Zero Votes', 'Foreign Short', 'Silent Era', 'No IMDb Rating', 'Few IMDb Votes']) {
       upsertRecommendation(db, { profile_id: 1, title_id: idOf(t), category: 'Top pick', score: 0.3, why_blurb: 'w', request_text: null, state: 'pending' });
     }
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const titles = ((await res.json()) as Array<{ title: string }>).map(r => r.title).sort();
-    expect(titles).toEqual(['Good Recent', 'Widened Eighties']);
+    const titles = ((await res.json()) as Feed).recs.map(r => r.title as string).sort();
+    expect(titles).toEqual(['Good Recent', 'Silent Era', 'Widened Lesser Known']);
   });
 
   it('returns 400 for invalid profileId', async () => {
@@ -152,8 +162,8 @@ describe('POST /api/watchlist', () => {
 describe('GET /api/recommendations/:profileId — enrichRec includes rating fields', () => {
   it('returns imdb_rating and rt_rating from joined title', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, imdb_rating, rt_rating)
-      VALUES (997, 'movie', 'Rated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt0000001', '8.5', '92%')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, imdb_rating, imdb_votes, rt_rating)
+      VALUES (997, 'movie', 'Rated Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt0000001', '8.5', 41000, '92%')`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great film', null, 'pending', datetime('now'))`).run(titleId);
@@ -163,15 +173,17 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json() as Array<Record<string, unknown>>;
-    expect(body[0].imdb_rating).toBe('8.5');
-    expect(body[0].rt_rating).toBe('92%');
+    const { recs } = await res.json() as Feed;
+    expect(recs[0].imdb_rating).toBe('8.5');
+    expect(recs[0].imdb_votes).toBe(41000);
+    expect(recs[0].rt_rating).toBe('92%');
+    expect(recs[0].rule_note).toBeNull();
   });
 
-  it('returns null imdb_rating and rt_rating when not set', async () => {
+  it('returns a null rt_rating when Rotten Tomatoes has no score', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (996, 'movie', 'Unrated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (996, 'movie', 'No RT Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '6.8', 2500)`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Fine film', null, 'pending', datetime('now'))`).run(titleId);
@@ -180,9 +192,114 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
     const app = new Hono().route('/api', api);
 
     const res = await app.request('/api/recommendations/1');
-    const body = await res.json() as Array<Record<string, unknown>>;
-    expect(body[0].imdb_rating).toBeNull();
-    expect(body[0].rt_rating).toBeNull();
+    const { recs } = await res.json() as Feed;
+    expect(recs[0].imdb_rating).toBe('6.8');
+    expect(recs[0].rt_rating).toBeNull();
+  });
+
+  it('never shows a pick whose title has no IMDb rating', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (995, 'movie', 'Unrated Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run(RECENT_YEAR);
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=995').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Fine film', null, 'pending', datetime('now'))`).run(titleId);
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const { recs } = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(recs).toEqual([]);
+  });
+});
+
+describe('feed response: the picks in one section per request', () => {
+  function addPick(db: ReturnType<typeof setupDb>, tmdbId: number, createdAt: string, text: string | null, summary: string | null, ruleNote: string | null = null): number {
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (?, 'movie', ?, ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(tmdbId, `Film ${tmdbId}`, RECENT_YEAR);
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
+    return Number(db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, request_summary, rule_note, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'w', ?, 'pending', ?, ?, ?)`).run(titleId, text, summary, ruleNote, createdAt).lastInsertRowid);
+  }
+  const older = { text: 'comedy', understood: ['Comedy'], matched: 40, note: null };
+  const newer = { text: 'thriller new 2025', understood: ['Thriller', '2025 or newer'], matched: 6, note: 'Only 6 titles match.' };
+
+  it('puts the newest request first, gives each section its own summary, and keeps each pick\'s rule note', async () => {
+    const db = setupDb();
+    const comedy = addPick(db, 801, '2026-11-01T10:00:00.000Z', 'comedy', JSON.stringify(older), 'Released 2012: too few recent comedies matched.');
+    const thriller = addPick(db, 802, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.request).toBeNull();
+    expect(feed.sections).toEqual([
+      { text: 'thriller new 2025', summary: newer, recIds: [thriller] },
+      { text: 'comedy', summary: older, recIds: [comedy] },
+    ]);
+    expect(feed.recs.map(r => r.tmdb_id)).toEqual([802, 801]);
+    expect(feed.recs.map(r => r.rule_note)).toEqual([null, 'Released 2012: too few recent comedies matched.']);
+    for (const r of feed.recs) expect(r).not.toHaveProperty('request_summary');
+  });
+
+  it('adds a repeat of a request below its earlier picks, and moves that section to the top', async () => {
+    const db = setupDb();
+    const first = addPick(db, 841, '2026-11-01T10:00:00.000Z', 'Thriller new 2025', JSON.stringify(newer));
+    const comedy = addPick(db, 842, '2026-11-02T10:00:00.000Z', 'comedy', JSON.stringify(older));
+    const again = addPick(db, 843, '2026-11-03T10:00:00.000Z', ' thriller NEW 2025', JSON.stringify({ ...newer, note: 'Asked again.' }));
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.sections.map(s => s.recIds)).toEqual([[first, again], [comedy]]);
+    expect(feed.sections[0].summary).toMatchObject({ note: 'Asked again.' });
+  });
+
+  it('leaves out a pick that is no longer visible, and a section with nothing left', async () => {
+    const db = setupDb();
+    const comedy = addPick(db, 811, '2026-11-01T10:00:00.000Z', 'comedy', JSON.stringify(older));
+    const watched = addPick(db, 812, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
+    const watchedTitle = (db.prepare('SELECT title_id FROM recommendations WHERE id = ?').get(watched) as { title_id: number }).title_id;
+    upsertWatchEvent(db, { profile_id: 1, title_id: watchedTitle, status: 'watched', rating: 4, watched_at: null });
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.sections).toEqual([{ text: 'comedy', summary: older, recIds: [comedy] }]);
+  });
+
+  it('gives a section a null summary when its picks have none or an unreadable one', async () => {
+    for (const stored of [null, '{not json', JSON.stringify({ text: 'x' }), 'null']) {
+      const db = setupDb();
+      addPick(db, 821, '2026-11-02T10:00:00.000Z', 'x', stored);
+      const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+      const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+      expect(feed.sections).toEqual([{ text: 'x', summary: null, recIds: [expect.any(Number)] }]);
+    }
+  });
+
+  it('POST /generate without a request returns the same feed shape, with no request summary', async () => {
+    vi.mocked(curateCandidates).mockResolvedValue([] as any);
+    const db = setupDb();
+    addPick(db, 831, '2026-11-02T10:00:00.000Z', 'thriller new 2025', JSON.stringify(newer));
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+    expect(res.status).toBe(200);
+    const feed = await res.json() as Feed;
+    expect(feed.request).toBeNull();
+    expect(feed.recs.map(r => r.tmdb_id)).toEqual([831]);
+    expect(feed.sections).toHaveLength(1);
+  });
+
+  it('POST /generate reports a missing or unknown profile', async () => {
+    const app = new Hono().route('/api', createApiRoutes(setupDb(), mockConfig));
+    const post = (body: unknown) => app.request('/api/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    expect((await post({})).status).toBe(400);
+    const missing = await post({ profileId: 99 });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'Profile not found' });
   });
 });
 
@@ -190,10 +307,10 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
   it('excludes pending recs whose title has been watched by the solo profile', async () => {
     const db = setupDb();
     // Insert two titles
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (991, 'movie', 'Watched Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (992, 'movie', 'Unwatched Film', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (991, 'movie', 'Watched Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (992, 'movie', 'Unwatched Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
     const watchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
     const unwatchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
 
@@ -211,16 +328,16 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json() as Array<Record<string, unknown>>;
+    const { recs } = await res.json() as Feed;
     // Only the unwatched film should appear
-    expect(body).toHaveLength(1);
-    expect(body[0].tmdb_id).toBe(992);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].tmdb_id).toBe(992);
   });
 
   it('excludes watchlist-only titles from Picks (already chosen)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (993, 'movie', 'Watchlist Film', 2022, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (993, 'movie', 'Watchlist Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
 
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
@@ -233,9 +350,9 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
     const app = new Hono().route('/api', api);
 
     const res = await app.request('/api/recommendations/1');
-    const body = await res.json() as Array<Record<string, unknown>>;
+    const { recs } = await res.json() as Feed;
     // A watchlisted title is already chosen — it must not remain in Picks.
-    expect(body).toHaveLength(0);
+    expect(recs).toHaveLength(0);
   });
 });
 
@@ -549,255 +666,46 @@ describe('GET /api/stats', () => {
   });
 });
 
-// ─── POST /generate — rt_url enrichment: unverified result must not be persisted ─
+// ─── POST /generate — ratings of the picks just made are refreshed ──────────
 
-describe('POST /generate — unverified rt_url is not written to DB', () => {
-  beforeEach(() => {
-    // curateCandidates: no-op — avoids spawning claude -p in tests
-    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
-  });
-
+describe('POST /generate — ratings', () => {
   afterEach(() => {
     vi.resetAllMocks();
   });
 
-  it('leaves rt_url null when resolveRtUrl returns verified=false', async () => {
-    // Simulate RT returning a search-URL (unverified) — the DB must stay clean
-    vi.mocked(resolveRtUrl).mockResolvedValue({
-      url: 'https://www.rottentomatoes.com/search?search=Test+Film',
-      score: null,
-      verified: false,
+  it('refreshes the ratings of the new picks only, in one bounded call', async () => {
+    vi.mocked(ensureFreshRatings).mockClear();
+    const db = setupDb();
+    const add = (tmdbId: number) => {
+      db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+        VALUES (?, 'movie', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run(tmdbId, `Film ${tmdbId}`);
+      return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
+    };
+    const [oldT, freshA, freshB] = [861, 862, 863].map(add);
+    upsertRecommendation(db, { profile_id: 1, title_id: oldT, category: 'Top pick', score: 0.9, why_blurb: 'old', request_text: null, state: 'pending' });
+    vi.mocked(curateCandidates).mockImplementation(async () => {
+      for (const t of [freshA, freshB]) {
+        upsertRecommendation(db, { profile_id: 1, title_id: t, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
+      }
+      return [] as any;
     });
 
-    const db = setupDb();
-    // Insert a title with no rt_url, no imdb_id (so OMDb block is skipped)
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (888, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
-    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=888').get() as any).id;
-    // Pre-insert a pending rec so the enrichment loop has something to iterate
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
-
-    const api = createApiRoutes(db, mockConfig);
-    const app = new Hono().route('/api', api);
-
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
     const res = await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1 }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId: 1 }),
     });
     expect(res.status).toBe(200);
 
-    // rt_url must remain null — the unverified search URL must not have been written
-    const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row.rt_url).toBeNull();
-  });
-
-  it('writes rt_url when resolveRtUrl returns verified=true', async () => {
-    vi.mocked(resolveRtUrl).mockResolvedValue({
-      url: 'https://www.rottentomatoes.com/m/test_film',
-      score: '85%',
-      verified: true,
-    });
-
-    const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (889, 'movie', 'Test Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
-    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=889').get() as any).id;
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
-
-    const api = createApiRoutes(db, mockConfig);
-    const app = new Hono().route('/api', api);
-
-    await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1 }),
-    });
-
-    const row = db.prepare('SELECT rt_url FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/test_film');
+    expect(ensureFreshRatings).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ensureFreshRatings).mock.calls[0][1]).toEqual([freshA, freshB]);
   });
 });
 
-// ─── POST /generate — rating_checked_at gates re-enrichment ─────────────────
-// Regression test: a pending rec can sit in Picks across several /generate calls
-// (e.g. a generate that yields no new picks keeps the old set).
-// Once OMDb has been queried once for a title (rating_checked_at stamped), the
-// enrichment loop must not re-query OMDb or re-scrape RT for it forever just
-// because the ratings came back empty — that would drain the OMDb free-tier
-// quota reserved for genuinely new titles on every single /generate call.
+// ─── POST /generate — the Picks list grows, up to PICKS_LIST_LIMIT ──────────
+// Each generate adds its picks; past the limit the oldest move to 'shown', so
+// the list never piles up the way it once did, and no row is deleted.
 
-describe('POST /generate — OMDb/RT enrichment respects rating_checked_at', () => {
-  const omdbConfig: Config = { ...mockConfig, omdbApiKey: 'test-omdb-key' };
-
-  beforeEach(() => {
-    vi.mocked(curateCandidates).mockResolvedValue(undefined as any);
-  });
-
-  afterEach(() => {
-    vi.resetAllMocks();
-  });
-
-  it('does not call OMDb or resolveRtUrl for a title already checked (rating_checked_at set) with no ratings', async () => {
-    const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, rating_checked_at)
-      VALUES (990, 'movie', 'Already Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt9990000', 1700000000)`).run();
-    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=990').get() as any).id;
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
-
-    const api = createApiRoutes(db, omdbConfig);
-    const app = new Hono().route('/api', api);
-
-    const res = await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1 }),
-    });
-    expect(res.status).toBe(200);
-
-    expect(getOmdbRatings).not.toHaveBeenCalled();
-    expect(resolveRtUrl).not.toHaveBeenCalled();
-  });
-
-  it('calls OMDb once for a title never checked before (rating_checked_at null), then stamps it', async () => {
-    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
-    vi.mocked(resolveRtUrl).mockResolvedValue(null);
-
-    const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id)
-      VALUES (991, 'movie', 'Never Checked', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt9910000')`).run();
-    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
-
-    const api = createApiRoutes(db, omdbConfig);
-    const app = new Hono().route('/api', api);
-
-    await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1 }),
-    });
-
-    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
-    const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row.rating_checked_at).not.toBeNull();
-  });
-
-  // A pending pick with the ratings columns left empty, ready for one enrichment pass.
-  function insertPendingTitle(db: ReturnType<typeof setupDb>, tmdbId: number, imdbId: string | null): number {
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id)
-      VALUES (?, 'movie', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', ?)`).run(tmdbId, `Film ${tmdbId}`, imdbId);
-    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as any).id;
-    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
-      VALUES (1, ?, 'Top pick', 0.9, 'Test', null, 'pending', datetime('now'))`).run(titleId);
-    return titleId;
-  }
-
-  async function generate(db: ReturnType<typeof setupDb>, config: Config) {
-    const app = new Hono().route('/api', createApiRoutes(db, config));
-    return app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1 }),
-    });
-  }
-
-  it('does not mark a title checked when OMDb gave no answer, and retries it next time', async () => {
-    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 503', false));
-    const db = setupDb();
-    const titleId = insertPendingTitle(db, 992, 'tt9920000');
-
-    expect((await generate(db, omdbConfig)).status).toBe(200);
-
-    const row = db.prepare('SELECT rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row.rating_checked_at).toBeNull();
-    expect(resolveRtUrl).not.toHaveBeenCalled();
-
-    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.1', rottenTomatoes: '80%' });
-    await generate(db, omdbConfig);
-    const after = db.prepare('SELECT imdb_rating, rt_rating FROM titles WHERE id = ?').get(titleId) as any;
-    expect(after).toEqual({ imdb_rating: '7.1', rt_rating: '80%' });
-  });
-
-  it('scrapes Rotten Tomatoes once for a pick it cannot verify, not on every /generate', async () => {
-    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/search?search=x', score: null, verified: false });
-    const db = setupDb();
-    insertPendingTitle(db, 995, null); // no imdb_id, so OMDb can never stamp it checked
-
-    await generate(db, mockConfig);
-    await generate(db, mockConfig);
-
-    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
-  });
-
-  it('counts a Rotten Tomatoes miss too, when the site has no page at all', async () => {
-    vi.mocked(resolveRtUrl).mockResolvedValue(null);
-    const db = setupDb();
-    insertPendingTitle(db, 996, null);
-
-    await generate(db, mockConfig);
-    await generate(db, mockConfig);
-
-    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
-  });
-
-  it('tries Rotten Tomatoes again once the last attempt is a month old', async () => {
-    vi.mocked(resolveRtUrl).mockResolvedValue(null);
-    const db = setupDb();
-    const titleId = insertPendingTitle(db, 997, null);
-    const longAgo = Math.floor(Date.now() / 1000) - 31 * 24 * 60 * 60;
-    db.prepare('UPDATE titles SET rt_checked_at = ? WHERE id = ?').run(longAgo, titleId);
-
-    await generate(db, mockConfig);
-
-    expect(resolveRtUrl).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps the IMDb rating OMDb just returned when a scraped RT score is saved after it', async () => {
-    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.4', rottenTomatoes: null });
-    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/m/x', score: '91%', verified: true });
-    const db = setupDb();
-    const titleId = insertPendingTitle(db, 998, 'tt9980000');
-
-    await generate(db, omdbConfig);
-
-    const row = db.prepare('SELECT imdb_rating, rt_rating FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row).toEqual({ imdb_rating: '7.4', rt_rating: '91%' });
-  });
-
-  it('does not mark a title OMDb-checked for a scraped RT score, so a key added later still reaches it', async () => {
-    vi.mocked(resolveRtUrl).mockResolvedValue({ url: 'https://www.rottentomatoes.com/m/x', score: '91%', verified: true });
-    const db = setupDb();
-    const titleId = insertPendingTitle(db, 999, 'tt9990001');
-
-    await generate(db, mockConfig); // no OMDb key
-
-    const row = db.prepare('SELECT rt_rating, rating_checked_at FROM titles WHERE id = ?').get(titleId) as any;
-    expect(row).toEqual({ rt_rating: '91%', rating_checked_at: null });
-  });
-
-  it('stops asking OMDb for the rest of the picks once it refuses the key or quota', async () => {
-    vi.mocked(getOmdbRatings).mockRejectedValue(new OmdbUnavailableError('HTTP 401', true));
-    const db = setupDb();
-    insertPendingTitle(db, 993, 'tt9930000');
-    insertPendingTitle(db, 994, 'tt9940000');
-
-    await generate(db, omdbConfig);
-
-    expect(getOmdbRatings).toHaveBeenCalledTimes(1);
-  });
-});
-
-// ─── POST /generate — a fresh generate replaces the pending set ─────────────
-// Pending recs used to accumulate forever across /generate calls. A generate that
-// produces new picks now clears the profile's older pending rows; every other
-// row (shown/dismissed recs, other profiles' pending, watch history) is untouched.
-
-describe('POST /generate — replaces the profile\'s pending recommendations', () => {
+describe('POST /generate — adds to the profile\'s Picks list', () => {
   function addTitle(db: InstanceType<typeof Database>, tmdbId: number): number {
     db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
       VALUES (?, 'movie', ?, 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 1700000000)`).run(tmdbId, `T${tmdbId}`);
@@ -817,18 +725,11 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     vi.resetAllMocks();
   });
 
-  it('removes the old pending rows and keeps rated, watchlisted, shown and dismissed rows', async () => {
+  it('adds the new picks and keeps every older one', async () => {
     const db = setupDb();
-    const [oldA, oldB, shownT, dismissedT, ratedT, listedT, otherT, freshT] =
-      [701, 702, 703, 704, 705, 706, 707, 708].map(id => addTitle(db, id));
+    const [oldA, oldB, otherT, freshT] = [701, 702, 707, 708].map(id => addTitle(db, id));
     const oldIds = [addRec(db, 1, oldA, 'pending'), addRec(db, 1, oldB, 'pending')];
-    const keptIds = [
-      addRec(db, 1, shownT, 'shown'),
-      addRec(db, 1, dismissedT, 'dismissed'),
-      addRec(db, 2, otherT, 'pending'),          // another profile's pending set
-    ];
-    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 4, watched_at: new Date().toISOString() });
-    upsertWatchEvent(db, { profile_id: 1, title_id: listedT, status: 'watchlist', rating: null, watched_at: null });
+    const otherId = addRec(db, 2, otherT, 'pending');
 
     // The curator writes one fresh pick, as the real one does via upsertRecommendation.
     vi.mocked(curateCandidates).mockImplementation(async () => {
@@ -837,32 +738,22 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     });
 
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
-    const res = await generate(app);
-    expect(res.status).toBe(200);
+    expect((await generate(app)).status).toBe(200);
 
-    const remaining = (db.prepare('SELECT id FROM recommendations').all() as Array<{ id: number }>).map(r => r.id);
-    for (const id of oldIds) expect(remaining).not.toContain(id);
-    for (const id of keptIds) expect(remaining).toContain(id);
-    const pending = db.prepare("SELECT title_id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ title_id: number }>;
-    expect(pending.map(r => r.title_id)).toEqual([freshT]);
-
-    const events = db.prepare('SELECT title_id, status, rating FROM watch_events WHERE profile_id = 1 ORDER BY title_id').all();
-    expect(events).toEqual([
-      { title_id: ratedT, status: 'watched', rating: 4 },
-      { title_id: listedT, status: 'watchlist', rating: null },
-    ]);
+    const pending = (db.prepare("SELECT id, title_id FROM recommendations WHERE state = 'pending' ORDER BY id").all() as Array<{ id: number; title_id: number }>);
+    expect(pending.map(r => r.id)).toEqual(expect.arrayContaining([...oldIds, otherId]));
+    expect(pending.map(r => r.title_id)).toContain(freshT);
   });
 
-  it('keeps a rated or watched pick and its predicted rating, so calibration survives a fresh generate', async () => {
+  it('keeps the list to its limit: the oldest picks move to shown, with their predicted ratings', async () => {
     const db = setupDb();
-    const [ratedT, watchedT, untouchedT, freshT] = [721, 722, 723, 724].map(id => addTitle(db, id));
-    upsertRecommendation(db, { profile_id: 1, title_id: ratedT, category: 'Top pick', score: 0.9, why_blurb: 'r', request_text: null, state: 'pending', predicted_rating: 4 });
-    upsertRecommendation(db, { profile_id: 1, title_id: watchedT, category: 'Top pick', score: 0.9, why_blurb: 'w', request_text: null, state: 'pending', predicted_rating: 3 });
-    const untouchedId = addRec(db, 1, untouchedT, 'pending');
-    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 2, watched_at: new Date().toISOString() });
-    upsertWatchEvent(db, { profile_id: 1, title_id: watchedT, status: 'watched', rating: null, watched_at: new Date().toISOString() });
-    expect(getCalibration(db, 1).count).toBe(1);
-
+    const ids: number[] = [];
+    for (let i = 0; i < PICKS_LIST_LIMIT; i++) {
+      const t = addTitle(db, 900 + i);
+      ids.push(Number(db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, predicted_rating, created_at)
+        VALUES (1, ?, 'Top pick', 0.9, 'w', null, 'pending', 4, ?)`).run(t, `2026-10-01T10:${String(i).padStart(2, '0')}:00.000Z`).lastInsertRowid));
+    }
+    const freshT = addTitle(db, 990);
     vi.mocked(curateCandidates).mockImplementation(async () => {
       upsertRecommendation(db, { profile_id: 1, title_id: freshT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
       return [] as any;
@@ -871,14 +762,30 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
     expect((await generate(app)).status).toBe(200);
 
-    const rows = db.prepare('SELECT id, title_id, predicted_rating FROM recommendations WHERE profile_id = 1 ORDER BY title_id').all() as Array<{ id: number; title_id: number; predicted_rating: number | null }>;
-    expect(rows.map(r => r.id)).not.toContain(untouchedId);
-    expect(rows.map(r => [r.title_id, r.predicted_rating])).toEqual([
-      [ratedT, 4],
-      [watchedT, 3],
-      [freshT, null],
-    ]);
-    expect(getCalibration(db, 1)).toEqual({ count: 1, avgError: 2, withinOne: 0 });
+    const state = (id: number) => (db.prepare('SELECT state, predicted_rating FROM recommendations WHERE id = ?').get(id));
+    expect(db.prepare("SELECT COUNT(*) AS n FROM recommendations WHERE profile_id = 1 AND state = 'pending'").get()).toEqual({ n: PICKS_LIST_LIMIT });
+    expect(state(ids[0])).toEqual({ state: 'shown', predicted_rating: 4 });
+    expect(state(ids[1])).toEqual({ state: 'pending', predicted_rating: 4 });
+  });
+
+  it('Clear list empties Picks for that profile only, keeping the rows and their predicted ratings', async () => {
+    const db = setupDb();
+    const [mineT, ratedT, otherT] = [761, 762, 763].map(id => addTitle(db, id));
+    addRec(db, 1, mineT, 'pending');
+    upsertRecommendation(db, { profile_id: 1, title_id: ratedT, category: 'Top pick', score: 0.9, why_blurb: 'r', request_text: null, state: 'pending', predicted_rating: 4 });
+    upsertWatchEvent(db, { profile_id: 1, title_id: ratedT, status: 'watched', rating: 2, watched_at: new Date().toISOString() });
+    const otherId = addRec(db, 2, otherT, 'pending');
+    const before = getCalibration(db, 1);
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const res = await app.request('/api/recommendations/1/clear', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ recs: [], sections: [], request: null });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM recommendations WHERE profile_id = 1 AND state = 'shown'").get()).toEqual({ n: 2 });
+    expect(db.prepare('SELECT state FROM recommendations WHERE id = ?').get(otherId)).toEqual({ state: 'pending' });
+    expect(getCalibration(db, 1)).toEqual(before);
+    expect((await app.request('/api/recommendations/x/clear', { method: 'POST' })).status).toBe(400);
   });
 
   it('Surprise Me appends: the old pending rows stay alongside the new picks', async () => {
@@ -901,33 +808,6 @@ describe('POST /generate — replaces the profile\'s pending recommendations', (
     const pending = db.prepare("SELECT id, title_id FROM recommendations WHERE profile_id = 1 AND state = 'pending' ORDER BY id").all() as Array<{ id: number; title_id: number }>;
     expect(pending.map(r => r.id)).toContain(oldId);
     expect(pending.map(r => r.title_id)).toEqual([oldT, freshT]);
-  });
-
-  it('a media-filtered generate replaces only picks of that media type', async () => {
-    const db = setupDb();
-    const [oldMovieT, freshMovieT] = [741, 742].map(id => addTitle(db, id));
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, rating_checked_at)
-      VALUES (743, 'tv', 'Show', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 45, 7.0, 1000, 'Returning Series', 1700000000)`).run();
-    const oldTvT = (db.prepare("SELECT id FROM titles WHERE tmdb_id = 743 AND media_type = 'tv'").get() as { id: number }).id;
-    const oldMovieId = addRec(db, 1, oldMovieT, 'pending');
-    const oldTvId = addRec(db, 1, oldTvT, 'pending');
-    vi.mocked(curateCandidates).mockImplementation(async () => {
-      upsertRecommendation(db, { profile_id: 1, title_id: freshMovieT, category: 'Top pick', score: 0.8, why_blurb: 'new', request_text: null, state: 'pending' });
-      return [] as any;
-    });
-
-    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
-    const res = await app.request('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profileId: 1, mediaType: 'movie' }),
-    });
-    expect(res.status).toBe(200);
-
-    const pending = (db.prepare("SELECT id FROM recommendations WHERE profile_id = 1 AND state = 'pending'").all() as Array<{ id: number }>).map(r => r.id);
-    expect(pending).not.toContain(oldMovieId);
-    expect(pending).toContain(oldTvId);
-    expect(pending).toHaveLength(2);
   });
 
   it('an overlapping generate for the same profile does not count the other call\'s picks as its own', async () => {

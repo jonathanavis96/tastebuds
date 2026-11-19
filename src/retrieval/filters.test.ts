@@ -6,7 +6,8 @@ import { upsertTitle } from '../db/repos/titles.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
 import {
-  DEFAULT_HARD_FILTERS,
+  defaultHardFilters,
+  floorFilters,
   HARD_FLOOR,
   WIDENING_STEPS,
   hardFilterSql,
@@ -23,16 +24,27 @@ function createTestDb(): InstanceType<typeof Database> {
   return db;
 }
 
+/** Fixed clock for the rolling year floor: recent means 2021 or newer. */
+const NOW = new Date('2026-06-01T00:00:00Z');
+const DEFAULT_HARD_FILTERS = defaultHardFilters(NOW);
+
 /** A title that passes every default filter unless overridden. */
 function goodTitle(overrides: Record<string, unknown> = {}) {
   return {
-    tmdb_id: Math.floor(Math.random() * 1e9), media_type: 'movie' as const, title: 'Good', year: 2015,
+    tmdb_id: Math.floor(Math.random() * 1e9), media_type: 'movie' as const, title: 'Good', year: 2024,
     genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
     embedding: Buffer.from(new Float32Array([1, 0]).buffer), updated_at: '2026-01-01',
     original_language: 'en', runtime_minutes: 110, vote_average: 7.1, vote_count: 2000,
-    status: 'Released', popularity: 20,
+    status: 'Released', popularity: 20, imdb_rating: '7.2', imdb_votes: 5000,
     ...overrides,
   };
+}
+
+/** Insert goodTitle(overrides). upsertTitle does not write imdb_votes, so it is set here. */
+function addTitle(db: InstanceType<typeof Database>, overrides: Record<string, unknown> = {}): void {
+  const t = goodTitle(overrides);
+  upsertTitle(db, t);
+  db.prepare('UPDATE titles SET imdb_votes = ? WHERE tmdb_id = ? AND media_type = ?').run(t.imdb_votes, t.tmdb_id, t.media_type);
 }
 
 function survivors(db: InstanceType<typeof Database>, f: HardFilters): string[] {
@@ -44,100 +56,133 @@ function survivors(db: InstanceType<typeof Database>, f: HardFilters): string[] 
 describe('hardFilterSql', () => {
   it('keeps a title that satisfies every default filter', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Keep' }));
+    addTitle(db, { title: 'Keep' });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Keep']);
   });
 
   it('drops titles below the vote count, rating, year and runtime floors', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Keep' }));
-    upsertTitle(db, goodTitle({ title: 'FewVotes', vote_count: 12 }));
-    upsertTitle(db, goodTitle({ title: 'LowRated', vote_average: 4.9 }));
-    upsertTitle(db, goodTitle({ title: 'TooOld', year: 1975 }));
-    upsertTitle(db, goodTitle({ title: 'Short', runtime_minutes: 14 }));
+    addTitle(db, { title: 'Keep' });
+    addTitle(db, { title: 'FewVotes', vote_count: 12 });
+    addTitle(db, { title: 'LowRated', vote_average: 4.9 });
+    addTitle(db, { title: 'TooOld', year: 2020 });
+    addTitle(db, { title: 'Short', runtime_minutes: 14 });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Keep']);
+  });
+
+  it('requires a real IMDb rating: 6.0 or more, with 1,000 votes for a film and 500 for a series', () => {
+    const db = createTestDb();
+    addTitle(db, { title: 'Keep' });
+    addTitle(db, { title: 'JustRated', imdb_rating: '6.0', imdb_votes: 1000 });
+    addTitle(db, { title: 'LowImdb', imdb_rating: '5.9' });
+    addTitle(db, { title: 'FewImdbVotes', imdb_votes: 999 });
+    addTitle(db, { title: 'NotNumeric', imdb_rating: 'N/A' });
+    addTitle(db, { title: 'SeriesKeep', media_type: 'tv', status: 'Ended', imdb_votes: 500 });
+    addTitle(db, { title: 'SeriesFewVotes', media_type: 'tv', status: 'Ended', imdb_votes: 499 });
+    expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['JustRated', 'Keep', 'SeriesKeep']);
+  });
+
+  it('applies no year limit when minYear is null', () => {
+    const db = createTestDb();
+    addTitle(db, { title: 'Seventies', year: 1975 });
+    addTitle(db, { title: 'NoYear', year: null });
+    expect(survivors(db, { ...DEFAULT_HARD_FILTERS, minYear: null })).toEqual(['NoYear', 'Seventies']);
   });
 
   it('drops non-English and unreleased titles by default', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Keep' }));
-    upsertTitle(db, goodTitle({ title: 'Mandarin', original_language: 'zh' }));
-    upsertTitle(db, goodTitle({ title: 'Unreleased', status: 'Post Production', year: 2027, vote_count: 0 }));
+    addTitle(db, { title: 'Keep' });
+    addTitle(db, { title: 'Mandarin', original_language: 'zh' });
+    addTitle(db, { title: 'Unreleased', status: 'Post Production', year: 2027, vote_count: 0 });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Keep']);
   });
 
   it('treats unknown metadata as failing, not passing', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Keep' }));
-    upsertTitle(db, goodTitle({ title: 'NoVotes', vote_count: null }));
-    upsertTitle(db, goodTitle({ title: 'NoRating', vote_average: null }));
-    upsertTitle(db, goodTitle({ title: 'NoYear', year: null }));
-    upsertTitle(db, goodTitle({ title: 'NoLang', original_language: null }));
-    upsertTitle(db, goodTitle({ title: 'NoStatus', status: null }));
-    upsertTitle(db, goodTitle({ title: 'NoRuntime', runtime_minutes: null }));
+    addTitle(db, { title: 'Keep' });
+    addTitle(db, { title: 'NoVotes', vote_count: null });
+    addTitle(db, { title: 'NoRating', vote_average: null });
+    addTitle(db, { title: 'NoYear', year: null });
+    addTitle(db, { title: 'NoLang', original_language: null });
+    addTitle(db, { title: 'NoStatus', status: null });
+    addTitle(db, { title: 'NoRuntime', runtime_minutes: null });
+    addTitle(db, { title: 'NoImdbRating', imdb_rating: null });
+    addTitle(db, { title: 'NoImdbVotes', imdb_votes: null });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Keep']);
   });
 
   it('exempts series from the runtime floor and uses the TV vote floor', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Series', media_type: 'tv', runtime_minutes: 22, vote_count: 60, status: 'Ended' }));
-    upsertTitle(db, goodTitle({ title: 'Running', media_type: 'tv', runtime_minutes: null, vote_count: 60, status: 'Returning Series' }));
-    upsertTitle(db, goodTitle({ title: 'ObscureSeries', media_type: 'tv', vote_count: 12, status: 'Ended' }));
-    upsertTitle(db, goodTitle({ title: 'Announced', media_type: 'tv', vote_count: 60, status: 'Planned' }));
+    addTitle(db, { title: 'Series', media_type: 'tv', runtime_minutes: 22, vote_count: 60, status: 'Ended' });
+    addTitle(db, { title: 'Running', media_type: 'tv', runtime_minutes: null, vote_count: 60, status: 'Returning Series' });
+    addTitle(db, { title: 'ObscureSeries', media_type: 'tv', vote_count: 12, status: 'Ended' });
+    addTitle(db, { title: 'Announced', media_type: 'tv', vote_count: 60, status: 'Planned' });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Running', 'Series']);
   });
 
   it('accepts additional languages when configured', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Korean', original_language: 'ko' }));
-    upsertTitle(db, goodTitle({ title: 'French', original_language: 'fr' }));
+    addTitle(db, { title: 'Korean', original_language: 'ko' });
+    addTitle(db, { title: 'French', original_language: 'fr' });
     expect(survivors(db, { ...DEFAULT_HARD_FILTERS, languages: ['en', 'ko'] })).toEqual(['Korean']);
   });
 
   it('applies no language filter when the list is empty', () => {
     const db = createTestDb();
-    upsertTitle(db, goodTitle({ title: 'Korean', original_language: 'ko' }));
+    addTitle(db, { title: 'Korean', original_language: 'ko' });
     expect(survivors(db, { ...DEFAULT_HARD_FILTERS, languages: [] })).toEqual(['Korean']);
   });
 });
 
+describe('defaultHardFilters', () => {
+  it('admits the last six calendar years, counting the current one', () => {
+    expect(defaultHardFilters(new Date('2026-01-01T12:00:00Z')).minYear).toBe(2021);
+    expect(defaultHardFilters(new Date('2031-07-01T12:00:00Z')).minYear).toBe(2026);
+  });
+});
+
 describe('WIDENING_STEPS', () => {
-  it('relaxes year first, then runtime, then vote counts, and never below the hard floor', () => {
+  it('moves the year back 10, then 20, then to the floor; then runtime, IMDb votes, TMDB votes', () => {
     let f = DEFAULT_HARD_FILTERS;
     const seen: HardFilters[] = [];
     for (const step of WIDENING_STEPS) {
       f = step.apply(f);
       seen.push(f);
     }
-    // First steps only move the year.
-    expect(seen[0].minYear).toBeLessThan(DEFAULT_HARD_FILTERS.minYear);
-    expect(seen[0].minRuntimeMovie).toBe(DEFAULT_HARD_FILTERS.minRuntimeMovie);
-    expect(seen[0].minVotesMovie).toBe(DEFAULT_HARD_FILTERS.minVotesMovie);
-    // Runtime relaxes only after the year has bottomed out.
-    const firstRuntimeStep = seen.findIndex(s => s.minRuntimeMovie < DEFAULT_HARD_FILTERS.minRuntimeMovie);
-    expect(seen[firstRuntimeStep].minYear).toBe(HARD_FLOOR.minYear);
-    // Votes relax only after runtime has bottomed out.
-    const firstVoteStep = seen.findIndex(s => s.minVotesMovie < DEFAULT_HARD_FILTERS.minVotesMovie);
-    expect(firstVoteStep).toBeGreaterThan(firstRuntimeStep);
-    expect(seen[firstVoteStep].minRuntimeMovie).toBe(HARD_FLOOR.minRuntimeMovie);
-    // Final state sits exactly on the hard floor.
-    const last = seen[seen.length - 1];
-    expect(last.minYear).toBe(HARD_FLOOR.minYear);
-    expect(last.minRuntimeMovie).toBe(HARD_FLOOR.minRuntimeMovie);
-    expect(last.minVotesMovie).toBe(HARD_FLOOR.minVotesMovie);
-    expect(last.minVotesTv).toBe(HARD_FLOOR.minVotesTv);
+    expect(seen.map(s => s.minYear)).toEqual([2011, 2001, 1980, 1980, 1980, 1980]);
+    expect(seen.map(s => s.minRuntimeMovie)).toEqual([60, 60, 60, 40, 40, 40]);
+    expect(seen.map(s => [s.minImdbVotesMovie, s.minImdbVotesTv])).toEqual([
+      [1000, 500], [1000, 500], [1000, 500], [1000, 500], [300, 150], [300, 150],
+    ]);
+    expect(seen.map(s => [s.minVotesMovie, s.minVotesTv])).toEqual([
+      [50, 20], [50, 20], [50, 20], [50, 20], [50, 20], [HARD_FLOOR.minVotesMovie, HARD_FLOOR.minVotesTv],
+    ]);
     // Rating, language and release status are never relaxed.
+    const last = seen[seen.length - 1];
     expect(last.minVoteAverage).toBe(DEFAULT_HARD_FILTERS.minVoteAverage);
+    expect(last.minImdbRating).toBe(DEFAULT_HARD_FILTERS.minImdbRating);
     expect(last.languages).toEqual(DEFAULT_HARD_FILTERS.languages);
     expect(last.releasedOnly).toBe(true);
   });
 
+  it('never moves the year past the hard floor, and leaves no year limit alone', () => {
+    const fromYear = (minYear: number | null) => {
+      let f: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear };
+      const years: Array<number | null> = [];
+      for (const step of WIDENING_STEPS.slice(0, 3)) years.push((f = step.apply(f)).minYear);
+      return years;
+    };
+    expect(fromYear(1995)).toEqual([1985, 1980, 1980]);
+    expect(fromYear(null)).toEqual([null, null, null]);
+  });
+
   it('never tightens a filter that already starts looser than the step target', () => {
-    const loose: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear: 1970, minVotesMovie: 5 };
+    const loose: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear: 1970, minVotesMovie: 5, minImdbVotesTv: 100 };
     let f = loose;
     for (const step of WIDENING_STEPS) f = step.apply(f);
     expect(f.minYear).toBe(1970);
     expect(f.minVotesMovie).toBe(5);
+    expect(f.minImdbVotesTv).toBe(100);
   });
 });
 
@@ -151,14 +196,14 @@ describe('withWidening', () => {
   });
 
   it('widens in order and stops at the first step that meets the minimum', () => {
-    // Only the year floor matters to this fake catalogue: 1985 unlocks enough rows.
+    // Only the year floor matters to this fake catalogue: 2001 unlocks enough rows.
     const res = withWidening(DEFAULT_HARD_FILTERS, 10, f =>
-      f.minYear <= 1985 ? Array.from({ length: 12 }, (_, i) => i) : [1, 2],
+      f.minYear != null && f.minYear <= 2001 ? Array.from({ length: 12 }, (_, i) => i) : [1, 2],
     );
     expect(res.rows).toHaveLength(12);
-    expect(res.filters.minYear).toBe(1985);
+    expect(res.filters.minYear).toBe(2001);
     expect(res.filters.minRuntimeMovie).toBe(DEFAULT_HARD_FILTERS.minRuntimeMovie);
-    expect(res.stepsApplied).toEqual(['year>=1990', 'year>=1985']);
+    expect(res.stepsApplied).toEqual(['year>=2011', 'year>=2001']);
   });
 
   it('exhausts every step and returns the best effort when the catalogue is thin', () => {
@@ -167,12 +212,16 @@ describe('withWidening', () => {
     expect(res.stepsApplied).toHaveLength(WIDENING_STEPS.length);
     expect(res.filters.minYear).toBe(HARD_FLOOR.minYear);
     expect(res.filters.minVotesMovie).toBe(HARD_FLOOR.minVotesMovie);
+    expect(res.filters.minImdbVotesMovie).toBe(HARD_FLOOR.minImdbVotesMovie);
+    expect(res.stepsApplied).toEqual([
+      'year>=2011', 'year>=2001', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150', 'votes>=20/10',
+    ]);
   });
 
   it('names only the steps that actually lowered a filter', () => {
-    // Year already sits at 1985 and movie votes below 100: the first two year
-    // steps and the movie half of 'votes>=100/25' change nothing on their own.
-    const start: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear: 1985, minVotesMovie: 50, minVotesTv: 20 };
+    // Year starts at 1985, so the first step reaches the floor and the next two
+    // change nothing; IMDb votes already sit on their floor.
+    const start: HardFilters = { ...DEFAULT_HARD_FILTERS, minYear: 1985, minImdbVotesMovie: 300, minImdbVotesTv: 150 };
     const res = withWidening(start, 10, () => [1, 2]);
     expect(res.stepsApplied).toEqual([
       `year>=${HARD_FLOOR.minYear}`,
@@ -200,7 +249,7 @@ describe('languagesFromHistory', () => {
     const pid = (db.prepare("SELECT id FROM profiles WHERE name='A'").get() as { id: number }).id;
     const ids: number[] = [];
     const add = (lang: string, rating: number) => {
-      upsertTitle(db, goodTitle({ title: `${lang}${ids.length}`, original_language: lang }));
+      addTitle(db, { title: `${lang}${ids.length}`, original_language: lang });
       const id = (db.prepare('SELECT max(id) AS id FROM titles').get() as { id: number }).id;
       ids.push(id);
       upsertWatchEvent(db, { profile_id: pid, title_id: id, status: 'watched', rating, watched_at: null });
@@ -218,14 +267,28 @@ describe('languagesFromHistory', () => {
   });
 });
 
+describe('floorFilters', () => {
+  it('drops the year limit and lowers votes and runtime to the floor, but keeps the rating gate', () => {
+    const db = createTestDb();
+    addTitle(db, { title: 'Seventies', year: 1975 });
+    addTitle(db, { title: 'Widened', runtime_minutes: 45, vote_count: 25, imdb_votes: 300 });
+    addTitle(db, { title: 'Unrated', imdb_rating: null });
+    addTitle(db, { title: 'LowImdb', imdb_rating: '5.5' });
+    addTitle(db, { title: 'TooFewImdbVotes', imdb_votes: 299 });
+    const floor = floorFilters(DEFAULT_HARD_FILTERS);
+    expect(floor.minYear).toBeNull();
+    expect(survivors(db, floor)).toEqual(['Seventies', 'Widened']);
+  });
+});
+
 describe('titleIdsPassing', () => {
   function seed(db: InstanceType<typeof Database>): { good: number[]; bad: number } {
     const good: number[] = [];
     for (let i = 0; i < 3; i++) {
-      upsertTitle(db, goodTitle({ title: `ok${i}` }));
+      addTitle(db, { title: `ok${i}` });
       good.push((db.prepare('SELECT max(id) AS id FROM titles').get() as { id: number }).id);
     }
-    upsertTitle(db, goodTitle({ title: 'tiny', vote_count: 1 }));
+    addTitle(db, { title: 'tiny', vote_count: 1 });
     const bad = (db.prepare('SELECT max(id) AS id FROM titles').get() as { id: number }).id;
     return { good, bad };
   }

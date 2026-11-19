@@ -104,16 +104,58 @@ describe('backfillRatings', () => {
     expect(row.imdb_rating).toBe('8.5');
   });
 
-  it('skips titles that already have imdb_rating set', async () => {
+  it('asks OMDb about a title the ratings file already rated, for its RT score, and keeps the file rating', async () => {
     const db = createTestDb();
-    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001', imdbRating: '7.0' }); // already rated
-    insertTitle(db, { tmdbId: 2, imdbId: 'tt0000002' });
-    insertTitle(db, { tmdbId: 3, imdbId: 'tt0000003' });
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001', imdbRating: '7.0' });
+    db.prepare('UPDATE titles SET imdb_synced_at = 1700000000 WHERE tmdb_id = 1').run();
 
     const result = await backfillRatings(db, mockConfig, { dailyCap: 10 });
 
-    expect(result.processed).toBe(2);
-    expect(vi.mocked(getOmdbRatings)).not.toHaveBeenCalledWith('tt0000001', expect.anything());
+    expect(result.processed).toBe(1);
+    const row = db.prepare('SELECT imdb_rating, rt_rating FROM titles WHERE tmdb_id = 1').get() as {
+      imdb_rating: string | null;
+      rt_rating: string | null;
+    };
+    expect(row.imdb_rating).toBe('7.0');
+    expect(row.rt_rating).toBe('90%');
+  });
+
+  it('keeps a stored IMDb rating when OMDb has none for a title the file has not covered', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001', imdbRating: '6.4' });
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: null, rottenTomatoes: null });
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const row = db.prepare('SELECT imdb_rating FROM titles WHERE tmdb_id = 1').get() as { imdb_rating: string | null };
+    expect(row.imdb_rating).toBe('6.4');
+  });
+
+  it('keeps a Rotten Tomatoes score read from the title page over OMDb', async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    db.prepare("UPDATE titles SET rt_url = 'https://www.rottentomatoes.com/m/title_1', rt_rating = '64%', rt_verified_at = 1700000000 WHERE tmdb_id = 1").run();
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const row = db.prepare('SELECT rt_rating FROM titles WHERE tmdb_id = 1').get() as { rt_rating: string | null };
+    expect(row.rt_rating).toBe('64%');
+  });
+
+  it("stores IMDb's genres from OMDb when the title has none, and never replaces them", async () => {
+    const db = createTestDb();
+    insertTitle(db, { tmdbId: 1, imdbId: 'tt0000001' });
+    insertTitle(db, { tmdbId: 2, imdbId: 'tt0000002' });
+    db.prepare(`UPDATE titles SET imdb_genres = '["Comedy"]' WHERE tmdb_id = 2`).run();
+    vi.mocked(getOmdbRatings).mockResolvedValue({ imdb: '7.2', rottenTomatoes: '80%', genres: ['Crime', 'Drama', 'Thriller'] });
+
+    await backfillRatings(db, mockConfig, { dailyCap: 10 });
+
+    const genres = db.prepare('SELECT tmdb_id, imdb_genres FROM titles ORDER BY tmdb_id').all();
+    expect(genres).toEqual([
+      { tmdb_id: 1, imdb_genres: '["Crime","Drama","Thriller"]' },
+      { tmdb_id: 2, imdb_genres: '["Comedy"]' },
+    ]);
   });
 
   it('skips titles without imdb_id', async () => {
@@ -145,6 +187,8 @@ describe('backfillRatings', () => {
       .get() as { rt_url: string | null; rt_rating: string | null };
     expect(row.rt_url).toBe('https://www.rottentomatoes.com/m/title_1');
     expect(row.rt_rating).toBe('88%');
+    const verified = db.prepare('SELECT rt_verified_at FROM titles WHERE tmdb_id = 1').get() as { rt_verified_at: number | null };
+    expect(verified.rt_verified_at).not.toBeNull();
   });
 
   it('does NOT persist rt_url when resolveRtUrl returns unverified', async () => {

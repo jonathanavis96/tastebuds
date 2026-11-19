@@ -8,6 +8,7 @@ const fullResponse = {
   Title: 'Fight Club',
   Response: 'True',
   imdbRating: '8.8',
+  Genre: 'Drama, Thriller',
   Ratings: [
     { Source: 'Internet Movie Database', Value: '8.8/10' },
     { Source: 'Rotten Tomatoes', Value: '79%' },
@@ -34,6 +35,21 @@ describe('getOmdbRatings', () => {
       expect.stringContaining('apikey=test-omdb-key'),
       expect.anything(),
     );
+  });
+
+  it("returns IMDb's genres as OMDb lists them", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...fullResponse, Genre: 'Crime, Drama, Thriller' }), { status: 200 }),
+    );
+    const result = await getOmdbRatings('tt0137523', mockConfig);
+    expect(result.genres).toEqual(['Crime', 'Drama', 'Thriller']);
+  });
+
+  it('returns null genres when OMDb has none', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ ...fullResponse, Genre: 'N/A' }), { status: 200 }),
+    );
+    expect((await getOmdbRatings('tt0137523', mockConfig)).genres).toBeNull();
   });
 
   it('returns null for imdb when imdbRating is "N/A"', async () => {

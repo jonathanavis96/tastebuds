@@ -4,25 +4,16 @@ import path from 'node:path';
 import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { ensurePosterCached } from '../posters/posterCache.js';
-import { getAllProfiles, getProfile, patchProfileConfig } from '../db/repos/profiles.js';
-import { getRecommendations, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason, clearPendingRecommendations } from '../db/repos/recommendations.js';
-import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
-import { getTitleById, updateTitleRatings, updateTitleRtUrl, updateTitleRtRating, markTitleRtChecked, countTitles } from '../db/repos/titles.js';
-import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
-import type { RecommendationRow } from '../db/types.js';
-import { DEFAULT_HARD_FILTERS, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
-import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
-import { getTasteSignature } from '../db/repos/tasteSignatures.js';
-import { curateCandidates } from '../curation/curate.js';
+import { getAllProfiles, patchProfileConfig } from '../db/repos/profiles.js';
+import { archivePendingBeyond, updateRecommendationState, getCalibration, getRecommendationById, setDismissReason } from '../db/repos/recommendations.js';
+import { upsertWatchEvent, getWatchEvents, deleteWatchEvent, setWatchNote, getWatchEvent } from '../db/repos/watchEvents.js';
+import { getTitleById, countTitles } from '../db/repos/titles.js';
 import { refreshTasteVector } from '../retrieval/retrieve.js';
-import { resolveRtUrl } from '../rt/resolve.js';
-import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/onDemand.js';
 import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
 import { tasteChartForProfile } from '../retrieval/tasteChart.js';
-
-/** How long a pending pick waits before Rotten Tomatoes is tried for it again. */
-const RT_RETRY_SECONDS = 30 * 24 * 60 * 60;
+import { feedFor } from './feed.js';
+import { generatePicks, type GenerateBody } from './generate.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
@@ -157,79 +148,6 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     }
   };
 
-  // Attach display/detail fields from the joined title (the embedding Buffer is omitted).
-  // Also fold in this profile's own watch_event (if any) so a card opened from Picks
-  // shows its TRUE state — watched/rated/noted — and supports re-rating + note edits.
-  const enrichRec = (rec: { title_id: number; profile_id?: number }) => {
-    const t = getTitleById(db, rec.title_id);
-    const we = rec.profile_id != null ? getWatchEvent(db, rec.profile_id, rec.title_id) : undefined;
-    return {
-      ...rec,
-      we_status: we?.status ?? null,
-      rating: we?.rating ?? null,
-      watched_at: we?.watched_at ?? null,
-      note: we?.note ?? null,
-      title: t?.title ?? null,
-      year: t?.year ?? null,
-      poster_path: t?.poster_path ?? null,
-      synopsis: t?.synopsis ?? null,
-      media_type: t?.media_type ?? null,
-      genres: t?.genres ?? null,
-      cast: t?.cast ?? null,
-      tmdb_id: t?.tmdb_id ?? null,
-      imdb_id: t?.imdb_id ?? null,
-      imdb_rating: t?.imdb_rating ?? null,
-      rt_rating: t?.rt_rating ?? null,
-      rt_url: t?.rt_url ?? null,
-      vote_average: t?.vote_average ?? null,
-      vote_count: t?.vote_count ?? null,
-      original_language: t?.original_language ?? null,
-      runtime_minutes: t?.runtime_minutes ?? null,
-    };
-  };
-
-  // The two solo (non-derived) profiles that a derived/Joint profile blends.
-  // Resolved by `is_derived = 0` rather than by name, so profiles can be renamed
-  // freely without touching code (default seed = "Alex" + "Sam").
-  const soloProfileIds = (): number[] =>
-    getAllProfiles(db).filter(p => !p.is_derived).map(p => p.id);
-
-  const derivedProfileIds = (): number[] =>
-    getAllProfiles(db).filter(p => p.is_derived).map(p => p.id);
-
-  // The set of profile IDs whose engagement should hide a title from `profileId`'s
-  // Picks. For a derived (Joint) profile, that's either solo partner OR the couple
-  // together; for a solo profile, itself plus the couple (a title watched together
-  // has been seen by both, so it must not resurface in either solo feed).
-  const engagementMemberIds = (profileId: number): number[] => {
-    const profile = getProfile(db, profileId);
-    if (!profile?.is_derived) return [...new Set([profileId, ...derivedProfileIds()])];
-    return [...new Set([...soloProfileIds(), profileId])];
-  };
-
-  // Hard filters for a /generate call: the configured defaults, with the language
-  // set widened by whatever the household has actually liked (English always).
-  const hardFiltersFor = (memberIds: number[]): HardFilters => {
-    const overrides = config.hardFilters ?? {};
-    const learned = languagesFromHistory(db, memberIds);
-    return {
-      ...DEFAULT_HARD_FILTERS,
-      ...Object.fromEntries(Object.entries(overrides).filter(([k, v]) => k !== 'languages' && v != null)),
-      languages: [...new Set([...learned, ...(overrides.languages ?? [])])],
-    };
-  };
-
-  // Pending recs are read back through the loosest filters the widening ladder can
-  // reach, so junk stored before the filters existed (unreleased, zero-vote, shorts,
-  // other languages) disappears from the feed without touching the rows, while a
-  // legitimately widened pick is never hidden.
-  const visibleRecs = (profileId: number, recs: RecommendationRow[]): RecommendationRow[] => {
-    const memberIds = engagementMemberIds(profileId);
-    const engagedIds = getEngagedTitleIds(db, memberIds);
-    const passing = titleIdsPassing(db, floorFilters(hardFiltersFor(memberIds)), recs.map(r => r.title_id));
-    return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
-  };
-
   api.get('/recommendations/:profileId', (c) => {
     const profileId = parseInt(c.req.param('profileId'));
     if (isNaN(profileId)) return c.json({ error: 'Invalid profileId' }, 400);
@@ -237,206 +155,22 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Hide any title the profile has ENGAGED with — watched OR on the watchlist.
     // A watched title is done; a watchlisted title is already chosen. Neither should
     // remain in Picks. (Was watched-only before, so watchlist items leaked through.)
-    const recs = visibleRecs(profileId, getRecommendations(db, profileId, 'pending')).map(enrichRec);
-    return c.json(recs);
+    return c.json(feedFor(db, config, profileId));
   });
 
+  // "Clear list": every pick leaves Picks (kept as 'shown', see archivePendingBeyond).
+  api.post('/recommendations/:profileId/clear', (c) => {
+    const profileId = parseInt(c.req.param('profileId'));
+    if (isNaN(profileId)) return c.json({ error: 'Invalid profileId' }, 400);
+    archivePendingBeyond(db, profileId, 0);
+    return c.json(feedFor(db, config, profileId));
+  });
+
+  // The work lives in generatePicks (src/api/generate.ts), so the replay tool
+  // can call it without HTTP; the limits and the per-profile queue stay here.
   api.post('/generate', async (c) => {
-    const body = await c.req.json<{
-      profileId: number;
-      mediaType?: string;
-      genreIds?: number[];
-      request?: string;
-      surprise?: boolean;
-    }>();
-    if (!body.profileId) return c.json({ error: 'profileId required' }, 400);
-
-    const profile = getProfile(db, body.profileId);
-    if (!profile) return c.json({ error: 'Profile not found' }, 404);
-    let sig = getTasteSignature(db, body.profileId);
-    // Cold start: a freshly seeded profile has never rated anything, so it has no
-    // taste_vector (and a Joint can't blend two missing solo vectors; with one
-    // missing it ranks by the other partner). Instead of
-    // 400-ing, fall back to a loved-genre/random pool so a new user can bootstrap
-    // by rating what /generate surfaces (the first ratings build the real vector).
-    let coldStart = false;
-    if (profile.is_derived) {
-      // A derived (Joint) profile blends the two solo vectors; it has no own taste_vector and may have no signature row.
-      sig = sig ?? { profile_id: body.profileId, taste_vector: null, prefs: '{}', refreshed_at: new Date().toISOString() };
-      const [soloA, soloB] = soloProfileIds();
-      const aHasVec = soloA != null && !!getTasteSignature(db, soloA)?.taste_vector;
-      const bHasVec = soloB != null && !!getTasteSignature(db, soloB)?.taste_vector;
-      coldStart = !aHasVec && !bHasVec;
-    } else if (!sig || !sig.taste_vector) {
-      sig = sig ?? { profile_id: body.profileId, taste_vector: null, prefs: '{}', refreshed_at: new Date().toISOString() };
-      coldStart = true;
-    }
-
-    // Exclude from the candidate pool:
-    //  - current pending recs (prevents duplicates as recommendations accumulate)
-    //  - dismissed titles ("Not interested" is permanent, never re-suggest)
-    //  - ENGAGED titles: anything watched or on the watchlist (already seen / already
-    //    chosen) — for Joint, that's the couple's combined engagement. Stops Sonnet
-    //    wasting picks on titles you've already rated or queued.
-    //  - for a Joint call, titles DISMISSED by either partner solo as well: a
-    //    "not interested" from one of them is a veto for the couple.
-    const memberIds = engagementMemberIds(body.profileId);
-    const existingPending = getRecommendations(db, body.profileId, 'pending');
-    const dismissedBy = profile.is_derived ? memberIds : [body.profileId];
-    const dismissed = dismissedBy.flatMap(pid => getRecommendations(db, pid, 'dismissed'));
-    const engagedIds = getEngagedTitleIds(db, memberIds);
-    const excludeTitleIds = [...new Set([
-      ...existingPending.map(r => r.title_id),
-      ...dismissed.map(r => r.title_id),
-      ...engagedIds,
-    ])];
-
-    // Hard filters run in SQL before any similarity ranking (see filters.ts).
-    // A thin pool is widened year → runtime → votes; log when that happens so a
-    // surprising pick can be traced to a relaxed filter.
-    const hardFilters = hardFiltersFor(memberIds);
-    const onWidened = (steps: string[]) => {
-      if (steps.length > 0) console.log(`[tastebuds] /generate profile=${body.profileId} widened filters: ${steps.join(' → ')}`);
-    };
-
-    // balanceMedia = true when no mediaType filter is set (all-tab)
-    const balanceMedia = !body.mediaType;
-    const mediaType = body.mediaType as 'movie' | 'tv' | undefined;
-
-    // Per-profile IMDb rating threshold: read from the active profile's config JSON.
-    // A missing or malformed config is silently treated as "no threshold" (undefined).
-    let minImdbRating: number | undefined;
-    try {
-      const cfg = JSON.parse(profile.config ?? '{}') as Record<string, unknown>;
-      if (typeof cfg.rating_threshold === 'number') minImdbRating = cfg.rating_threshold;
-    } catch { /* malformed config → no filter */ }
-
-    // A free-text request ("mind-bending sci-fi") is EMBEDDED and retrieved against
-    // (blended with taste), returning a flat request-relevant list — so the pool
-    // actually matches the ask instead of the model picking the least-wrong titles
-    // from a generic taste pool. Surprise Me has no request and keeps the 7+2+1 pool.
-    const request = body.request?.trim();
-    const hasRequest = !!request && body.surprise !== true;
-
-    // When the user has typed a free-text request, seed the DB with titles that
-    // match the request's genre/keyword vibe BEFORE retrieval runs. This ensures
-    // "scary thrillers" finds horror series even if the daily harvest hasn't
-    // covered them yet (TV Horror/Thriller aren't in TMDB's genre list — they
-    // need keyword discovery which only fires on-demand here).
-    // Non-fatal: a TMDB blip must never break /generate.
-    if (hasRequest) {
-      try {
-        await ensureRequestCoverage(db, request!, mediaType, config);
-      } catch {
-        // swallow — coverage failure degrades quality, not correctness
-      }
-      // Persist resolved genres into the profile's loved_genres so affinity
-      // from explicit requests carries forward into future passive browsing.
-      try {
-        mergeRequestGenresToProfile(db, body.profileId, request!);
-      } catch {
-        // non-fatal — affinity persistence must not break /generate
-      }
-    }
-
-    // For a derived (Joint) profile, blend the two solo profiles.
-    // Cold start (no taste vector to rank against) routes to the loved-genre/random
-    // fallback pool for both solo and Joint — the request path needs a vector too.
-    let candidatePool;
-    if (profile.is_derived) {
-      const [soloA, soloB] = soloProfileIds();
-      if (soloA == null || soloB == null)
-        return c.json({ error: 'Two solo profiles are required for a Joint blend' }, 400);
-      const jointOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, jointProfileId: body.profileId, minImdbRating, hardFilters, onWidened };
-      candidatePool = coldStart
-        ? await retrieveColdStartPool(db, body.profileId, jointOpts, config)
-        : hasRequest
-          ? await retrieveJointRequestCandidates(db, soloA, soloB, request!, jointOpts, config)
-          : await retrieveJointCandidatePool(db, soloA, soloB, jointOpts, config);
-    } else {
-      const soloOpts = { mediaType, genreIds: body.genreIds, excludeTitleIds, minImdbRating, hardFilters, onWidened };
-      candidatePool = coldStart
-        ? await retrieveColdStartPool(db, body.profileId, soloOpts, config)
-        : hasRequest
-          ? await retrieveRequestCandidates(db, body.profileId, request!, soloOpts, config)
-          : await retrieveCandidatePool(db, body.profileId, soloOpts, config);
-    }
-
-    await curateCandidates(candidatePool, profile, sig, body.request ?? null, config, db, undefined, balanceMedia, body.surprise === true);
-
-    // A fresh generate replaces the profile's pending set. The old rows go only once
-    // curation has written at least one new pick (they were excluded from the pool,
-    // so no new pick collides with one), so a failed or empty generate never leaves
-    // Picks empty. Shown/dismissed recs and watch history are untouched, and so is a
-    // pending pick the profile has watched, rated or watchlisted (its row carries the
-    // predicted_rating the calibration widget needs).
-    // Surprise Me appends to the list and never replaces it (see App.svelte), and a
-    // media-filtered generate replaces only picks of that media type.
-    if (existingPending.length > 0 && body.surprise !== true) {
-      const lastOldId = existingPending.reduce((m, r) => Math.max(m, r.id), 0);
-      const hasNewPick = getRecommendations(db, body.profileId, 'pending').some(r => r.id > lastOldId);
-      if (hasNewPick) clearPendingRecommendations(db, body.profileId, lastOldId, mediaType || undefined);
-    }
-
-    // OMDb enrichment + RT URL/score resolution — non-fatal; OMDb is the authority
-    // for both imdb and rt ratings. resolveRtUrl is only called when OMDb supplies
-    // no RT value this pass, and a scraped score is never persisted unless verified.
-    {
-      const pendingRecs = getRecommendations(db, body.profileId, 'pending');
-      // Set once OMDb refuses the key or quota: every other title would be refused too.
-      let omdbRefused = false;
-      for (const rec of pendingRecs) {
-        try {
-          const t = getTitleById(db, rec.title_id);
-          if (!t) continue;
-
-          // Whole-block gate on rating_checked_at (mirrors backfillRatings.ts's SELECT
-          // filter): once this title has been through an OMDb check pass, don't re-run
-          // OMDb *or* RT resolution for it forever just because ratings came back empty.
-          // A pending rec can sit in Picks across several /generate calls (old picks are
-          // cleared only once a generate writes new ones), so without this
-          // guard an OMDb-absent title sitting in Picks would burn a fresh OMDb call
-          // AND a fresh RT scrape on every single /generate, draining the OMDb free-tier
-          // quota reserved for genuinely new titles and hammering RT for no benefit.
-          if (t.rating_checked_at == null) {
-            // OMDb: authority for both imdb and rt ratings; fetch when either is missing
-            let omdbRt: string | null = null;
-            if (config.omdbApiKey && t.imdb_id && (t.imdb_rating == null || t.rt_rating == null)) {
-              if (omdbRefused) continue;
-              // Rejects when OMDb gave no answer, leaving the title unchecked for the next pass.
-              const ratings = await getOmdbRatings(t.imdb_id, config);
-              omdbRt = ratings.rottenTomatoes;
-              updateTitleRatings(db, t.id, { imdb: ratings.imdb ?? t.imdb_rating, rt: ratings.rottenTomatoes ?? t.rt_rating });
-            }
-
-            // RT URL: only resolve when we have no URL and OMDb provided no RT this pass.
-            // A title OMDb cannot stamp (no imdb_id, no key) reaches this line on every
-            // /generate, so the attempt is rationed by rt_checked_at, found or not.
-            const rtDue = t.rt_checked_at == null || Date.now() / 1000 - t.rt_checked_at >= RT_RETRY_SECONDS;
-            if (!t.rt_url && omdbRt == null && rtDue) {
-              const result = await resolveRtUrl(t.title, t.year, t.media_type);
-              markTitleRtChecked(db, t.id);
-              // Only persist rt_url when the result is verified. Storing an unverified
-              // search URL would block future re-resolution (the !t.rt_url guard above).
-              if (result?.verified) {
-                updateTitleRtUrl(db, t.id, result.url);
-                // Only persist scraped score when verified; never overwrite OMDb RT with unverified scrape
-                if (result.score) updateTitleRtRating(db, t.id, result.score);
-              }
-            }
-          }
-        } catch (err) {
-          // enrichment failure must never break /generate
-          if (err instanceof OmdbUnavailableError && err.refused) omdbRefused = true;
-        }
-      }
-    }
-
-    // Filter the response the same way /recommendations does, so an engaged title
-    // (e.g. a still-pending rec from before it was watched/watchlisted) never shows
-    // in the cards immediately after generating.
-    const recs = visibleRecs(body.profileId, getRecommendations(db, body.profileId, 'pending')).map(enrichRec);
-    return c.json(recs);
+    const outcome = await generatePicks(db, config, await c.req.json<GenerateBody>());
+    return outcome.ok ? c.json(outcome.feed) : c.json({ error: outcome.error }, outcome.status);
   });
 
   api.post('/rate', async (c) => {

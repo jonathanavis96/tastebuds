@@ -15,9 +15,8 @@ import { curateCandidates } from '../curation/curate.js';
 import type { CandidatePool } from '../retrieval/retrieve.js';
 import type { Config } from '../config.js';
 
-vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
-vi.mock('../omdb/client.js', () => ({ getOmdbRatings: vi.fn() }));
+vi.mock('../ratings/freshness.js', () => ({ ensureFreshRatings: vi.fn() }));
 
 const config: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:9',
@@ -35,7 +34,7 @@ describe('POST /generate, Joint with one partner lacking a taste vector', () => 
   it('curates a pool ranked by the partner who has a vector, not a cold-start pool', async () => {
     let captured: CandidatePool | undefined;
     vi.mocked(curateCandidates).mockImplementation(async (pool) => {
-      captured = pool as CandidatePool;
+      captured = pool;
       return [];
     });
     const db = new Database(':memory:');
@@ -49,12 +48,15 @@ describe('POST /generate, Joint with one partner lacking a taste vector', () => 
     upsertTasteSignature(db, { profile_id: 2, taste_vector: oneHot(5), prefs: '{}', refreshed_at: now });
     for (let i = 0; i < 8; i++) {
       upsertTitle(db, {
-        tmdb_id: 500 + i, media_type: 'movie', title: `G${i}`, year: 2020, genres: '["Drama"]',
+        tmdb_id: 500 + i, media_type: 'movie', title: `G${i}`, year: new Date().getFullYear() - 1, genres: '["Drama"]',
         keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
         embedding: oneHot(i), updated_at: now,
         vote_count: 2000, vote_average: 7, original_language: 'en', runtime_minutes: 100, status: 'Released',
+        imdb_rating: '7.0',
       });
     }
+    // upsertTitle does not write imdb_votes; a pick needs enough of them to pass the hard filters.
+    db.prepare('UPDATE titles SET imdb_votes = 5000').run();
 
     const app = new Hono().route('/api', createApiRoutes(db, config));
     const res = await app.request('/api/generate', {

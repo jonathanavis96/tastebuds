@@ -5,8 +5,10 @@ import { config as dotenvConfig } from 'dotenv';
 import { openDb } from './db/open.js';
 import { runMigrations } from './db/migrate.js';
 import { createApiRoutes } from './api/routes.js';
+import { cacheHeaders } from './api/cacheHeaders.js';
 import { startHarvestCron } from './harvest/cron.js';
 import { backfillTitleMeta } from './harvest/backfillMeta.js';
+import { runStartupRatingsSync } from './ratings/startup.js';
 import { loadConfig, META_BACKFILL_CAP_DEFAULT } from './config.js';
 
 dotenvConfig();
@@ -29,7 +31,12 @@ void (async () => {
   }
 })();
 
+// IMDb's ratings file when the copy on disk is missing or over 36 hours old, and
+// IMDb's genres when no title has them yet. Background only: the server starts now.
+void runStartupRatingsSync(db, config);
+
 const app = new Hono();
+app.use('*', cacheHeaders);
 app.route('/api', createApiRoutes(db, config));
 app.use('/*', serveStatic({ root: './dist/frontend' }));
 app.get('*', serveStatic({ path: './dist/frontend/index.html' }));

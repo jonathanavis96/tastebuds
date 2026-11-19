@@ -374,3 +374,53 @@ describe('DetailModal dismiss-reason tiles', () => {
     resolveCurrent!();
   });
 });
+
+describe('DetailModal genres, ratings and rule note', () => {
+  const pillTexts = (container: Element) =>
+    [...container.querySelectorAll('.genres .pill')].map(el => el.textContent);
+
+  it('shows the canonical tags of a pick instead of its raw TMDB genres', () => {
+    const { container } = render(DetailModal, {
+      item: { title_id: 1, title: 'Severance', genres: '["Sci-Fi & Fantasy","Drama"]', tags: ['Science Fiction', 'Drama', 'Thriller'] },
+      onClose: () => {},
+    });
+    expect(pillTexts(container)).toEqual(['Science Fiction', 'Drama', 'Thriller']);
+  });
+
+  it('keeps the stored genres for a history or watchlist item, which has no tags', () => {
+    const { container } = render(DetailModal, {
+      item: { title_id: 1, title: 'Severance', genres: '["Sci-Fi & Fantasy","Drama"]' },
+      onClose: () => {},
+    });
+    expect(pillTexts(container)).toEqual(['Sci-Fi & Fantasy', 'Drama']);
+  });
+
+  it('shows the ratings it has, with the vote count on the IMDb chip', () => {
+    const { getByText } = render(DetailModal, {
+      item: { title_id: 1, title: 'Movie A', imdb_id: 'tt0000001', imdb_rating: '7.8', imdb_votes: 48210, rt_rating: '93%' },
+      onClose: () => {},
+    });
+    const imdb = getByText('IMDb 7.8 ↗');
+    expect(imdb.getAttribute('href')).toBe('https://www.imdb.com/title/tt0000001/');
+    expect(imdb.getAttribute('title')).toBe(`${(48210).toLocaleString()} IMDb votes`);
+    expect(getByText('🍅 93%')).toBeTruthy();
+  });
+
+  it('shows nothing for a rating it does not have, even with a link to the page', () => {
+    const { container, queryByText } = render(DetailModal, {
+      item: { title_id: 1, title: 'Movie A', imdb_id: 'tt0000001', imdb_rating: null, rt_url: 'https://www.rottentomatoes.com/m/a', rt_rating: null },
+      onClose: () => {},
+    });
+    expect(container.querySelector('.scores')).toBeNull();
+    expect(queryByText(/IMDb/)).toBeNull();
+    expect(queryByText(/🍅/)).toBeNull();
+  });
+
+  it('shows the rule note of a pick that bends the request', () => {
+    const { getByText } = render(DetailModal, {
+      item: { title_id: 1, title: 'Movie A', rule_note: 'Older pick: only 7 from 2021–2026 matched' },
+      onClose: () => {},
+    });
+    expect(getByText('Older pick: only 7 from 2021–2026 matched')).toBeTruthy();
+  });
+});

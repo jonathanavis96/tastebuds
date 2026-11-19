@@ -1,4 +1,4 @@
-import type { Profile, Recommendation, WatchEvent, DismissReason, TasteChart } from './types.js';
+import type { Profile, FeedResponse, WatchEvent, DismissReason, TasteChart } from './types.js';
 
 const BASE = '/api';
 
@@ -56,9 +56,16 @@ export async function getTasteChart(profileId: number): Promise<TasteChart> {
   return res.json();
 }
 
-export async function getRecommendations(profileId: number): Promise<Recommendation[]> {
+export async function getRecommendations(profileId: number): Promise<FeedResponse> {
   const res = await fetch(`${BASE}/recommendations/${profileId}`);
   if (!res.ok) throw new Error(`getRecommendations failed: ${res.status}`);
+  return res.json();
+}
+
+/** Empty the profile's Picks list ("Clear list"). */
+export async function clearPicks(profileId: number): Promise<FeedResponse> {
+  const res = await postChange(`/recommendations/${profileId}/clear`, {});
+  if (!res.ok) throw new Error(`clear failed: ${res.status}`);
   return res.json();
 }
 
@@ -68,7 +75,7 @@ export async function generateRecommendations(opts: {
   genreIds?: number[];
   request?: string;
   surprise?: boolean;
-}): Promise<Recommendation[]> {
+}): Promise<FeedResponse> {
   const res = await fetch(`${BASE}/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

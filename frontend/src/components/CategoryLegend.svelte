@@ -14,7 +14,7 @@
 
   {#if open}
     <div class="panel">
-      <p class="section-label">Every set has 7 for-you picks, 2 surprises and 1 challenge:</p>
+      <p class="section-label">A full set has 7 for-you picks, 2 surprises and 1 challenge (fewer when few titles match the request):</p>
       {#each kinds as k}
         <div class="row" style="--kc:{k.color}">
           <span class="chip">{k.icon} {k.label}</span>
