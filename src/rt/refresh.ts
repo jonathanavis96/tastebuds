@@ -42,19 +42,20 @@ export async function refreshRtScores(
   const pauseMs = opts.pauseMs ?? PAUSE_MS;
   const now = Math.floor(Date.now() / 1000);
   // Never-verified rows sort by their last attempt (never tried first), verified
-  // rows by when they were verified; among equals the newest, best-known titles
-  // go first, since those are the ones most likely to be shown. An unconfirmed
-  // page waits a week before it is tried again, so dead pages cannot hold the
-  // front of the queue.
+  // rows by when they were verified. Among equals the newest released, best-known
+  // titles go first, since those are the ones shown; a title not out yet has no
+  // score to read and waits at the back. An unconfirmed page waits a week before
+  // it is tried again, so dead pages cannot hold the front of the queue.
   const candidates = db
-    .prepare<[number, number], Candidate>(
+    .prepare<[number, number, number], Candidate>(
       `SELECT id, title, year, rt_url FROM titles
        WHERE rt_url IS NOT NULL
          AND (rt_verified_at IS NOT NULL OR rt_checked_at IS NULL OR rt_checked_at < ?)
-       ORDER BY rt_verified_at IS NOT NULL, COALESCE(rt_verified_at, rt_checked_at, 0), year DESC, vote_count DESC, id
+       ORDER BY rt_verified_at IS NOT NULL, COALESCE(rt_verified_at, rt_checked_at, 0),
+                year IS NULL OR year > ?, year DESC, vote_count DESC, id
        LIMIT ?`,
     )
-    .all(now - UNCONFIRMED_RETRY_SECONDS, opts.cap);
+    .all(now - UNCONFIRMED_RETRY_SECONDS, new Date(now * 1000).getUTCFullYear(), opts.cap);
 
   const result: RtRefreshResult = { verified: 0, noScore: 0, unconfirmed: 0, failed: 0, blocked: false };
   let consecutiveFailures = 0;

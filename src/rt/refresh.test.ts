@@ -163,19 +163,21 @@ describe('refreshRtScores', () => {
 });
 
 describe('refreshRtScores order among titles never tried', () => {
-  it('reads the newest titles first', async () => {
+  it('reads the newest released titles first and unreleased ones last', async () => {
     const db = createTestDb();
-    insertTitle(db, 1, 'Older Show', 2012, { url: 'https://www.rottentomatoes.com/tv/older_show' });
-    insertTitle(db, 2, 'Newer Show', 2026, { url: 'https://www.rottentomatoes.com/tv/newer_show' });
+    const thisYear = new Date().getUTCFullYear();
+    insertTitle(db, 1, 'Older Show', thisYear - 14, { url: 'https://www.rottentomatoes.com/tv/older_show' });
+    insertTitle(db, 2, 'Unreleased Show', thisYear + 2, { url: 'https://www.rottentomatoes.com/tv/unreleased_show' });
+    insertTitle(db, 3, 'Newer Show', thisYear, { url: 'https://www.rottentomatoes.com/tv/newer_show' });
     const asked: string[] = [];
     const fetchImpl = (async (url: string | URL | Request) => {
-      asked.push(String(url));
+      asked.push(String(url).replace('https://www.rottentomatoes.com/tv/', ''));
       return new Response('', { status: 404 });
     }) as typeof fetch;
 
-    await refreshRtScores(db, { cap: 1, fetchImpl, pauseMs: 0 });
+    await refreshRtScores(db, { cap: 3, fetchImpl, pauseMs: 0 });
 
-    expect(asked).toEqual(['https://www.rottentomatoes.com/tv/newer_show']);
+    expect(asked).toEqual(['newer_show', 'older_show', 'unreleased_show']);
   });
 });
 
