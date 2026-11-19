@@ -13,8 +13,8 @@ LLM call when you explicitly ask for fresh picks.
 - **Local, free retrieval:** embeddings via local [Ollama](https://ollama.com/) stored in
   `sqlite-vec`; finding candidates is pure vector math — no LLM, no cost.
 - **LLM only on request:** when you tap **Generate** (or type a request like
-  *"mind-bending sci-fi"*), Claude ranks a small pre-filtered set and writes a one-line
-  "why" for each. Browsing, rating and watchlisting are all database-only.
+  *"mind-bending sci-fi"*), Claude orders a small set of titles that already satisfy it
+  and writes a one-line "why" for each. Browsing, rating and watchlisting are all database-only.
 - **Learns from feedback:** ratings, free-text notes and "not interested" dismissals all
   steer your taste vector (positive *and* negative signal).
 - **Mobile-first web app:** poster feed, one-tap rating, watchlist, watched history.
@@ -69,11 +69,12 @@ the Claude OAuth step itself.
 ```
 TMDB harvest ──► titles + posters ──► Ollama embeddings ──► sqlite-vec
                                                                 │
-   you tap "Generate" / type a request                         ▼
-                         ──► vector retrieval (free) ──► small candidate set
-                                                                │
+   you tap "Generate"                                           ▼
+                         ──► hard filters + vector retrieval (free) ──► small candidate set
+   you type a request                                           │
+     ──► read into rules ──► only titles that obey every rule ──┤
                                                                 ▼
-                                      claude -p ranks + writes "why" ──► your picks
+                         claude -p orders them + writes "why" ──► your picks
 ```
 
 Stack: Node/TypeScript · [Hono](https://hono.dev/) API + [Svelte](https://svelte.dev/) SPA ·
@@ -81,27 +82,46 @@ a single SQLite file (`sqlite-vec`, WAL) · Ollama embeddings · `claude -p` cur
 
 ### How a candidate set is built
 
-Every Generate (passive or typed request) runs the same three stages, all in SQLite:
+**Hard filters** apply to every Generate, before any ranking: released only, movies ≥ 60 min,
+TMDB votes ≥ 50 (movies) / 20 (series), TMDB rating ≥ 5.5, a real IMDb rating of at least
+6.0 (and at least your own IMDb setting) with ≥ 1,000 IMDb votes for a film or ≥ 500 for a
+series, and an original language of English or one that shows up in your liked history. A
+title whose metadata is unknown fails the filter. Anything watched, on a watchlist or
+dismissed by either profile (or the couple together) is excluded.
 
-1. **Hard filters** — applied before any ranking. Defaults: released only, year ≥ 1995,
-   movies ≥ 60 min, TMDB votes ≥ 300 (movies) / 50 (series), TMDB rating ≥ 6.0, and the
-   original language must be English or one that shows up in your liked history. A title
-   whose metadata is unknown fails the filter (that is what kept unreleased, zero-vote
-   titles out of the picks). Anything watched, on a watchlist or dismissed by either profile
-   (or the couple together) is excluded.
-2. **Similarity** — cosine distance to the taste vector (blended with the embedded request
-   when you typed one) over a wide slate.
-3. **Rerank** — genre affinity learned from your own star ratings (a genre either partner
-   rates consistently low is vetoed from Joint picks), a Bayesian quality score from TMDB
-   rating and vote count, and popularity, blended with the similarity (rescaled within the
-   slate, since raw cosine distances cluster tightly). Your votes change the order, not just
-   the centroid. Explicit requests weight similarity more heavily so relevance leads.
+**A typed request is a set of rules, and every pick satisfies all of them.** "Thriller new
+2025", "scary movie, no nuns", "top rated sci-fi series" are read into rules: film or series
+(otherwise the app's Films/Series filter), a year window ("2025", "90s", "new", "recent",
+"classic"), genres and moods ("scary" means Horror, "gripping" means Thriller), themes,
+exclusions, rating words ("top rated" means IMDb 7.5+) and a language. A small model call
+reads only the words the parser could not. Each candidate is checked against the rules in
+code; similarity to the request (blended with your taste), genre affinity, quality and
+popularity only order the titles that pass. A title named as an example ("like Heat")
+steers the order and is never a pick itself.
 
-If the filtered pool is thin, it widens in a fixed order — year floor (1990 → 1985 → 1980),
-then movie runtime (40 min), then votes (100/25 → 20/10) — and never relaxes rating,
-language or release status. A typed request always comes back with at least 10 picks when
-the pool allows it; if the model returns fewer, the list is padded from the reranked order
-without a second `claude -p` call. Widening is logged as `[tastebuds] /generate … widened filters`.
+With no year in the request, picks are **recent by default** (the last six calendar years).
+Only then, and only when fewer than 10 titles match, older ones are added to fill the list,
+after the recent ones, and each says why ("Older pick: only 6 titles from 2021 on matched.").
+A stated or "new/recent" window is never widened: when fewer than 10 titles match, the list
+is shorter, and a note says what would show more. If the library is thin for a request,
+TMDB is asked for titles inside the rules first.
+
+The model (`claude -p`) **orders the candidates and writes the "why" lines; it does not
+choose what qualifies**. If it returns too few, or the call fails, the list is filled from
+the ranked candidates. Ratings of the picks are refreshed before they are stored.
+
+**Generate without a request** draws a taste pool instead: on-taste titles by cosine
+distance to your taste vector, a few wildcards and one deliberate "predicted dislike",
+reranked by genre affinity from your own star ratings (a genre either partner rates
+consistently low is vetoed from Joint picks), a Bayesian quality score and popularity. If
+the filtered pool is thin it widens in a fixed order: the year floor goes back ten years,
+another ten, then to 1980; then movie runtime (40 min), IMDb votes (300 / 150) and TMDB
+votes (20 / 10). Rating, language and release status are never relaxed. Widening is logged
+as `[tastebuds] /generate … widened filters`.
+
+To check how well picks obey past requests, `npm run eval:rerun -- --db COPY.db` makes fresh
+picks for every past request on a copy of the database, and `npm run eval:requests` scores
+them against hand-written expectations (`--expect expectations.json`).
 
 ---
 
@@ -277,10 +297,10 @@ just ignore the profiles you don't use.
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
 | `BIND_HOST` | — | `127.0.0.1` | **Docker only** — host bind address for docker-compose's port mapping — see **Security** below |
 | `HOST` | — | `0.0.0.0` | **Bare Node only** — hostname the server process itself binds to (no effect inside Docker; `BIND_HOST` covers that path) — see **Security** below |
-| `RETRIEVAL_MIN_YEAR` | — | `1995` | Earliest release year a candidate may have (widening can go as low as 1980) |
+| `RETRIEVAL_MIN_YEAR` | — | six calendar years back | Earliest release year for Generate without a request (widening can go as low as 1980); a typed request sets its own years |
 | `RETRIEVAL_MIN_RUNTIME` | — | `60` | Minimum movie runtime in minutes (series exempt) |
-| `RETRIEVAL_MIN_VOTES_MOVIE` / `RETRIEVAL_MIN_VOTES_TV` | — | `300` / `50` | Minimum TMDB vote count |
-| `RETRIEVAL_MIN_VOTE_AVERAGE` | — | `6.0` | Minimum TMDB average rating (never relaxed) |
+| `RETRIEVAL_MIN_VOTES_MOVIE` / `RETRIEVAL_MIN_VOTES_TV` | — | `50` / `20` | Minimum TMDB vote count |
+| `RETRIEVAL_MIN_VOTE_AVERAGE` | — | `5.5` | Minimum TMDB average rating (never relaxed) |
 | `RETRIEVAL_LANGUAGES` | — | — | Extra ISO 639-1 codes to admit (English and languages from your liked history are always in) |
 | `META_BACKFILL_CAP` | — | `20000` | Max titles per TMDB metadata backfill run |
 | `RT_REFRESH_CAP` | — | `600` | Max Rotten Tomatoes pages re-read per nightly refresh (one a second) |
