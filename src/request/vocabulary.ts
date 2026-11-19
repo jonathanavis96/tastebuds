@@ -127,6 +127,16 @@ export const THEMES: Record<string, Theme> = {
   nun: { label: 'Nuns', terms: ['nun', 'evil nun', 'convent'] },
   gore: { label: 'Gore', terms: ['gore', 'gory', 'splatter', 'torture'] },
   'jump scare': { label: 'Jump scares', terms: ['jump scare'] },
+  friendship: {
+    label: 'Friendship',
+    terms: ['friendship', 'best friend', 'buddy', 'buddy comedy', 'female friendship', 'male friendship'],
+  },
+  'true crime': {
+    label: 'True crime',
+    terms: ['true crime', 'based on true story', 'based on a true story', 'real crime', 'criminal investigation', 'murder investigation'],
+  },
+  christmas: { label: 'Christmas', terms: ['christmas', 'xmas', 'santa claus', 'santa', 'christmas eve', 'holiday season'] },
+  halloween: { label: 'Halloween', terms: ['halloween', 'trick or treat', 'trick or treating'] },
 };
 
 const THEME_WORDS: Record<string, string[]> = {
@@ -171,6 +181,10 @@ const THEME_WORDS: Record<string, string[]> = {
   nun: ['nun', 'convent'],
   gore: ['gore', 'gory', 'splatter', 'torture'],
   'jump scare': ['jump scare'],
+  friendship: ['best friend', 'friendship', 'buddy'],
+  'true crime': ['true crime'],
+  christmas: ['christmas', 'xmas', 'festive'],
+  halloween: ['halloween'],
 };
 
 /**
@@ -319,6 +333,11 @@ export const FILLER: ReadonlySet<string> = new Set([
   'solid', 'fun', 'entertaining', 'enjoyable', 'engaging', 'dark', 'intense', 'deep', 'short',
   'long', 'quality', 'well', 'written', 'top', 'sure', 'lol', 'thanks', 'id', 'im', 'ive',
   'youd', 'wed', 'lets', 'thats', 'whats',
+  // What a title should not feel like cannot be checked against its data, so
+  // "not cheesy" is no exclusion; the words still steer the ordering.
+  'boring', 'cheesy', 'corny', 'cringe', 'cringey', 'silly', 'stupid', 'dumb', 'bad', 'weird',
+  'predictable', 'depressing', 'sad', 'heavy', 'serious', 'dull', 'lame', 'generic', 'cliche',
+  'cliched', 'childish', 'trashy', 'pretentious', 'mainstream',
 ]);
 
 /** Every word that appears in a phrase or the filler list, for reducing plurals. */

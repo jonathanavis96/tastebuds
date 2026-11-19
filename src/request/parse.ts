@@ -172,7 +172,7 @@ function readYears(r: Reading): void {
   win(new RegExp(`\\b(?:between\\s+|from\\s+)?${Y}\\s*(?:~|to|and|through|thru|till|until)\\s*${Y}\\b`, 'g'),
     (a, b) => [Math.min(a, b), Math.max(a, b)]);
   win(new RegExp(`\\b(?:after|post|later than|newer than)\\s+${Y}\\b`, 'g'), (y) => [y + 1, null]);
-  win(new RegExp(`\\b(?:since|from)\\s+${Y}\\b`, 'g'), (y) => [y, null]);
+  win(new RegExp(`\\bsince\\s+${Y}\\b`, 'g'), (y) => [y, null]);
   win(new RegExp(`\\b${Y}\\s*(?:\\+|onwards?\\b|or (?:later|newer|after)\\b|and (?:later|newer|up)\\b)`, 'g'), (y) => [y, null]);
   win(new RegExp(`\\b(?:before|pre|prior to|older than|earlier than)\\s+${Y}\\b`, 'g'), (y) => [null, y - 1]);
   win(new RegExp(`\\b(?:until|till|up to|through|thru)\\s+${Y}\\b`, 'g'), (y) => [null, y]);
@@ -196,10 +196,16 @@ function readYears(r: Reading): void {
     return true;
   });
   consume(r, new RegExp(`\\b${Y}\\b`, 'g'), (m) => {
-    if (!ok(Number(m[1]))) return false;
+    if (!ok(Number(m[1])) || startsReferencedTitle(r.work, m.index!, m[0].length)) return false;
     r.bareYears.push(Number(m[1]));
     return true;
   });
+}
+
+/** "like 2001: A Space Odyssey", "1917 type of film": the number opens a title, it is not a year. */
+function startsReferencedTitle(work: string, start: number, length: number): boolean {
+  return /\b(?:like|similar to|reminiscent of|vein of)\s+$/.test(work.slice(0, start))
+    || /^\s+(?:type|kind|sort|style)\s+of\b/.test(work.slice(start + length));
 }
 
 function tokenize(work: string, text: string): Token[] {
@@ -347,6 +353,7 @@ function negateItem(toks: Token[], j: number, r: Reading): number {
   if (m) {
     const label = phrase(toks.slice(j, j + m.len)).toLowerCase();
     const e = m.entry;
+    if (e.kind === 'theme' && isIdiom(e.theme, toks, j, m.len)) return 0;
     if (e.kind === 'genre') for (const g of e.genres) r.mustNot.push({ label, genres: [g], terms: [] });
     if (e.kind === 'theme') r.mustNot.push({ label, genres: [], terms: [...THEMES[e.theme].terms] });
     if (e.kind === 'media') r.notMedia.add(e.media);
@@ -386,6 +393,7 @@ function applyEntry(e: Entry, toks: Token[], i: number, len: number, r: Reading)
       r.genreHits.push({ genres: e.genres, label: e.label, noun: e.noun, pos: i, end: i + len });
       return;
     case 'theme':
+      if (isIdiom(e.theme, toks, i, len)) return;
       if (!r.themes.some((t) => t.key === e.theme)) r.themes.push({ key: e.theme, pos: i });
       return;
     case 'easy':
@@ -410,6 +418,17 @@ function applyEntry(e: Entry, toks: Token[], i: number, len: number, r: Reading)
     case 'anyYear':
       r.anyYear = true;
   }
+}
+
+const TIME_IDIOM_BEFORE = new Set([
+  'good', 'great', 'nice', 'long', 'short', 'first', 'this', 'that', 'any', 'some', 'much', 'more', 'same',
+  'next', 'last', 'every', 'no', 'have', 'has', 'had', 'the', 'of', 'in', 'on', 'at', 'one', 'spare', 'free',
+]);
+
+/** "a good time", "the first time", "time to relax": the word "time" is not the subject Time. */
+function isIdiom(theme: string, toks: Token[], i: number, len: number): boolean {
+  if (theme !== 'time' || len !== 1) return false;
+  return TIME_IDIOM_BEFORE.has(toks[i - 1]?.w ?? '') || ['to', 'for'].includes(toks[i + 1]?.w ?? '');
 }
 
 interface Placed {

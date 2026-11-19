@@ -36,8 +36,8 @@ export type CanonGenre = (typeof CANON_GENRES)[number];
 /**
  * One thing a title must (or must not) be. Satisfied when the title carries
  * ANY of `genres` (see titleTags), or when ANY of `terms` appears in its
- * keywords, title or synopsis. A clause with neither can never be satisfied,
- * so the parsers never emit one.
+ * keywords, title or synopsis, or is the full name of a cast member. A clause
+ * with neither can never be satisfied, so the parsers never emit one.
  */
 export interface RuleClause {
   /** What the viewer asked for, in their words: "thriller", "scary", "medical", "nuns". */

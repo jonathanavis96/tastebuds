@@ -166,13 +166,18 @@ describe('the app\'s example prompts', () => {
     ['something mind-bending and clever', ['Mind-bending', '2021 or newer']],
     ['a short movie under 90 minutes', ['Films', '2021 or newer', 'Under 90 min']],
     ['a cosy series to binge', ['Easy watch', 'Series', '2021 or newer', 'No horror']],
-    ['something romantic but not cheesy', ['Romantic', '2021 or newer', 'No cheesy']],
+    ['something romantic but not cheesy', ['Romantic', '2021 or newer']],
     ['a true-story drama', ['True story', 'Drama', '2021 or newer']],
     ['a hidden-gem sci-fi', ['Sci-fi', '2021 or newer', 'Hidden gems']],
     ['something dark and tense', ['Tense', '2021 or newer']],
   ])('%s', (text, want) => {
     expect(chips(text)).toEqual(want);
     expect(leftoverWords(text, NOW)).toEqual([]);
+  });
+
+  it('does not turn a quality the data cannot show into an exclusion', () => {
+    expect(parseRequest('not too long and not boring', NOW).mustNot).toEqual([]);
+    expect(parseRequest('kids movie no scary stuff', NOW).mustNot).toEqual([{ label: 'scary', genres: ['Horror'], terms: [] }]);
   });
 
   it('reads the easy-watch words as a rule only when no genre is named', () => {
@@ -198,7 +203,9 @@ describe('year windows', () => {
     ["the '80s", 1980, 1989, 'stated'],
     ['the eighties', 1980, 1989, 'stated'],
     ['1970s horror', 1970, 1979, 'stated'],
-    ['thrillers from 2019', 2019, null, 'stated'],
+    ['thrillers from 2019', 2019, 2019, 'stated'],
+    ['new thrillers from 2025', 2025, null, 'stated'],
+    ['from 2019 onwards', 2019, null, 'stated'],
     ['a 2019 thriller', 2019, 2019, 'stated'],
     ['between 2010 and 2015', 2010, 2015, 'stated'],
     ['2010-2015 comedies', 2010, 2015, 'stated'],
@@ -338,5 +345,36 @@ describe('other rule words', () => {
     expect(leftoverWords('Thriller new 2025', NOW)).toEqual([]);
     expect(leftoverWords('a film about chess', NOW)).toEqual(['chess']);
     expect(leftoverWords('', NOW)).toEqual([]);
+  });
+});
+
+describe('words that only look like a rule', () => {
+  it('keeps a number that opens a referenced title out of the year window', () => {
+    const odyssey = parseRequest('movies like 2001 a space odyssey', NOW);
+    expect([odyssey.yearMin, odyssey.yearSource]).toEqual([2021, 'default']);
+    expect(odyssey.similarTo).toEqual(['2001 a space odyssey']);
+    expect(odyssey.must).toEqual([]);
+    const war = parseRequest('1917 type of movie', NOW);
+    expect([war.yearMin, war.yearSource, war.similarTo]).toEqual([2021, 'default', ['1917']]);
+  });
+
+  it('reads "time" as a subject only when it is listed as one', () => {
+    expect(chips('a good time, something funny')).toEqual(['Funny', '2021 or newer']);
+    expect(chips('no time to waste, a thriller')).toEqual(['Thriller', '2021 or newer']);
+    expect(chips('sci-fi about time')).toEqual(['Sci-fi', 'Time', '2021 or newer']);
+  });
+
+  it('reads "best friends" as a subject, not as a rating word', () => {
+    const r = parseRequest('best friends comedy', NOW);
+    expect(r.minImdb).toBeNull();
+    expect(chips('best friends comedy')).toEqual(['Friendship', 'Comedy', '2021 or newer']);
+    expect(leftoverWords('best friends comedy', NOW)).toEqual([]);
+  });
+
+  it('knows true crime and Christmas without a model call', () => {
+    expect(chips('true crime documentary series')).toEqual(['True crime', 'Documentary', 'Series', '2021 or newer']);
+    expect(chips('christmas movies')).toEqual(['Christmas', 'Films', '2021 or newer']);
+    expect(leftoverWords('true crime documentary series', NOW)).toEqual([]);
+    expect(leftoverWords('christmas movies', NOW)).toEqual([]);
   });
 });

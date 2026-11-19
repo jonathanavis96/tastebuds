@@ -59,7 +59,8 @@ function buildPrompt(text: string, base: RequestRules, now: Date): string {
     '',
     'Return:',
     '- subjects: what the titles must be about, as named in the request (a person, a place, a topic such as "medical"). ' +
-      'For each, a short label in the request\'s words and 4-10 lowercase search terms that would appear in a title\'s keywords or synopsis.',
+      'For each, a short label in the request\'s words and 4-10 lowercase search terms that would appear in a title\'s keywords or synopsis. ' +
+      'For a person, the full name is the only term.',
     '- exclude: what the request says to leave out, in the same shape.',
     '- references: titles the request names as an example of what it wants, as written.',
     '- corrections: only film or series (mediaType), release years (yearMin, yearMax), genres, a minimum IMDb rating (0-10) ' +

@@ -13,7 +13,7 @@ const NOW = new Date('2026-11-19T12:00:00Z');
 function title(over: Partial<CheckableTitle> = {}): CheckableTitle {
   return {
     media_type: 'movie', title: 'Example', year: 2025, genres: '["Thriller"]', keywords: '[]',
-    synopsis: null, imdb_genres: null, imdb_rating: '7.2', imdb_votes: 12_000, runtime_minutes: 100,
+    synopsis: null, cast: '[]', imdb_genres: null, imdb_rating: '7.2', imdb_votes: 12_000, runtime_minutes: 100,
     original_language: 'en', ...over,
   };
 }
@@ -71,6 +71,14 @@ describe('titleObeys', () => {
     expect(check('mind bending thriller', { keywords: '["mind-bending"]' }).ok).toBe(true);
   });
 
+  it('matches a term that is the full name of a cast member', () => {
+    const named: RequestRules = { ...defaultRules(NOW), must: [{ label: 'Tom Hanks', genres: [], terms: ['tom hanks'] }] };
+    expect(titleObeys(named, title({ cast: '["Tom Hanks","Robin Wright"]' })).ok).toBe(true);
+    expect(titleObeys(named, title({ cast: '["Tom Hanksworth"]' })).failed).toEqual(['not Tom Hanks']);
+    const space: RequestRules = { ...defaultRules(NOW), must: [{ label: 'Space', genres: [], terms: ['mars'] }] };
+    expect(titleObeys(space, title({ cast: '["Bruno Mars"]' })).ok).toBe(false);
+  });
+
   it('rejects a title that matches an exclusion', () => {
     const scary = { genres: '["Horror"]' };
     const text = 'Scary movie. No devils or nuns.';
@@ -106,7 +114,7 @@ describe('rulesSql', () => {
 const REPLAY_DB = process.env.TASTEBUDS_REPLAY_DB ?? '';
 
 describe.skipIf(!REPLAY_DB || !existsSync(REPLAY_DB))('rulesSql against a sample of the real catalogue', () => {
-  const COLUMNS = 'id, tmdb_id, media_type, title, year, genres, keywords, synopsis, updated_at, imdb_rating, runtime_minutes, original_language';
+  const COLUMNS = 'id, tmdb_id, media_type, title, year, genres, keywords, synopsis, "cast", updated_at, imdb_rating, runtime_minutes, original_language';
 
   function sampleDb(): InstanceType<typeof Database> {
     const source = new Database(REPLAY_DB, { readonly: true, fileMustExist: true });
@@ -114,7 +122,7 @@ describe.skipIf(!REPLAY_DB || !existsSync(REPLAY_DB))('rulesSql against a sample
     source.close();
     const db = new Database(':memory:');
     runMigrations(db);
-    const insert = db.prepare(`INSERT INTO titles (${COLUMNS}, imdb_votes) VALUES (${COLUMNS.split(', ').map((c) => `@${c}`).join(', ')}, @imdb_votes)`);
+    const insert = db.prepare(`INSERT INTO titles (${COLUMNS}, imdb_votes) VALUES (${COLUMNS.split(', ').map((c) => `@${c.replace(/"/g, '')}`).join(', ')}, @imdb_votes)`);
     for (const row of rows) {
       const id = row.id as number;
       insert.run({ ...row, imdb_votes: id % 7 === 0 ? null : (id * 7919) % 200_000 });

@@ -6,7 +6,7 @@ import { jsonStrings, titleTags } from './tags.js';
 
 export type CheckableTitle = Pick<
   TitleRow,
-  | 'media_type' | 'title' | 'year' | 'genres' | 'keywords' | 'synopsis' | 'imdb_genres'
+  | 'media_type' | 'title' | 'year' | 'genres' | 'keywords' | 'synopsis' | 'cast' | 'imdb_genres'
   | 'imdb_rating' | 'imdb_votes' | 'runtime_minutes' | 'original_language'
 >;
 
@@ -32,10 +32,13 @@ export function titleObeys(rules: RequestRules, title: CheckableTitle): RuleChec
     hiddenGemFailure(rules, title),
   ].filter((f): f is string => f !== null);
   if (rules.must.length > 0 || rules.mustNot.length > 0) {
-    const tags = titleTags(title);
-    const texts = searchableTexts(title);
-    for (const c of rules.must) if (!clauseHolds(c, tags, texts)) failed.push(`not ${c.label}`);
-    for (const c of rules.mustNot) if (clauseHolds(c, tags, texts)) failed.push(`excluded: ${c.label}`);
+    const facts: TitleFacts = {
+      tags: titleTags(title),
+      texts: [...jsonStrings(title.keywords), title.title, title.synopsis ?? ''].map(flatten),
+      cast: jsonStrings(title.cast).map(flatten),
+    };
+    for (const c of rules.must) if (!clauseHolds(c, facts)) failed.push(`not ${c.label}`);
+    for (const c of rules.mustNot) if (clauseHolds(c, facts)) failed.push(`excluded: ${c.label}`);
   }
   return { ok: failed.length === 0, failed };
 }
@@ -84,19 +87,24 @@ function hiddenGemFailure(rules: RequestRules, t: CheckableTitle): string | null
   return `${t.imdb_votes.toLocaleString('en-US')} IMDb votes, too well known for a hidden gem`;
 }
 
-/** Each keyword, the title and the synopsis, lowercased with hyphens as spaces. */
-function searchableTexts(t: CheckableTitle): string[] {
-  return [...jsonStrings(t.keywords), t.title, t.synopsis ?? ''].map(flatten);
+/** What a clause is checked against, each text lowercased with hyphens as spaces. */
+interface TitleFacts {
+  tags: Set<CanonGenre>;
+  /** Each keyword, the title and the synopsis. */
+  texts: string[];
+  /** Cast names, matched whole: a term names a person only when it is the full name. */
+  cast: string[];
 }
 
 function flatten(s: string): string {
   return s.toLowerCase().replace(/-/g, ' ');
 }
 
-function clauseHolds(c: RuleClause, tags: Set<CanonGenre>, texts: string[]): boolean {
-  if (c.genres.some((g) => tags.has(g))) return true;
+function clauseHolds(c: RuleClause, facts: TitleFacts): boolean {
+  if (c.genres.some((g) => facts.tags.has(g))) return true;
   const re = termPattern(c);
-  return re !== null && texts.some((s) => re.test(s));
+  if (re !== null && facts.texts.some((s) => re.test(s))) return true;
+  return facts.cast.length > 0 && c.terms.some((t) => facts.cast.includes(flatten(t)));
 }
 
 const patterns = new WeakMap<RuleClause, RegExp | null>();
