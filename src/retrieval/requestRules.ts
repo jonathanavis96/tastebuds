@@ -13,6 +13,14 @@ import { REQUEST_WEIGHTS, type CandidateTitle } from './retrieve.js';
 
 /** A request comes back with this many picks when enough titles satisfy it. */
 export const FULL_SET = 10;
+/**
+ * With no year in the request, a short list may take a few titles from before
+ * the recent window: at most this many, none older than this many years before
+ * the current one. They are exceptions that say why, never the bulk of a list;
+ * anything older is for a request that asks for it ("any year", "90s").
+ */
+export const MAX_OLDER_PICKS = 3;
+export const OLDER_YEARS_BACK = 10;
 /** Candidates the model is shown for a request; when film vs series is open, this many of each. */
 export const SLATE_SIZE = 40;
 export const SLATE_PER_MEDIA = 30;
@@ -82,21 +90,20 @@ export interface RulesRetrieval {
   /** Titles satisfying every rule, best first. */
   inWindow: CandidateTitle[];
   /**
-   * Older titles that satisfy every rule but the default year window, best
-   * first; offered only to fill the list when `inWindow` is short. Empty unless
-   * the default window had to be widened.
+   * Titles from just before the default year window that satisfy every other
+   * rule, best first; offered only to fill the list when `inWindow` is short.
+   * Empty unless the default window came up short.
    */
   older: CandidateTitle[];
-  /** The rules the older titles satisfy (the widened year floor); null when none were needed. */
+  /** The rules the older titles satisfy (the years just before the window); null when there are none. */
   olderRules: RequestRules | null;
 }
 
 /**
  * Retrieve under `rules`. Only a default year window (no year in the request)
- * is ever widened, and only when fewer than FULL_SET titles pass: the floor
- * moves back to ten years before the current year, then twenty, then away,
- * until the list can be filled. A stated, recent or "any" window is never
- * widened: fewer titles come back.
+ * is ever reached behind, and only when fewer than FULL_SET titles pass: the
+ * OLDER_YEARS_BACK years before the current one are searched for a few more.
+ * A stated, recent or "any" window is never widened: fewer titles come back.
  */
 export function retrieveUnderRules(
   db: InstanceType<typeof Database>,
@@ -106,24 +113,18 @@ export function retrieveUnderRules(
 ): RulesRetrieval {
   const inWindow = titlesObeying(db, rules, q);
   const floor = rules.yearMin;
-  if (rules.yearSource !== 'default' || floor === null || inWindow.length >= FULL_SET) {
+  const olderFloor = now.getFullYear() - OLDER_YEARS_BACK;
+  if (rules.yearSource !== 'default' || floor === null || olderFloor >= floor || inWindow.length >= FULL_SET) {
     return { rules, inWindow, older: [], olderRules: null };
   }
-  const cy = now.getFullYear();
-  for (const yearMin of [cy - 10, cy - 20, null]) {
-    if (yearMin !== null && yearMin >= floor) continue;
-    const olderRules: RequestRules = { ...rules, yearMin };
-    const older = titlesObeying(db, olderRules, q).filter((t) => t.year !== null && t.year < floor);
-    if (inWindow.length + older.length >= FULL_SET || yearMin === null) {
-      return { rules, inWindow, older, olderRules: older.length > 0 ? olderRules : null };
-    }
-  }
-  return { rules, inWindow, older: [], olderRules: null };
+  const olderRules: RequestRules = { ...rules, yearMin: olderFloor, yearMax: floor - 1 };
+  const older = titlesObeying(db, olderRules, q);
+  return { rules, inWindow, older, olderRules: older.length > 0 ? olderRules : null };
 }
 
-/** How many older titles may join the list: only the places the window left free. */
+/** How many older titles may join the list: the places the window left free, MAX_OLDER_PICKS at most. */
 export function olderRoom(r: RulesRetrieval): number {
-  return r.older.length > 0 ? Math.max(0, FULL_SET - r.inWindow.length) : 0;
+  return r.older.length > 0 ? Math.min(MAX_OLDER_PICKS, Math.max(0, FULL_SET - r.inWindow.length)) : 0;
 }
 
 /**
@@ -149,41 +150,43 @@ export interface ReferenceTitle {
   embedding: Buffer;
 }
 
+/** Letters and digits only, single spaces: "Spider-Man: No Way Home" → "spider man no way home". */
+function plain(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 /** "inception something on those lines" → that phrase, then each shorter word-prefix down to "inception". */
 function titlePrefixes(phrase: string): string[] {
-  const words = phrase.trim().split(/\s+/).filter(Boolean).slice(0, MAX_REFERENCE_WORDS);
-  return words
-    .map((_, i) => words.slice(0, words.length - i).join(' ').toLowerCase().replace(/[.,!?;:]+$/, ''))
-    .filter((prefix) => prefix.length > 0 && !ARTICLES.has(prefix));
+  const words = plain(phrase).split(' ').filter(Boolean).slice(0, MAX_REFERENCE_WORDS);
+  return words.map((_, i) => words.slice(0, words.length - i).join(' ')).filter((prefix) => !ARTICLES.has(prefix));
 }
 
 /**
  * The catalogue titles a request names as references ("like Inception"): for
- * each phrase, the longest word-prefix that equals a stored title (ignoring
- * case), the one with the most IMDb votes when several share the name. Titles
- * without an embedding cannot steer the ranking and are skipped.
+ * each phrase, the longest word-prefix that equals a stored title, the one with
+ * the most IMDb votes when several share the name. Case and punctuation are
+ * ignored ("spider man" is "Spider-Man"), which SQL cannot do, so the titles'
+ * names are read once: a few milliseconds, and only for a request that names a
+ * reference. Titles without an embedding cannot steer the ranking and are skipped.
  */
 export function findReferenceTitles(db: InstanceType<typeof Database>, phrases: string[]): ReferenceTitle[] {
-  const found = new Map<number, ReferenceTitle>();
-  const lookup = db.prepare(`
-    SELECT id, title, year, embedding, lower(title) AS name
-    FROM titles
-    WHERE embedding IS NOT NULL AND lower(title) IN (SELECT value FROM json_each(?))
-    ORDER BY imdb_votes DESC
-  `);
-  for (const phrase of phrases) {
-    const prefixes = titlePrefixes(phrase);
-    if (prefixes.length === 0) continue;
-    const rows = lookup.all(JSON.stringify(prefixes)) as Array<ReferenceTitle & { name: string }>;
-    for (const prefix of prefixes) {
-      const hit = rows.find((r) => r.name === prefix);
-      if (hit) {
-        found.set(hit.id, { id: hit.id, title: hit.title, year: hit.year, embedding: hit.embedding });
-        break;
-      }
-    }
+  const wanted = phrases.map(titlePrefixes).filter((prefixes) => prefixes.length > 0);
+  if (wanted.length === 0) return [];
+  const idByName = new Map<string, number>();
+  const names = db.prepare('SELECT id, title FROM titles WHERE embedding IS NOT NULL ORDER BY imdb_votes DESC, id').all() as Array<{ id: number; title: string }>;
+  for (const n of names) {
+    const name = plain(n.title);
+    if (!idByName.has(name)) idByName.set(name, n.id);
   }
-  return [...found.values()];
+  const ids = new Set<number>();
+  for (const prefixes of wanted) {
+    const id = prefixes.map((prefix) => idByName.get(prefix)).find((found) => found !== undefined);
+    if (id !== undefined) ids.add(id);
+  }
+  if (ids.size === 0) return [];
+  return db
+    .prepare('SELECT id, title, year, embedding FROM titles WHERE id IN (SELECT value FROM json_each(?))')
+    .all(JSON.stringify([...ids])) as ReferenceTitle[];
 }
 
 /**

@@ -291,7 +291,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   }
 
   const olderCount = picks.filter(p => p.older).length;
-  const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, matched, picks.length, olderCount) };
+  const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, picks.length, olderCount) };
   const ruleNote = olderCount > 0 ? olderPickNote(rules, matched) : null;
   for (const p of picks) {
     upsertRecommendation(db, {
@@ -332,13 +332,16 @@ function requestBase(ctx: Context): RequestBase {
 /** References, the final rules and the retrieval under them. Database only, so it is cheap to run again after discovery. */
 function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, requestEmbedding: number[], now: Date): Planned {
   const refs = findReferenceTitles(ctx.db, asked.similarTo);
-  const rules = withReferences(asked, refs);
+  // The profile's own IMDb setting is a rule of every request it makes, so it is
+  // part of the rules the viewer is shown; the larger of it and the request's
+  // own floor applies.
+  const ownFloor = Math.max(ctx.minImdbRating ?? 0, asked.minImdb ?? 0);
+  const rules = withReferences(ownFloor > 0 ? { ...asked, minImdb: ownFloor } : asked, refs);
   const vec = requestVector(requestEmbedding, refs);
   const queryVec = base.tasteVec ? blendRequestQueryBuf(base.tasteVec, vec) : Buffer.from(new Float32Array(vec).buffer);
-  // The rating floor: the largest of the profile's setting, the request's own
-  // floor and the hard filters' floor. Checked as a rule, so a title with no
-  // IMDb rating fails it.
-  const minImdb = Math.max(ctx.minImdbRating ?? 0, rules.minImdb ?? 0, ctx.hardFilters.minImdbRating);
+  // Under both sits the hard filters' floor. The floor is checked as a rule, so
+  // a title with no IMDb rating fails it.
+  const minImdb = Math.max(ownFloor, ctx.hardFilters.minImdbRating);
   const hardFilters = requestHardFilters(ctx, rules);
   const retrieval = retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
     queryVec,
@@ -454,19 +457,19 @@ function countPhrase(n: number): string {
  * A plain sentence for the viewer when the list is short or older titles were
  * added, saying what would show more; null for a full list from the window.
  */
-function summaryNote(rules: RequestRules, matched: number, picked: number, older: number): string | null {
-  if (older > 0) {
-    return `${capitalise(countPhrase(matched))} from ${rules.yearMin} on matched, so ${older} older ${older === 1 ? 'one was' : 'ones were'} added. ` +
-      'Name a year, or say "classic", to choose the era yourself.';
+function summaryNote(rules: RequestRules, olderRules: RequestRules | null, matched: number, picked: number, older: number): string | null {
+  if (older > 0 && olderRules) {
+    return `${capitalise(countPhrase(matched))} from ${rules.yearMin} on matched, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
+      `${older === 1 ? 'was' : 'were'} added. Say "any year" to see older ones.`;
   }
   if (picked >= FULL_SET) return null;
   const found = matched === 0 ? 'Nothing in the library matches all of this.'
     : `${capitalise(countPhrase(Math.min(matched, picked)))} ${Math.min(matched, picked) === 1 ? 'matches' : 'match'} all of this.`;
   const looser = [
-    rules.yearSource === 'stated' || rules.yearSource === 'recent' ? 'a wider year range' : null,
+    rules.yearSource === 'default' ? 'any year' : rules.yearSource === 'any' ? null : 'a wider year range',
     rules.must.length > 0 ? 'fewer genres or themes' : null,
     rules.mustNot.length > 0 ? 'fewer exclusions' : null,
-    rules.minImdb !== null ? 'a lower rating' : null,
+    rules.minImdb !== null ? 'a lower IMDb rating' : null,
     rules.mediaType !== null ? 'both films and series' : null,
     rules.language !== null ? 'any language' : null,
   ].filter((s): s is string => s !== null);

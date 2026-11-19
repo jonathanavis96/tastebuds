@@ -197,13 +197,29 @@ describe('generatePicks for a request', () => {
 
     const out = await generatePicks(db, config, { profileId: 1, request: 'thriller' }, deps({ spawnFn: spawn }));
 
+    // Three recent titles, and no more than three older ones however many would fit.
     const rows = stored(db);
-    expect(rows).toHaveLength(10);
+    expect(rows).toHaveLength(6);
     expect(rows.slice(0, 3).every(r => r.year === 2024 && r.rule_note === null)).toBe(true);
     expect(rows.slice(3).every(r => r.year === 2018 && r.rule_note === 'Older pick: only 3 titles from 2021 on matched.')).toBe(true);
-    expect(out.ok && out.feed.request).toMatchObject({ matched: 3, note: expect.stringContaining('7 older ones were added') });
+    expect(out.ok && out.feed.request).toMatchObject({
+      matched: 3,
+      note: 'Only 3 titles from 2021 on matched, so 3 from 2016 to 2020 were added. Say "any year" to see older ones.',
+    });
     // The feed shows them in the stored order: recent first.
-    expect(out.ok && out.feed.recs.map(r => r.year)).toEqual([2024, 2024, 2024, ...Array(7).fill(2018)]);
+    expect(out.ok && out.feed.recs.map(r => r.year)).toEqual([2024, 2024, 2024, 2018, 2018, 2018]);
+  });
+
+  it('never reaches further back than ten years for an unstated year', async () => {
+    const db = setupDb();
+    seed(db, 'Recent', { year: 2024 });
+    for (let i = 0; i < 12; i++) seed(db, `Old ${i}`, { year: 2008 });
+    const { spawn } = fakeClaude();
+
+    const out = await generatePicks(db, config, { profileId: 1, request: 'thriller' }, deps({ spawnFn: spawn }));
+
+    expect(stored(db).map(r => r.year)).toEqual([2024]);
+    expect(out.ok && out.feed.request?.note).toBe('Only 1 title matches all of this. Asking for any year or fewer genres or themes would show more.');
   });
 
   it('never widens a stated year: fewer picks come back, with a note on what would show more', async () => {

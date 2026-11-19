@@ -17,6 +17,7 @@ import {
   titlesObeying,
   withReferences,
   FULL_SET,
+  MAX_OLDER_PICKS,
   SLATE_PER_MEDIA,
   type RulesQuery,
 } from './requestRules.js';
@@ -147,20 +148,25 @@ describe('retrieveUnderRules: recent by default', () => {
     for (let i = 0; i < 6; i++) seed(db, `Noughties ${i}`, { year: 2008 });
   }
 
-  it('widens a default window only as far as it must, and offers older titles for the free places only', () => {
+  it('reaches ten years back for a short default window, and offers a few older titles for the free places', () => {
     const db = createDb();
     catalogue(db, 3);
     const r = retrieveUnderRules(db, rules({ must: [genre('Thriller')] }), query(), NOW);
 
     expect(r.inWindow).toHaveLength(3);
-    // Back to 2016 gives 3 + 4 = 7 < 10, so the floor goes on to 2006.
-    expect(r.olderRules?.yearMin).toBe(2006);
-    expect(r.older).toHaveLength(10);
-    expect(r.older.every(t => (t.year ?? 0) < 2021)).toBe(true);
-    expect(olderRoom(r)).toBe(FULL_SET - 3);
+    // 2016 to 2020 only: the 2008 titles are for a request that asks for them.
+    expect([r.olderRules?.yearMin, r.olderRules?.yearMax]).toEqual([2016, 2020]);
+    expect(r.older.map(t => t.year)).toEqual([2018, 2018, 2018, 2018]);
+    expect(olderRoom(r)).toBe(MAX_OLDER_PICKS);
     const slate = requestSlate(r, false);
     expect(slate.recent).toHaveLength(3);
-    expect(slate.older.length).toBeLessThanOrEqual(2 * olderRoom(r));
+    expect(slate.older).toHaveLength(4);
+  });
+
+  it('offers no more older titles than the list has free places', () => {
+    const db = createDb();
+    catalogue(db, FULL_SET - 1);
+    expect(olderRoom(retrieveUnderRules(db, rules({}), query(), NOW))).toBe(1);
   });
 
   it('does not widen once the default window holds a full set', () => {
@@ -208,6 +214,14 @@ describe('references', () => {
 
     const refs = findReferenceTitles(db, ['inception something on those lines', 'The invite', 'the']);
     expect(refs.map(r => [r.title, r.year])).toEqual([['Inception', 2010], ['The Invite', 2023]]);
+  });
+
+  it('finds a title typed without its punctuation', () => {
+    const db = createDb();
+    seed(db, 'Spider-Man: No Way Home', { year: 2021 });
+    seed(db, '2001: A Space Odyssey', { year: 1968 });
+    const refs = findReferenceTitles(db, ['spider man no way home', '2001 a space odyssey']);
+    expect(refs.map(r => r.title).sort()).toEqual(['2001: A Space Odyssey', 'Spider-Man: No Way Home']);
   });
 
   it('drops a default year window when a reference is older, and keeps a stated one', () => {
