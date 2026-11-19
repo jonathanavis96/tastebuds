@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ClaudeTimeoutError, runClaudeJson } from './runJson.js';
+import { ClaudeAuthError, ClaudeTimeoutError, runClaudeJson } from './runJson.js';
 import type { ClaudeJsonOpts, SpawnFn } from './runJson.js';
 
 /** A child process that prints `stdout` and exits with `code` as soon as it is listened to. */
@@ -83,6 +83,25 @@ describe('runClaudeJson', () => {
   it('rejects a non-zero exit with what the CLI printed to stderr', async () => {
     const { spawn } = fakeSpawn('', 1, 'Invalid API key');
     await expect(runClaudeJson(opts(spawn))).rejects.toThrow(/exited with code 1: Invalid API key/);
+  });
+
+  it('reports the reason from the JSON envelope when stderr is empty', async () => {
+    const stdout = JSON.stringify({ is_error: true, api_error_status: 529, result: 'API Error: 529 Overloaded' });
+    const { spawn } = fakeSpawn(stdout, 1);
+    await expect(runClaudeJson(opts(spawn))).rejects.toThrow(/exited with code 1: API Error: 529 Overloaded/);
+  });
+
+  it('reports a refused login as ClaudeAuthError, with the CLI’s own words', async () => {
+    const stdout = JSON.stringify({ is_error: true, api_error_status: 401, result: 'Failed to authenticate. API Error: 401 Invalid bearer token' });
+    const { spawn } = fakeSpawn(stdout, 1);
+    const outcome = runClaudeJson(opts(spawn));
+    await expect(outcome).rejects.toBeInstanceOf(ClaudeAuthError);
+    await expect(outcome).rejects.toThrow(/could not sign in: Failed to authenticate. API Error: 401 Invalid bearer token/);
+  });
+
+  it('falls back to raw stdout when a failed call printed no envelope', async () => {
+    const { spawn } = fakeSpawn('Segmentation fault', 139);
+    await expect(runClaudeJson(opts(spawn))).rejects.toThrow(/exited with code 139: Segmentation fault/);
   });
 
   it('rejects when the CLI cannot be started', async () => {

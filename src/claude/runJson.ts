@@ -9,6 +9,14 @@ export class ClaudeTimeoutError extends Error {
   }
 }
 
+/** The API refused the CLI's login (HTTP 401 or 403): trying again gives the same answer. */
+export class ClaudeAuthError extends Error {
+  constructor(reason: string) {
+    super(`claude -p could not sign in: ${reason}`);
+    this.name = 'ClaudeAuthError';
+  }
+}
+
 export interface ClaudeJsonOpts {
   prompt: string;
   /** Replaces the CLI's default system prompt, so the call carries no agent harness. */
@@ -29,8 +37,9 @@ const KILL_GRACE_MS = 5_000;
  * One `claude -p` call that returns the structured output the schema asked for.
  * Runs lean: own system prompt, no tools, no MCP servers, no settings, no
  * session file. The default CLI setup sends about 17,700 tokens of harness per
- * call; this sends a few hundred. Rejects on spawn failure, non-zero exit,
- * timeout (ClaudeTimeoutError) or output that is not the requested object.
+ * call; this sends a few hundred. Rejects on spawn failure, non-zero exit
+ * (ClaudeAuthError when the login was refused), timeout (ClaudeTimeoutError) or
+ * output that is not the requested object.
  */
 export async function runClaudeJson<T>(opts: ClaudeJsonOpts): Promise<T> {
   const spawnFn = opts.spawnFn ?? nodeSpawn;
@@ -69,7 +78,7 @@ export async function runClaudeJson<T>(opts: ClaudeJsonOpts): Promise<T> {
     proc.on('close', (code: number | null) => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(`claude -p exited with code ${code}: ${stderr.slice(0, 500)}`));
+        reject(exitError(code, stdout, stderr));
         return;
       }
       try {
@@ -84,6 +93,26 @@ export async function runClaudeJson<T>(opts: ClaudeJsonOpts): Promise<T> {
       reject(new Error(`Failed to spawn claude: ${err.message}`));
     });
   });
+}
+
+/**
+ * The error for a non-zero exit. With --output-format json the CLI writes its
+ * reason into the envelope on stdout and leaves stderr empty, so both are read:
+ * an expired token would otherwise fail every call with no reason in the log.
+ */
+function exitError(code: number | null, stdout: string, stderr: string): Error {
+  let reason = stderr.trim();
+  let status: unknown;
+  try {
+    const outer = JSON.parse(stdout) as { result?: unknown; api_error_status?: unknown };
+    status = outer.api_error_status;
+    if (!reason && typeof outer.result === 'string') reason = outer.result;
+  } catch {
+    if (!reason) reason = stdout.trim();
+  }
+  reason = reason.slice(0, 500);
+  if (status === 401 || status === 403) return new ClaudeAuthError(reason);
+  return new Error(`claude -p exited with code ${code}: ${reason}`);
 }
 
 /**

@@ -4,7 +4,7 @@ import type { CandidateTitle, CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 import { buildCurationPrompt, buildRequestPrompt, CURATION_SYSTEM_PROMPT, type RequestPromptInput } from './prompt.js';
 import { upsertRecommendation } from '../db/repos/recommendations.js';
-import { ClaudeTimeoutError, runClaudeJson, type SpawnFn } from '../claude/runJson.js';
+import { ClaudeAuthError, ClaudeTimeoutError, runClaudeJson, type SpawnFn } from '../claude/runJson.js';
 
 export type { SpawnFn };
 
@@ -78,7 +78,8 @@ function toResult(item: RawItem): CurationResult {
 /**
  * One curation call through the lean `claude -p` (runClaudeJson), retried once
  * when it fails for any reason but a timeout (retrying a stall only doubles the
- * wait). Rejects when both attempts fail.
+ * wait) or a refused login (it would be refused again). Rejects when both
+ * attempts fail.
  */
 async function runCuration(prompt: string, config: Pick<Config, 'claudeToken'>, spawnFn?: SpawnFn): Promise<CurationResult[]> {
   const MAX_ATTEMPTS = 2;
@@ -98,7 +99,7 @@ async function runCuration(prompt: string, config: Pick<Config, 'claudeToken'>, 
       return (out.items as RawItem[]).slice(0, MAX_RESULT_ITEMS).map(toResult);
     } catch (err) {
       lastErr = err;
-      if (err instanceof ClaudeTimeoutError) break;
+      if (err instanceof ClaudeTimeoutError || err instanceof ClaudeAuthError) break;
     }
   }
   throw lastErr;

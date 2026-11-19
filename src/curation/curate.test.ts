@@ -272,6 +272,20 @@ describe('curateCandidates', () => {
     ).rejects.toThrow('claude -p exited with code 1');
   });
 
+  it('does not retry a refused login, and says why it failed', async () => {
+    const envelope = JSON.stringify({ is_error: true, api_error_status: 401, result: 'Failed to authenticate. API Error: 401 Invalid bearer token' });
+    const spawnMock = vi.fn().mockReturnValue({
+      stdout: { on: vi.fn((evt: string, cb: (data: Buffer) => void) => { if (evt === 'data') cb(Buffer.from(envelope)); }) },
+      stderr: { on: vi.fn() },
+      on: vi.fn((evt: string, cb: (code: number) => void) => { if (evt === 'close') cb(1); }),
+    });
+
+    await expect(
+      curateCandidates(pool(mockCandidates), mockProfile, mockSig, null, mockConfig, mockDb, spawnMock),
+    ).rejects.toThrow(/could not sign in: Failed to authenticate/);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects on invalid JSON output', async () => {
     const spawnMock = makeSpawnMock('not valid json at all');
 
