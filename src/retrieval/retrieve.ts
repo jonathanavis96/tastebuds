@@ -41,8 +41,8 @@ export interface RetrieveOpts {
   jointProfileId?: number;
   /**
    * Minimum IMDb rating threshold. Titles with imdb_rating < minImdbRating are
-   * excluded from all candidate pools. Titles with imdb_rating IS NULL are still
-   * included (lenient: unrated ≠ bad).
+   * excluded from all candidate pools, and so are titles with no IMDb rating:
+   * a pick must have a real rating.
    */
   minImdbRating?: number;
   /**
@@ -416,7 +416,7 @@ export async function retrieveCandidates(
     const params: unknown[] = [tasteVec, profileId, ...fc.params];
     if (opts.mediaType) { sql += ' AND t.media_type = ?'; params.push(opts.mediaType); }
     if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      sql += ' AND CAST(t.imdb_rating AS REAL) >= ?';
       params.push(opts.minImdbRating);
     }
     sql += ' ORDER BY score ASC LIMIT ?';
@@ -496,7 +496,7 @@ export async function retrieveJointCandidates(
     if (opts.mediaType) { sql += ' AND t.media_type = ?'; params.push(opts.mediaType); }
     { const h = hatedGenreClause(allHated); sql += h.sql; params.push(...h.params); }
     if (opts.minImdbRating != null) {
-      sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+      sql += ' AND CAST(t.imdb_rating AS REAL) >= ?';
       params.push(opts.minImdbRating);
     }
     sql += ' ORDER BY score ASC LIMIT ?';
@@ -567,7 +567,7 @@ function runPoolQuery(
   if (mediaType) { sql += ' AND t.media_type = ?'; params.push(mediaType); }
   { const h = hatedGenreClause(hatedGenres); sql += h.sql; params.push(...h.params); }
   if (opts.minImdbRating != null) {
-    sql += ' AND (t.imdb_rating IS NULL OR CAST(t.imdb_rating AS REAL) >= ?)';
+    sql += ' AND CAST(t.imdb_rating AS REAL) >= ?';
     params.push(opts.minImdbRating);
   }
   sql += orderDir === 'RANDOM' ? ' ORDER BY RANDOM()' : ` ORDER BY score ${orderDir}`;

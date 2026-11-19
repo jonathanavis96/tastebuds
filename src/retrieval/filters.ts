@@ -1,17 +1,19 @@
 import type Database from 'better-sqlite3';
+import { DEFAULT_RECENT_YEARS } from '../request/rules.js';
 
 /**
  * Hard filters applied to EVERY candidate set before similarity ranking runs.
  *
  * Unknown metadata FAILS a filter rather than passing it: a title with no vote
- * count, no language or no release status is exactly the kind of row that used to
- * leak into picks (unreleased 2027 titles with 0 votes, 14-minute shorts, dubbed
- * TV from a language nobody in the house speaks). Metadata is filled by the TMDB
- * meta backfill (src/harvest/backfillMeta.ts), which runs at boot and nightly.
+ * count, no IMDb rating, no language or no release status is exactly the kind of
+ * row that used to leak into picks (unreleased 2027 titles with 0 votes, 14-minute
+ * shorts, dubbed TV from a language nobody in the house speaks, titles shown with
+ * no rating at all). Metadata is filled by the TMDB meta backfill
+ * (src/harvest/backfillMeta.ts) and IMDb's ratings file (src/imdb/dataset.ts).
  */
 export interface HardFilters {
-  /** Earliest release year admitted (inclusive). */
-  minYear: number;
+  /** Earliest release year admitted (inclusive); null = no year limit. */
+  minYear: number | null;
   /** Minimum runtime for MOVIES in minutes. Series are exempt (episode runtimes vary). */
   minRuntimeMovie: number;
   /** Minimum TMDB vote_count for movies. */
@@ -20,6 +22,12 @@ export interface HardFilters {
   minVotesTv: number;
   /** Minimum TMDB vote_average (0–10). */
   minVoteAverage: number;
+  /** Minimum IMDb rating (0–10). A title with no IMDb rating fails. */
+  minImdbRating: number;
+  /** Minimum IMDb votes behind that rating, for movies. */
+  minImdbVotesMovie: number;
+  /** Minimum IMDb votes behind that rating, for series. */
+  minImdbVotesTv: number;
   /** ISO 639-1 original-language codes admitted. Empty = no language filter. */
   languages: string[];
   /** Admit only released films / aired series (drops announced, in-production, rumoured). */
@@ -27,20 +35,26 @@ export interface HardFilters {
 }
 
 /**
- * Defaults derived from the liked history on 2026-09-10: 5th percentile of liked
- * release years was 1995, average liked IMDb rating 7.5 with a floor of 5.9, and
- * the harvest's own discover floor is 100 movie / 50 TV votes. 300 movie votes
- * keeps films that at least a small audience has seen; TV needs the lower bar.
+ * The defaults. A pick must have a real rating: an IMDb score of 6.0 or more
+ * with 1,000 votes behind it for a film, 500 for a series. With IMDb votes as
+ * the real gate, the TMDB vote and score floors only screen out obvious junk.
+ * Releases are recent by default: the last DEFAULT_RECENT_YEARS calendar years,
+ * counting the current one, so the floor moves on with the calendar.
  */
-export const DEFAULT_HARD_FILTERS: HardFilters = {
-  minYear: 1995,
-  minRuntimeMovie: 60,
-  minVotesMovie: 300,
-  minVotesTv: 50,
-  minVoteAverage: 6.0,
-  languages: ['en'],
-  releasedOnly: true,
-};
+export function defaultHardFilters(now: Date = new Date()): HardFilters {
+  return {
+    minYear: now.getFullYear() - (DEFAULT_RECENT_YEARS - 1),
+    minRuntimeMovie: 60,
+    minVotesMovie: 50,
+    minVotesTv: 20,
+    minVoteAverage: 5.5,
+    minImdbRating: 6.0,
+    minImdbVotesMovie: 1000,
+    minImdbVotesTv: 500,
+    languages: ['en'],
+    releasedOnly: true,
+  };
+}
 
 /** Widening never goes past these, whatever the request. */
 export const HARD_FLOOR = {
@@ -48,6 +62,8 @@ export const HARD_FLOOR = {
   minRuntimeMovie: 40,
   minVotesMovie: 20,
   minVotesTv: 10,
+  minImdbVotesMovie: 300,
+  minImdbVotesTv: 150,
 } as const;
 
 /** Film statuses TMDB reports for something you can actually watch. */
@@ -56,33 +72,47 @@ const RELEASED_MOVIE_STATUSES = ['Released'];
 const RELEASED_TV_STATUSES = ['Returning Series', 'Ended', 'Canceled'];
 
 export interface WideningStep {
-  label: string;
   apply(f: HardFilters): HardFilters;
+  /** Log label naming the filter values this step produced, e.g. "year>=2011". */
+  label(f: HardFilters): string;
 }
 
+type LoweredKey = 'minRuntimeMovie' | 'minVotesMovie' | 'minVotesTv' | 'minImdbVotesMovie' | 'minImdbVotesTv';
+
 /** Lower `key` to `target`, never raising a value that is already looser. */
-function lowerTo(key: 'minYear' | 'minRuntimeMovie' | 'minVotesMovie' | 'minVotesTv', target: number) {
+function lowerTo(key: LoweredKey, target: number) {
   return (f: HardFilters): HardFilters => (f[key] <= target ? f : { ...f, [key]: target });
 }
 
+/** Move the year floor `years` further back, never past HARD_FLOOR.minYear. */
+function yearBack(years: number) {
+  return (f: HardFilters): HardFilters =>
+    f.minYear == null || f.minYear <= HARD_FLOOR.minYear
+      ? f
+      : { ...f, minYear: Math.max(f.minYear - years, HARD_FLOOR.minYear) };
+}
+
+const yearLabel = (f: HardFilters) => `year>=${f.minYear}`;
+
 /**
- * The order a thin pool is widened in: release year first (a good 1988 film is
- * a smaller compromise than an obscure one), then runtime, then vote count.
- * Rating, language and release status are never relaxed — those are the
- * filters that separate "a film" from "junk", not "our taste" from "wider taste".
+ * The order a thin pool is widened in: release year first, ten years at a time
+ * and then to the hard floor (a good older film is a smaller compromise than an
+ * obscure one), then runtime, then the IMDb vote count, then the TMDB vote count.
+ * Rating, language and release status are never relaxed — those are the filters
+ * that separate "a film" from "junk", not "our taste" from "wider taste".
  */
 export const WIDENING_STEPS: WideningStep[] = [
-  { label: 'year>=1990', apply: lowerTo('minYear', 1990) },
-  { label: 'year>=1985', apply: lowerTo('minYear', 1985) },
-  { label: `year>=${HARD_FLOOR.minYear}`, apply: lowerTo('minYear', HARD_FLOOR.minYear) },
-  { label: `runtime>=${HARD_FLOOR.minRuntimeMovie}`, apply: lowerTo('minRuntimeMovie', HARD_FLOOR.minRuntimeMovie) },
+  { apply: yearBack(10), label: yearLabel },
+  { apply: yearBack(10), label: yearLabel },
+  { apply: yearBack(Infinity), label: yearLabel }, // straight to the hard floor
+  { apply: lowerTo('minRuntimeMovie', HARD_FLOOR.minRuntimeMovie), label: f => `runtime>=${f.minRuntimeMovie}` },
   {
-    label: 'votes>=100/25',
-    apply: f => lowerTo('minVotesTv', 25)(lowerTo('minVotesMovie', 100)(f)),
+    apply: f => lowerTo('minImdbVotesTv', HARD_FLOOR.minImdbVotesTv)(lowerTo('minImdbVotesMovie', HARD_FLOOR.minImdbVotesMovie)(f)),
+    label: f => `imdbVotes>=${f.minImdbVotesMovie}/${f.minImdbVotesTv}`,
   },
   {
-    label: `votes>=${HARD_FLOOR.minVotesMovie}/${HARD_FLOOR.minVotesTv}`,
     apply: f => lowerTo('minVotesTv', HARD_FLOOR.minVotesTv)(lowerTo('minVotesMovie', HARD_FLOOR.minVotesMovie)(f)),
+    label: f => `votes>=${f.minVotesMovie}/${f.minVotesTv}`,
   },
 ];
 
@@ -95,8 +125,10 @@ export function hardFilterSql(f: HardFilters, alias = 't'): { sql: string; param
   const parts: string[] = [];
   const params: unknown[] = [];
 
-  parts.push(`${alias}.year >= ?`);
-  params.push(f.minYear);
+  if (f.minYear != null) {
+    parts.push(`${alias}.year >= ?`);
+    params.push(f.minYear);
+  }
 
   parts.push(`(${alias}.media_type = 'tv' OR ${alias}.runtime_minutes >= ?)`);
   params.push(f.minRuntimeMovie);
@@ -106,6 +138,13 @@ export function hardFilterSql(f: HardFilters, alias = 't'): { sql: string; param
 
   parts.push(`${alias}.vote_average >= ?`);
   params.push(f.minVoteAverage);
+
+  // imdb_rating is stored as TEXT ("7.4"); NULL casts to NULL and fails.
+  parts.push(`CAST(${alias}.imdb_rating AS REAL) >= ?`);
+  params.push(f.minImdbRating);
+
+  parts.push(`((${alias}.media_type = 'movie' AND ${alias}.imdb_votes >= ?) OR (${alias}.media_type = 'tv' AND ${alias}.imdb_votes >= ?))`);
+  params.push(f.minImdbVotesMovie, f.minImdbVotesTv);
 
   if (f.languages.length > 0) {
     parts.push(`${alias}.original_language IN (${f.languages.map(() => '?').join(',')})`);
@@ -130,11 +169,11 @@ export interface WideningResult<T> {
   stepsApplied: string[];
 }
 
-const WIDENED_KEYS = ['minYear', 'minRuntimeMovie', 'minVotesMovie', 'minVotesTv'] as const;
+const WIDENED_KEYS = ['minYear', 'minRuntimeMovie', 'minVotesMovie', 'minVotesTv', 'minImdbVotesMovie', 'minImdbVotesTv'] as const;
 
-/** True when `after` is looser than `before` on at least one widened filter. */
+/** True when `after` is looser than `before` on at least one widened filter (the steps never set a limit to null). */
 function lowersAnything(before: HardFilters, after: HardFilters): boolean {
-  return WIDENED_KEYS.some(k => after[k] < before[k]);
+  return WIDENED_KEYS.some(k => after[k] != null && before[k] != null && after[k] < before[k]);
 }
 
 /**
@@ -158,7 +197,7 @@ export function withWidening<T>(
     // step changed nothing, so it is neither logged nor re-queried.
     if (!lowersAnything(filters, next)) continue;
     filters = next;
-    stepsApplied.push(step.label);
+    stepsApplied.push(step.label(filters));
     rows = query(filters);
     if (rows.length >= best.rows.length) best = { rows, filters, stepsApplied: [...stepsApplied] };
   }
@@ -197,17 +236,21 @@ export function languagesFromHistory(
 }
 
 /**
- * The loosest filters the widening ladder can ever reach, given a strict set:
- * what a stored pick must still satisfy to be shown. Rating, language and
- * release state are never relaxed by the ladder, so they stay as given.
+ * What a stored pick must still satisfy to be shown: the loosest values the
+ * widening ladder can reach, and no year limit at all, since a request may
+ * legitimately ask for a 1970s film and every pick was checked against its own
+ * request before it was stored. Rating, language and release state are never
+ * relaxed by the ladder, so they stay as given.
  */
 export function floorFilters(f: HardFilters): HardFilters {
   return {
     ...f,
-    minYear: Math.min(f.minYear, HARD_FLOOR.minYear),
+    minYear: null,
     minRuntimeMovie: Math.min(f.minRuntimeMovie, HARD_FLOOR.minRuntimeMovie),
     minVotesMovie: Math.min(f.minVotesMovie, HARD_FLOOR.minVotesMovie),
     minVotesTv: Math.min(f.minVotesTv, HARD_FLOOR.minVotesTv),
+    minImdbVotesMovie: Math.min(f.minImdbVotesMovie, HARD_FLOOR.minImdbVotesMovie),
+    minImdbVotesTv: Math.min(f.minImdbVotesTv, HARD_FLOOR.minImdbVotesTv),
   };
 }
 

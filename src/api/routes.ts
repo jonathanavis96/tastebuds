@@ -10,7 +10,7 @@ import { upsertWatchEvent, getWatchEvents, getEngagedTitleIds, deleteWatchEvent,
 import { getTitleById, updateTitleRatings, updateTitleRtUrl, updateTitleRtRating, markTitleRtChecked, countTitles } from '../db/repos/titles.js';
 import { retrieveCandidatePool, retrieveJointCandidatePool, retrieveRequestCandidates, retrieveJointRequestCandidates, retrieveColdStartPool } from '../retrieval/retrieve.js';
 import type { RecommendationRow } from '../db/types.js';
-import { DEFAULT_HARD_FILTERS, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
+import { defaultHardFilters, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import { getOmdbRatings, OmdbUnavailableError } from '../omdb/client.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
 import { curateCandidates } from '../curation/curate.js';
@@ -20,6 +20,7 @@ import { ensureRequestCoverage, mergeRequestGenresToProfile } from '../harvest/o
 import { applyDismissReasonToPrefs, removeDismissReasonFromPrefs, DISMISS_REASON_TILES, type DismissReason } from '../curation/dismissFeedback.js';
 import { createRateLimiter } from './auth.js';
 import { tasteChartForProfile } from '../retrieval/tasteChart.js';
+import type { RequestSummary } from '../request/rules.js';
 
 /** How long a pending pick waits before Rotten Tomatoes is tried for it again. */
 const RT_RETRY_SECONDS = 30 * 24 * 60 * 60;
@@ -160,11 +161,13 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // Attach display/detail fields from the joined title (the embedding Buffer is omitted).
   // Also fold in this profile's own watch_event (if any) so a card opened from Picks
   // shows its TRUE state — watched/rated/noted — and supports re-rating + note edits.
-  const enrichRec = (rec: { title_id: number; profile_id?: number }) => {
+  // The batch's request_summary is returned once, beside the recs, not on each one.
+  const enrichRec = ({ request_summary: _summary, ...rec }: RecommendationRow) => {
     const t = getTitleById(db, rec.title_id);
-    const we = rec.profile_id != null ? getWatchEvent(db, rec.profile_id, rec.title_id) : undefined;
+    const we = getWatchEvent(db, rec.profile_id, rec.title_id);
     return {
       ...rec,
+      rule_note: rec.rule_note ?? null,
       we_status: we?.status ?? null,
       rating: we?.rating ?? null,
       watched_at: we?.watched_at ?? null,
@@ -179,6 +182,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
       tmdb_id: t?.tmdb_id ?? null,
       imdb_id: t?.imdb_id ?? null,
       imdb_rating: t?.imdb_rating ?? null,
+      imdb_votes: t?.imdb_votes ?? null,
       rt_rating: t?.rt_rating ?? null,
       rt_url: t?.rt_url ?? null,
       vote_average: t?.vote_average ?? null,
@@ -213,7 +217,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     const overrides = config.hardFilters ?? {};
     const learned = languagesFromHistory(db, memberIds);
     return {
-      ...DEFAULT_HARD_FILTERS,
+      ...defaultHardFilters(),
       ...Object.fromEntries(Object.entries(overrides).filter(([k, v]) => k !== 'languages' && v != null)),
       languages: [...new Set([...learned, ...(overrides.languages ?? [])])],
     };
@@ -230,6 +234,13 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
   };
 
+  // The feed: visible pending picks, newest batch first, and the summary of the
+  // request that produced the newest of them (null when it had none).
+  const feedFor = (profileId: number) => {
+    const visible = visibleRecs(profileId, getRecommendations(db, profileId, 'pending'));
+    return { recs: visible.map(enrichRec), request: parseRequestSummary(visible[0]?.request_summary ?? null) };
+  };
+
   api.get('/recommendations/:profileId', (c) => {
     const profileId = parseInt(c.req.param('profileId'));
     if (isNaN(profileId)) return c.json({ error: 'Invalid profileId' }, 400);
@@ -237,8 +248,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Hide any title the profile has ENGAGED with — watched OR on the watchlist.
     // A watched title is done; a watchlisted title is already chosen. Neither should
     // remain in Picks. (Was watched-only before, so watchlist items leaked through.)
-    const recs = visibleRecs(profileId, getRecommendations(db, profileId, 'pending')).map(enrichRec);
-    return c.json(recs);
+    return c.json(feedFor(profileId));
   });
 
   api.post('/generate', async (c) => {
@@ -435,8 +445,7 @@ export function createApiRoutes(db: Database, config: Config): Hono {
     // Filter the response the same way /recommendations does, so an engaged title
     // (e.g. a still-pending rec from before it was watched/watchlisted) never shows
     // in the cards immediately after generating.
-    const recs = visibleRecs(body.profileId, getRecommendations(db, body.profileId, 'pending')).map(enrichRec);
-    return c.json(recs);
+    return c.json(feedFor(body.profileId));
   });
 
   api.post('/rate', async (c) => {
@@ -643,6 +652,23 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   });
 
   return api;
+}
+
+/** The RequestSummary stored with a pick, or null when there is none or it does not parse. */
+function parseRequestSummary(raw: string | null): RequestSummary | null {
+  if (raw == null) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<RequestSummary> | null;
+    if (v && typeof v.text === 'string' && Array.isArray(v.understood) && typeof v.matched === 'number') {
+      return {
+        text: v.text,
+        understood: v.understood.filter((u): u is string => typeof u === 'string'),
+        matched: v.matched,
+        note: typeof v.note === 'string' ? v.note : null,
+      };
+    }
+  } catch { /* stored text is not JSON */ }
+  return null;
 }
 
 /** A star rating: a number from 1 to 5 in half-star steps. */

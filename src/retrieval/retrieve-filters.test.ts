@@ -1,7 +1,8 @@
 /**
  * End-to-end: hard filters + widening + rerank through the real retrieval paths.
  * Seeds a catalogue of "good" titles alongside the exact kinds of junk that used
- * to leak into picks (unreleased, zero-vote, non-English, shorts, pre-1980) and
+ * to leak into picks (unreleased, zero-vote, non-English, shorts, pre-1980, no
+ * real IMDb rating) and
  * checks none of it comes back through any path.
  */
 import { describe, it, expect } from 'vitest';
@@ -12,7 +13,7 @@ import { upsertTitle } from '../db/repos/titles.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
-import { DEFAULT_HARD_FILTERS } from './filters.js';
+import { defaultHardFilters } from './filters.js';
 import {
   retrieveCandidatePool,
   retrieveJointCandidatePool,
@@ -25,6 +26,8 @@ import {
 import type { Config } from '../config.js';
 
 const mockConfig: Pick<Config, 'ollamaUrl'> = { ollamaUrl: 'http://localhost:11434' };
+/** Fixed clock for the rolling year floor: recent means 2021 or newer. */
+const DEFAULT_HARD_FILTERS = defaultHardFilters(new Date('2026-06-01T00:00:00Z'));
 const DIM = 8;
 
 function vec(hot: number, spread = 0): Buffer {
@@ -42,16 +45,20 @@ function createTestDb(): InstanceType<typeof Database> {
 }
 
 let nextTmdb = 1;
+/** A title passing every default filter unless overridden. upsertTitle does not write imdb_votes, so it is set here. */
 function seedTitle(db: InstanceType<typeof Database>, title: string, overrides: Record<string, unknown> = {}): number {
+  const { imdb_votes = 4000, ...rest } = overrides;
   upsertTitle(db, {
-    tmdb_id: nextTmdb++, media_type: 'movie', title, year: 2012,
+    tmdb_id: nextTmdb++, media_type: 'movie', title, year: 2023,
     genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: title, poster_path: null,
     embedding: vec(0, 0.2), updated_at: '2026-01-01',
     original_language: 'en', runtime_minutes: 105, vote_average: 7.2, vote_count: 1500,
-    status: 'Released', popularity: 30,
-    ...overrides,
+    status: 'Released', popularity: 30, imdb_rating: '7.3',
+    ...rest,
   });
-  return (db.prepare('SELECT id FROM titles WHERE title = ?').get(title) as { id: number }).id;
+  const id = (db.prepare('SELECT id FROM titles WHERE title = ?').get(title) as { id: number }).id;
+  db.prepare('UPDATE titles SET imdb_votes = ? WHERE id = ?').run(imdb_votes, id);
+  return id;
 }
 
 function seedProfile(db: InstanceType<typeof Database>, name: string, isDerived = 0, withVector = true): number {
@@ -81,6 +88,11 @@ const JUNK: Array<[string, Record<string, unknown>]> = [
   ['Fourteen Minute Short', { runtime_minutes: 14 }],
   ['Silent Era', { year: 1927 }],
   ['Low Rated', { vote_average: 4.8 }],
+  ['Not Recent', { year: 2015 }],
+  ['No IMDb Rating', { imdb_rating: null }],
+  ['Low IMDb Rating', { imdb_rating: '5.4' }],
+  ['Few IMDb Votes', { imdb_votes: 120 }],
+  ['No IMDb Votes', { imdb_votes: null }],
   ['No Metadata', { original_language: null, runtime_minutes: null, vote_average: null, vote_count: null, status: null }],
   ['Announced Series', { media_type: 'tv', status: 'Planned', vote_count: 0 }],
 ];
@@ -147,16 +159,21 @@ describe('hard filters through the real retrieval paths', () => {
 });
 
 describe('widening through the request path', () => {
-  it('widens year → runtime → votes in order until the pool minimum is met, and reports the steps', async () => {
+  it('widens year → runtime → IMDb votes in order until the pool minimum is met, and reports the steps', async () => {
     const db = createTestDb();
     const pid = seedProfile(db, 'A');
-    // 4 strict-passing movies, 4 more unlocked at year>=1985, 4 more at runtime>=40,
-    // 8 more at votes>=100 — 20 in total, which is MIN_POOL_ROWS, so the ladder stops there.
+    // 4 strict-passing movies, then 3 unlocked at year>=2011, 3 at year>=2001,
+    // 2 at year>=1980, 2 at runtime>=40 and 6 at IMDb votes>=300 — 20 in total,
+    // which is MIN_POOL_ROWS, so the ladder stops before the TMDB vote step.
     for (let i = 0; i < 4; i++) seedTitle(db, `Strict ${i}`);
-    for (let i = 0; i < 4; i++) seedTitle(db, `Eighties ${i}`, { year: 1986 });
-    for (let i = 0; i < 4; i++) seedTitle(db, `Short ${i}`, { runtime_minutes: 45 });
-    for (let i = 0; i < 8; i++) seedTitle(db, `Lesser Known ${i}`, { vote_count: 120 });
-    seedTitle(db, 'Still Junk', { vote_count: 3 });
+    for (let i = 0; i < 3; i++) seedTitle(db, `Tens ${i}`, { year: 2014 });
+    for (let i = 0; i < 3; i++) seedTitle(db, `Noughties ${i}`, { year: 2004 });
+    for (let i = 0; i < 2; i++) seedTitle(db, `Eighties ${i}`, { year: 1986 });
+    for (let i = 0; i < 2; i++) seedTitle(db, `Short ${i}`, { runtime_minutes: 45 });
+    for (let i = 0; i < 6; i++) seedTitle(db, `Lesser Known ${i}`, { imdb_votes: 400 });
+    seedTitle(db, 'Few TMDB Votes', { vote_count: 30 });
+    seedTitle(db, 'Seventies', { year: 1975 });
+    seedTitle(db, 'Unrated', { imdb_rating: null });
 
     let steps: string[] = [];
     const req = await retrieveRequestCandidates(
@@ -165,12 +182,16 @@ describe('widening through the request path', () => {
       mockConfig, embedFn,
     );
     const titles = req.map(c => c.title);
-    expect(steps).toEqual(['year>=1990', 'year>=1985', 'year>=1980', 'runtime>=40', 'votes>=100/25']);
+    expect(steps).toEqual(['year>=2011', 'year>=2001', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150']);
     expect(titles.filter(t => t.startsWith('Strict'))).toHaveLength(4);
-    expect(titles.filter(t => t.startsWith('Eighties'))).toHaveLength(4);
-    expect(titles.filter(t => t.startsWith('Short'))).toHaveLength(4);
-    expect(titles.filter(t => t.startsWith('Lesser'))).toHaveLength(8);
-    expect(titles).not.toContain('Still Junk');
+    expect(titles.filter(t => t.startsWith('Tens'))).toHaveLength(3);
+    expect(titles.filter(t => t.startsWith('Noughties'))).toHaveLength(3);
+    expect(titles.filter(t => t.startsWith('Eighties'))).toHaveLength(2);
+    expect(titles.filter(t => t.startsWith('Short'))).toHaveLength(2);
+    expect(titles.filter(t => t.startsWith('Lesser'))).toHaveLength(6);
+    expect(titles).not.toContain('Few TMDB Votes');
+    expect(titles).not.toContain('Seventies');
+    expect(titles).not.toContain('Unrated');
     expect(req.length).toBe(MIN_POOL_ROWS);
   });
 
