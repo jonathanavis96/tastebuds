@@ -94,22 +94,23 @@ const HIDDEN_GEM_MAX_VOTES = 50_000;
 /** IMDb and TMDB genre names → the names the expectations use. */
 const GENRE_ALIASES: Record<string, string[]> = {
   'Sci-Fi': ['Science Fiction'],
-  'Sci-Fi & Fantasy': ['Science Fiction', 'Fantasy'],
-  'Action & Adventure': ['Action', 'Adventure'],
-  'War & Politics': ['War'],
   Kids: ['Family'],
   Musical: ['Music'],
   'Reality-TV': ['Reality'],
 };
 
-/** Keywords that name a genre outright (used for series only, see genresOf). */
+/**
+ * Series keywords that name a genre outright, for the genres TMDB's TV list
+ * lacks. The last word is what the series is: "horror comedy" is a comedy.
+ */
 const KEYWORD_GENRES: Array<[RegExp, string]> = [
-  [/\bthriller\b|^suspense$/, 'Thriller'],
-  [/\bhorror\b|^slasher$/, 'Horror'],
-  [/\bscience fiction\b|\bsci-fi\b/, 'Science Fiction'],
-  [/\bsitcom\b|\bromcom\b|\bromantic comedy\b/, 'Comedy'],
-  [/\bromcom\b|\bromantic comedy\b/, 'Romance'],
-  [/\bwhodunit\b/, 'Mystery'],
+  [/(^| )thriller$|^suspense$/, 'Thriller'],
+  [/(^| )horror$|^slasher$/, 'Horror'],
+  [/^science fiction$|^sci-fi$/, 'Science Fiction'],
+  [/(^| )fantasy$/, 'Fantasy'],
+  [/(^| )romance$|^romcom$|^romantic comedy$/, 'Romance'],
+  [/^romcom$|^romantic comedy$/, 'Comedy'],
+  [/(^| )musical$/, 'Music'],
 ];
 
 function jsonArray(raw: string | null): string[] {
@@ -122,20 +123,50 @@ function jsonArray(raw: string | null): string[] {
   }
 }
 
+/**
+ * What makes a "Sci-Fi & Fantasy" series one or the other. IMDb's data file
+ * lists three genres per title in alphabetical order, so Sci-Fi is often cut and
+ * IMDb saying nothing proves nothing (Black Mirror: Crime, Drama, Mystery).
+ */
+const SCI_FI_SIGNS = /\b(science fiction|sci-fi|dystopian?|post-apocalyptic|time travel|time machine|time loop|aliens?|extraterrestrial|ufo|space|spacecraft|spaceship|planet|astronauts?|artificial intelligence|robots?|androids?|cyborgs?|cyberpunk|mutants?|clon(e|es|ing)|genetic engineering|virtual reality|simulation|parallel (universe|world)|multiverse|alternate (history|reality|timeline)|future|futuristic|technology|scientists?|experiments?|nuclear war|superhero(es)?|teleportation|telekinesis|mecha|kaiju|steampunk)\b/;
+const FANTASY_SIGNS = /\b(fantasy|magic|sorcery|sorcerer|witch(es)?|wizards?|dragons?|elf|elves|dwarf|trolls?|fairy|mythology|curse|demons?|vampires?|werewol(f|ves)|ghosts?|supernatural|paranormal|gods?|goddess|underworld|afterlife|reincarnation|alchemy|mermaids?|monsters?|exorcism|possession|immortal(ity)?|chosen one|isekai|yokai|zombies?|undead|devil|prophecy|folklore|shapeshifter|necromancer|occult)\b/;
+
+/**
+ * Which side of TMDB's "Sci-Fi & Fantasy" a series is on. IMDb names win where
+ * they can: a list with Sci-Fi is complete for Fantasy (it sorts earlier), a
+ * list with Fantasy may have lost Sci-Fi only if it is full (three names).
+ * Where IMDb cannot say, the keywords do: one side when they point there three
+ * times as often as to the other, otherwise both.
+ */
+function sciFiOrFantasy(imdb: string[], keywords: string[]): string[] {
+  if (imdb.includes('Sci-Fi')) return [];
+  const lower = keywords.map((k) => k.toLowerCase());
+  const sciFi = lower.filter((k) => SCI_FI_SIGNS.test(k)).length;
+  const fantasy = lower.filter((k) => FANTASY_SIGNS.test(k)).length;
+  if (imdb.includes('Fantasy')) return imdb.length >= 3 && sciFi > 0 && fantasy < 3 * sciFi ? ['Science Fiction'] : [];
+  if (sciFi > 0 && sciFi >= 3 * fantasy) return ['Science Fiction'];
+  if (fantasy > 0 && fantasy >= 3 * sciFi) return ['Fantasy'];
+  return ['Science Fiction', 'Fantasy'];
+}
+
 function genresOf(p: PickRow): Set<string> {
-  const out = new Set<string>();
   const imdb = jsonArray(p.imdb_genres);
-  for (const g of [...jsonArray(p.genres), ...imdb]) {
-    // A TV bundle is split by IMDb's genres when those are known.
-    const bundle = GENRE_ALIASES[g];
-    if (bundle && bundle.length > 1 && imdb.length > 0) continue;
-    for (const name of bundle ?? [g]) out.add(name);
+  const keywords = jsonArray(p.keywords);
+  // IMDb's own genres always count, under the names the expectations use.
+  const out = new Set<string>(imdb.flatMap((g) => GENRE_ALIASES[g] ?? [g]));
+  for (const g of jsonArray(p.genres)) {
+    if (g === 'Sci-Fi & Fantasy') { for (const name of sciFiOrFantasy(imdb, keywords)) out.add(name); continue; }
+    // "Action" and "Adventure" sort first, so IMDb's three never cut them.
+    if (g === 'Action & Adventure') { if (imdb.length === 0) { out.add('Action'); out.add('Adventure'); } continue; }
+    // Mostly political drama: War needs IMDb or a keyword to say so.
+    if (g === 'War & Politics') { if (keywords.some((k) => /\b(war|battle|soldier|military|army)\b/i.test(k))) out.add('War'); continue; }
+    for (const name of GENRE_ALIASES[g] ?? [g]) out.add(name);
   }
   // TMDB has no Thriller or Horror genre for series, so a keyword naming one
   // counts there. Films have both genre fields; a keyword such as "comedy
   // horror" on a satire would mislabel them.
   if (p.media_type === 'tv') {
-    for (const kw of jsonArray(p.keywords)) {
+    for (const kw of keywords) {
       const k = kw.toLowerCase();
       for (const [re, genre] of KEYWORD_GENRES) if (re.test(k)) out.add(genre);
     }
