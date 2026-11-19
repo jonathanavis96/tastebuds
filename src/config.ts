@@ -82,6 +82,11 @@ export interface Config {
    */
   metaBackfillCap?: number;
   /**
+   * Maximum Rotten Tomatoes pages re-read by the nightly refresh (one a second).
+   * Defaults to 600. Set via RT_REFRESH_CAP env var.
+   */
+  rtRefreshCap?: number;
+  /**
    * Overrides for the retrieval hard filters (see src/retrieval/filters.ts
    * DEFAULT_HARD_FILTERS). Each is optional; unset keys keep the default. Set via
    * RETRIEVAL_MIN_YEAR, RETRIEVAL_MIN_RUNTIME, RETRIEVAL_MIN_VOTES_MOVIE,
@@ -105,6 +110,8 @@ export const HARVEST_CRON_DEFAULT = '0 3 * * *';
 export const RATINGS_BACKFILL_CAP_DEFAULT = 800;
 /** Default TMDB metadata backfill cap per run. */
 export const META_BACKFILL_CAP_DEFAULT = 20000;
+/** Default Rotten Tomatoes pages re-read per nightly refresh. */
+export const RT_REFRESH_CAP_DEFAULT = 600;
 
 /** Default consecutive pages swept per global broad bucket per harvest run. */
 export const HARVEST_PAGES_PER_BUCKET_DEFAULT = 4;
@@ -162,6 +169,9 @@ export function loadConfig(): Config {
     metaBackfillCap: process.env.META_BACKFILL_CAP
       ? parseInt(process.env.META_BACKFILL_CAP, 10)
       : META_BACKFILL_CAP_DEFAULT,
+    rtRefreshCap: process.env.RT_REFRESH_CAP
+      ? parseInt(process.env.RT_REFRESH_CAP, 10)
+      : RT_REFRESH_CAP_DEFAULT,
     hardFilters: parseHardFilterEnv(process.env),
   };
 }

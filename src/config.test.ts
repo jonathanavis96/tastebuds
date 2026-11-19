@@ -52,6 +52,13 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow('CLAUDE_CODE_OAUTH_TOKEN');
   });
 
+  it('reads RT_REFRESH_CAP and defaults it to 600', () => {
+    delete process.env.RT_REFRESH_CAP;
+    expect(loadConfig().rtRefreshCap).toBe(600);
+    process.env.RT_REFRESH_CAP = '30';
+    expect(loadConfig().rtRefreshCap).toBe(30);
+  });
+
   it('omdbApiKey is undefined when OMDB_API_KEY not set', () => {
     delete process.env.OMDB_API_KEY;
     const config = loadConfig();

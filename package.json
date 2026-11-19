@@ -12,6 +12,10 @@
     "seed": "tsx src/seed/seedProfiles.ts",
     "harvest": "tsx src/harvest/harvest.ts",
     "backfill:meta": "tsx src/harvest/backfillMetaCli.ts",
+    "ratings:sync": "tsx src/ratings/cli.ts sync",
+    "ratings:genres": "tsx src/ratings/cli.ts genres",
+    "ratings:rt": "tsx src/ratings/cli.ts rt",
+    "ratings:imdb-ids": "tsx src/ratings/cli.ts imdb-ids",
     "eval:taste": "tsx src/eval/tasteEval.ts"
   },
   "dependencies": {

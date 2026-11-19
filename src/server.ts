@@ -7,6 +7,7 @@ import { runMigrations } from './db/migrate.js';
 import { createApiRoutes } from './api/routes.js';
 import { startHarvestCron } from './harvest/cron.js';
 import { backfillTitleMeta } from './harvest/backfillMeta.js';
+import { runStartupRatingsSync } from './ratings/startup.js';
 import { loadConfig, META_BACKFILL_CAP_DEFAULT } from './config.js';
 
 dotenvConfig();
@@ -28,6 +29,10 @@ void (async () => {
     console.error('[tastebuds] Startup meta backfill failed:', err);
   }
 })();
+
+// IMDb's ratings file when the copy on disk is missing or over 36 hours old, and
+// IMDb's genres when no title has them yet. Background only: the server starts now.
+void runStartupRatingsSync(db, config);
 
 const app = new Hono();
 app.route('/api', createApiRoutes(db, config));
