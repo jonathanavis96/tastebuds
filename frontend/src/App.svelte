@@ -8,8 +8,12 @@
   import DetailModal from './components/DetailModal.svelte';
   import TasteChart from './components/TasteChart.svelte';
   import CategoryLegend from './components/CategoryLegend.svelte';
+  import RequestSummary from './components/RequestSummary.svelte';
   import { compareTimestamps } from './lib/time.js';
-  import type { Profile, Recommendation, WatchEvent, MediaFilter, DismissReason } from './lib/types.js';
+  import type {
+    Profile, Recommendation, WatchEvent, MediaFilter, DismissReason, FeedResponse,
+    RequestSummary as RequestSummaryData,
+  } from './lib/types.js';
   import {
     getProfiles, getRecommendations, generateRecommendations,
     rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation, dismissReason,
@@ -59,6 +63,9 @@
   let profiles = $state<Profile[]>([]);
   let activeProfileId = $state<number | null>(null);
   let recommendations = $state<Recommendation[]>([]);
+  // What the server read the newest request as. It comes back with the feed too, so
+  // it survives a reload.
+  let requestSummary = $state<RequestSummaryData | null>(null);
   // Rec ids the user marked "Not interested" THIS session. They stay visible in the
   // feed (marked, dimmed) instead of vanishing — so the grid never jumps — and clear
   // on the next Generate/Surprise/profile-switch (when a fresh pending list loads).
@@ -97,6 +104,8 @@
   $effect(() => { lsSet(LS.wdSort, watchedSort); });
   let loading = $state(false);
   let generating = $state(false);
+  // Whether the running generate has typed text to read, which changes what the status says.
+  let readingRequest = $state(false);
   let error = $state('');
 
   // Detail modal — a carousel over the current list (Picks / Watchlist / Watched).
@@ -292,12 +301,14 @@
     if (!activeProfileId) return;
     if (!silent) loading = true;
     try {
-      [recommendations, watchlist, watched, calibration] = await Promise.all([
+      let feed: FeedResponse;
+      [feed, watchlist, watched, calibration] = await Promise.all([
         getRecommendations(activeProfileId),
         getWatchlist(activeProfileId),
         getWatched(activeProfileId),
         getCalibration(activeProfileId),
       ]);
+      showFeed(feed);
     } catch (e) {
       error = String(e);
     } finally {
@@ -305,11 +316,17 @@
     }
   }
 
+  function showFeed(feed: FeedResponse) {
+    recommendations = feed.recs;
+    requestSummary = feed.request;
+  }
+
   async function switchProfile(id: number) {
     activeProfileId = id;
     closeModal();
     // Clear stale data so a slow fetch never shows the previous profile's lists.
     recommendations = [];
+    requestSummary = null;
     dismissedRecIds = [];
     watchlist = [];
     watched = [];
@@ -321,13 +338,14 @@
   async function handleGenerate(request?: string) {
     if (!activeProfileId) return;
     generating = true;
+    readingRequest = !!request;
     error = '';
     try {
       const opts: Parameters<typeof generateRecommendations>[0] = { profileId: activeProfileId };
       if (mediaFilter === 'movie') opts.mediaType = 'movie';
       if (mediaFilter === 'tv') opts.mediaType = 'tv';
       if (request) opts.request = request;
-      recommendations = await generateRecommendations(opts);
+      showFeed(await generateRecommendations(opts));
       dismissedRecIds = [];
     } catch (e) {
       error = String(e);
@@ -341,12 +359,13 @@
   async function handleSurpriseMe() {
     if (!activeProfileId) return;
     generating = true;
+    readingRequest = false;
     error = '';
     try {
       const opts: Parameters<typeof generateRecommendations>[0] = { profileId: activeProfileId, surprise: true };
       if (mediaFilter === 'movie') opts.mediaType = 'movie';
       if (mediaFilter === 'tv') opts.mediaType = 'tv';
-      recommendations = await generateRecommendations(opts);
+      showFeed(await generateRecommendations(opts));
       dismissedRecIds = [];
     } catch (e) {
       error = String(e);
@@ -457,14 +476,23 @@
 
     {#if error}<p class="error">{error}</p>{/if}
 
+    <!-- The status and the summary share one slot, so the summary replaces the
+         status when picks arrive instead of pushing the feed down. -->
     {#if generating}
-      <div class="gen-status">
+      <div class="gen-status" role="status">
         <span class="spinner"></span>
         <div>
-          <strong>Sonnet is curating your picks…</strong>
-          <span class="sub">Reading your taste + scoring candidates. Usually 30–45s.</span>
+          {#if readingRequest}
+            <strong>Reading your request…</strong>
+            <span class="sub">Then finding the titles that match all of it and ranking them for your taste. This can take up to a minute.</span>
+          {:else}
+            <strong>Finding your picks…</strong>
+            <span class="sub">Ranking the titles that fit for your taste. This can take up to a minute.</span>
+          {/if}
         </div>
       </div>
+    {:else if !loading}
+      <RequestSummary summary={requestSummary} recommendations={visibleRecs} />
     {/if}
 
     {#if loading && !generating}

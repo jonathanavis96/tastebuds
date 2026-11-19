@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getProfiles, getRecommendations, rateTitle, addToWatchlist, updateProfileConfig, dismissReason, removeWatch } from './api.js';
+import { getProfiles, getRecommendations, generateRecommendations, rateTitle, addToWatchlist, updateProfileConfig, dismissReason, removeWatch } from './api.js';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn());
@@ -23,13 +23,45 @@ describe('getProfiles', () => {
   });
 });
 
+const feed = {
+  recs: [{
+    id: 1, profile_id: 1, title_id: 2, category: 'Top pick', score: 0.9, why_blurb: 'Great',
+    request_text: 'thriller new 2025', state: 'pending', created_at: '2026-06-22T00:00:00.000Z',
+    tags: ['Thriller', 'Crime'], rule_note: null, imdb_votes: 48_210,
+  }],
+  request: { text: 'thriller new 2025', understood: ['Thriller', '2025 or newer'], matched: 13, note: null },
+};
+
 describe('getRecommendations', () => {
-  it('fetches from /api/recommendations/:profileId', async () => {
-    const mockRecs = [{ id: 1, profile_id: 1, title_id: 2, category: 'Top pick', score: 0.9, why_blurb: 'Great', request_text: null, state: 'pending', created_at: '2026-06-22T00:00:00.000Z' }];
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(mockRecs), { status: 200 }));
+  it('fetches from /api/recommendations/:profileId and returns the picks with their request', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(feed), { status: 200 }));
     const result = await getRecommendations(1);
     expect(fetch).toHaveBeenCalledWith('/api/recommendations/1');
-    expect(result).toEqual(mockRecs);
+    expect(result).toEqual(feed);
+  });
+
+  it('passes on a feed with no request behind it', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ recs: [], request: null }), { status: 200 }));
+    expect(await getRecommendations(1)).toEqual({ recs: [], request: null });
+  });
+});
+
+describe('generateRecommendations', () => {
+  it('POSTs the request to /api/generate and returns the picks with what was understood', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify(feed), { status: 200 }));
+    const result = await generateRecommendations({ profileId: 1, request: 'thriller new 2025' });
+    expect(fetch).toHaveBeenCalledWith('/api/generate', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ profileId: 1, request: 'thriller new 2025' }),
+    }));
+    expect(result.request?.matched).toBe(13);
+    expect(result.recs[0].tags).toEqual(['Thriller', 'Crime']);
+  });
+
+  it('throws on non-200 response, without retrying', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 429 }));
+    await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow('generate failed: 429');
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 

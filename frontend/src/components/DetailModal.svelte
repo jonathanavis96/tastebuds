@@ -17,6 +17,10 @@
     imdb_rating?: string | null;
     rt_rating?: string | null;
     rt_url?: string | null;
+    imdb_votes?: number | null;
+    /** Canonical genres; only picks carry them, so history and watchlist items fall back to `genres`. */
+    tags?: string[];
+    rule_note?: string | null;
     kind?: RecKind;
     category?: string;
     why_blurb?: string;
@@ -59,15 +63,17 @@
   }: Props = $props();
 
   const meta = $derived(item.kind ? kindMeta(item) : null);
-  const genres = $derived(parseList(item.genres, 4));
+  const genres = $derived(item.tags ?? parseList(item.genres, 4));
   const cast = $derived(parseList(item.cast, 6));
   const categoryBlurb = $derived(item.category ? CATEGORY_BLURBS[item.category] : undefined);
   const imdbUrl = $derived(item.imdb_id ? `https://www.imdb.com/title/${item.imdb_id}/` : null);
   const rtUrl = $derived(item.rt_url ?? null);
   // Build label text in JS so the space between label and number is never
-  // collapsed by the template compiler.
-  const imdbText = $derived(item.imdb_rating ? `IMDb ${item.imdb_rating}` : 'IMDb');
-  const rtText = $derived(item.rt_rating ? `🍅 ${item.rt_rating}` : '🍅 RT');
+  // collapsed by the template compiler. A missing rating shows no chip at all, so
+  // a bare "IMDb" link never passes for a score.
+  const imdbText = $derived(item.imdb_rating ? `IMDb ${item.imdb_rating}` : null);
+  const rtText = $derived(item.rt_rating ? `🍅 ${item.rt_rating}` : null);
+  const imdbVotes = $derived(item.imdb_votes ? `${item.imdb_votes.toLocaleString()} IMDb votes` : undefined);
 
   // Local, optimistic state so actions update IN PLACE without closing the modal.
   let rating = $state<number | null>(null);
@@ -385,18 +391,20 @@
         {#if genres.length}
           <div class="genres">{#each genres as g}<span class="pill">{g}</span>{/each}</div>
         {/if}
-        <div class="scores">
-          {#if imdbUrl}
-            <a class="score imdb" href={imdbUrl} target="_blank" rel="noopener">{imdbText} ↗</a>
-          {:else if item.imdb_rating}
-            <span class="score imdb">{imdbText}</span>
-          {/if}
-          {#if rtUrl}
-            <a class="score rt" href={rtUrl} target="_blank" rel="noopener">{rtText} ↗</a>
-          {:else if item.rt_rating}
-            <span class="score rt">{rtText}</span>
-          {/if}
-        </div>
+        {#if imdbText || rtText}
+          <div class="scores">
+            {#if imdbText && imdbUrl}
+              <a class="score imdb" href={imdbUrl} target="_blank" rel="noopener" title={imdbVotes}>{imdbText} ↗</a>
+            {:else if imdbText}
+              <span class="score imdb" title={imdbVotes}>{imdbText}</span>
+            {/if}
+            {#if rtText && rtUrl}
+              <a class="score rt" href={rtUrl} target="_blank" rel="noopener">{rtText} ↗</a>
+            {:else if rtText}
+              <span class="score rt">{rtText}</span>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <div class="rest">
@@ -407,6 +415,7 @@
           </div>
         {/if}
         {#if item.why_blurb}<p class="why">“{item.why_blurb}”</p>{/if}
+        {#if item.rule_note}<p class="rule-note">{item.rule_note}</p>{/if}
         {#if categoryBlurb}<p class="cat-blurb"><strong>{item.category}:</strong> {categoryBlurb}</p>{/if}
         {#if item.synopsis}<p class="synopsis">{item.synopsis}</p>{/if}
         {#if cast.length}
@@ -585,6 +594,7 @@
   .kind-blurb { display: block; font-size: 0.78rem; color: #c5c5dd; margin-top: 2px; line-height: 1.35; }
 
   .why { margin-top: 0.85rem; font-style: italic; color: #d6d6ea; font-size: 0.88rem; line-height: 1.4; }
+  .rule-note { margin-top: 0.5rem; font-size: 0.78rem; color: #9a9ab8; }
   .cat-blurb { margin-top: 0.5rem; font-size: 0.78rem; color: #9a9ab8; }
   .cat-blurb strong { color: #c9c9e6; }
   .synopsis { margin-top: 0.85rem; font-size: 0.85rem; color: #b9b9d0; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
