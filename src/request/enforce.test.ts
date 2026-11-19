@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrate.js';
@@ -120,8 +120,13 @@ describe.skipIf(!existsSync(REPLAY_DB))('rulesSql against a sample of the real c
     return db;
   }
 
-  const db = sampleDb();
-  const titles = db.prepare('SELECT * FROM titles t').all() as (CheckableTitle & { id: number })[];
+  let db: InstanceType<typeof Database>;
+  let titles: (CheckableTitle & { id: number })[];
+  // In beforeAll, not the describe body: a skipped describe still runs its body.
+  beforeAll(() => {
+    db = sampleDb();
+    titles = db.prepare('SELECT * FROM titles t').all() as (CheckableTitle & { id: number })[];
+  });
 
   it.each([
     'Thriller new 2025',
