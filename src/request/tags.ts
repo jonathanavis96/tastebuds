@@ -94,8 +94,8 @@ function keywordGenres(keyword: string): CanonGenre[] {
 
 /**
  * The canonical genres a title carries, from every source that names one: TMDB
- * genres, IMDb genres, and keywords that literally name a genre ("thriller",
- * "supernatural horror"). TMDB's TV bundles ("Sci-Fi & Fantasy",
+ * genres, IMDb genres and, for a series, keywords that literally name a genre
+ * ("thriller", "supernatural horror"). TMDB's TV bundles ("Sci-Fi & Fantasy",
  * "Action & Adventure") are split using IMDb's genres when those are known.
  */
 export function titleTags(title: TaggableTitle): Set<CanonGenre> {
@@ -113,6 +113,11 @@ export function titleTags(title: TaggableTitle): Set<CanonGenre> {
     const confirmed = bundle.filter((g) => imdb.has(g));
     for (const g of confirmed.length > 0 ? confirmed : bundle) tags.add(g);
   }
-  for (const k of jsonStrings(title.keywords)) for (const g of keywordGenres(k)) tags.add(g);
+  // Series only: TMDB has no Thriller, Horror or Science Fiction genre for them.
+  // A film's two genre lists are curated, and a keyword such as "comedy horror"
+  // on a satire would label it Horror.
+  if (title.media_type === 'tv') {
+    for (const k of jsonStrings(title.keywords)) for (const g of keywordGenres(k)) tags.add(g);
+  }
   return tags;
 }

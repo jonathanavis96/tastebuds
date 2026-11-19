@@ -56,7 +56,9 @@ describe('titleObeys', () => {
   it('satisfies a clause by a canonical tag from any source', () => {
     expect(check('sci-fi', { media_type: 'tv', genres: '["Sci-Fi & Fantasy"]', imdb_genres: '["Sci-Fi"]' }).ok).toBe(true);
     expect(check('sci-fi', { media_type: 'tv', genres: '["Sci-Fi & Fantasy"]', imdb_genres: '["Fantasy"]' }).ok).toBe(false);
-    expect(check('thriller', { genres: '["Drama"]', keywords: '["psychological thriller"]' }).ok).toBe(true);
+    const keyworded = { genres: '["Drama"]', keywords: '["psychological thriller"]' };
+    expect(check('thriller', { ...keyworded, media_type: 'tv' }).ok).toBe(true);
+    expect(check('thriller', { ...keyworded, media_type: 'movie' }).failed).toEqual(['not Thriller']);
   });
 
   it('matches terms on word boundaries, tolerating plurals and hyphens, in keywords, title or synopsis', () => {
@@ -97,13 +99,13 @@ describe('rulesSql', () => {
 
 /**
  * rulesSql is a prefilter: it must admit every row titleObeys accepts. Checked
- * on a sample of a real catalogue when one is available (the database copy is
- * not in the repository). IMDb votes are not in that copy yet, so the sample
- * gets made-up vote counts, some of them unknown.
+ * on a sample of a real catalogue when TASTEBUDS_REPLAY_DB names a copy of one
+ * (none ships with the repository). The sample gets made-up IMDb vote counts,
+ * some of them unknown, so the hidden-gem rule is exercised on any copy.
  */
-const REPLAY_DB = process.env.TASTEBUDS_REPLAY_DB ?? 'data/replay/live-20261119.db';
+const REPLAY_DB = process.env.TASTEBUDS_REPLAY_DB ?? '';
 
-describe.skipIf(!existsSync(REPLAY_DB))('rulesSql against a sample of the real catalogue', () => {
+describe.skipIf(!REPLAY_DB || !existsSync(REPLAY_DB))('rulesSql against a sample of the real catalogue', () => {
   const COLUMNS = 'id, tmdb_id, media_type, title, year, genres, keywords, synopsis, updated_at, imdb_rating, runtime_minutes, original_language';
 
   function sampleDb(): InstanceType<typeof Database> {

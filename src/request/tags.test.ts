@@ -33,14 +33,20 @@ describe('titleTags', () => {
       .toEqual(['Action', 'Adventure', 'Crime']);
   });
 
-  it('reads keywords that name a genre', () => {
-    expect(tags({ keywords: '["psychological thriller","supernatural horror","small town"]' })).toEqual(['Horror', 'Thriller']);
-    expect(tags({ keywords: '["suspense","sitcom","romcom","science fiction"]' }))
+  it('reads a series keyword that names a genre', () => {
+    expect(tags({ media_type: 'tv', keywords: '["psychological thriller","supernatural horror","small town"]' }))
+      .toEqual(['Horror', 'Thriller']);
+    expect(tags({ media_type: 'tv', keywords: '["suspense","sitcom","romcom","science fiction"]' }))
       .toEqual(['Comedy', 'Romance', 'Science Fiction', 'Thriller']);
   });
 
+  it('never takes a genre from a film keyword', () => {
+    expect(tags({ media_type: 'movie', genres: '["Comedy","Science Fiction"]', keywords: '["comedy horror","psychological thriller"]' }))
+      .toEqual(['Comedy', 'Science Fiction']);
+  });
+
   it('ignores keywords that merely mention a subject', () => {
-    expect(tags({ keywords: '["world war ii","dysfunctional family","crime boss","music band"]' })).toEqual([]);
+    expect(tags({ media_type: 'tv', keywords: '["world war ii","dysfunctional family","crime boss","music band"]' })).toEqual([]);
   });
 
   it('never throws on malformed or missing JSON', () => {
