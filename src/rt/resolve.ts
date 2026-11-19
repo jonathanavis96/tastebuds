@@ -45,11 +45,14 @@ export function parsePageIdentity(body: string): { title: string | null; year: n
     rawTitle = rawTitle.replace(/\s*\(\d{4}\)\s*$/, '').trim();
   }
 
-  // Fallback: find year in common RT JSON patterns embedded in the page
+  // Fallback: find year in common RT JSON patterns embedded in the page. Some
+  // pages carry only the JSON-LD release date (dateCreated), and without a year
+  // a same-named film from another decade would pass on its title alone.
   if (year === null) {
     const yearJsonMatch =
       body.match(/"releaseYear"\s*:\s*"?(\d{4})/i) ??
-      body.match(/"startYear"\s*:\s*"?(\d{4})/i);
+      body.match(/"startYear"\s*:\s*"?(\d{4})/i) ??
+      body.match(/"dateCreated"\s*:\s*"(\d{4})-/);
     if (yearJsonMatch) year = Number(yearJsonMatch[1]);
   }
 
@@ -70,15 +73,103 @@ export function slugifyRtTitle(title: string): string {
     .replace(/^_+|_+$/g, '');         // trim leading/trailing underscores
 }
 
+/** Every `<script>` body whose opening tag matches `attr` (e.g. `type="application/ld+json"`). */
+function scriptBodies(body: string, attr: RegExp): string[] {
+  const bodies: string[] = [];
+  for (const m of body.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    if (attr.test(m[1])) bodies.push(m[2]);
+  }
+  return bodies;
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/** "96", 96 or "96%" → "96%"; anything else (empty, "--", missing) → null. */
+function asPercent(value: unknown): string | null {
+  const match = String(value ?? '').trim().match(/^(\d{1,3})%?$/);
+  return match ? `${match[1]}%` : null;
+}
+
+/** The ratingValue of an aggregateRating named "Tomatometer" anywhere in a JSON-LD document. */
+function findTomatometerRating(node: unknown): string | null {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findTomatometerRating(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (node == null || typeof node !== 'object') return null;
+  const rating = (node as Record<string, unknown>).aggregateRating as Record<string, unknown> | undefined;
+  if (rating?.name === 'Tomatometer') return asPercent(rating.ratingValue);
+  return findTomatometerRating((node as Record<string, unknown>)['@graph'] ?? null);
+}
+
 /**
- * Parse the tomatometer score from an RT page body.
- * Looks for the first `"tomatometer":<digits>` match.
- * Returns e.g. "98%" or null if not found.
+ * The page's own critics score, e.g. "96%", or null when the page shows none.
+ *
+ * Read from the page's JSON-LD (`aggregateRating` named "Tomatometer"), else from
+ * the media scorecard (`criticsScore.scorePercent`). Every page, the 404 page too,
+ * also carries a site-wide trending block full of `"tomatometer":NN` values for
+ * other titles, so a loose pattern over the whole page is never used.
  */
 export function parseTomatometer(body: string): string | null {
-  const match = body.match(/"tomatometer"\s*:\s*(\d+)/);
-  if (!match) return null;
-  return `${match[1]}%`;
+  for (const ld of scriptBodies(body, /type=["']application\/ld\+json["']/i)) {
+    const score = findTomatometerRating(parseJson(ld));
+    if (score) return score;
+  }
+  for (const card of scriptBodies(body, /id=["']media-scorecard-json["']/i)) {
+    const data = parseJson(card) as { criticsScore?: { scorePercent?: unknown } } | null;
+    const score = asPercent(data?.criticsScore?.scorePercent);
+    if (score) return score;
+  }
+  return null;
+}
+
+/** True when the page is the title asked for: same normalised title, year within one when both are known. */
+function pageMatches(body: string, title: string, year: number | null | undefined): boolean {
+  const identity = parsePageIdentity(body);
+  if (!identity.title || normaliseTitle(identity.title) !== normaliseTitle(title)) return false;
+  return identity.year == null || year == null || Math.abs(identity.year - year) <= 1;
+}
+
+const RT_HEADERS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+
+/**
+ * What one known Rotten Tomatoes page says now.
+ *  - `{ verified: true, url, score }`: the page is this title (same check as
+ *    resolveRtUrl); `url` is where any redirect ended; `score` is null when the
+ *    page has no critics score.
+ *  - `{ verified: false }`: the site answered but the page is not this title
+ *    (a 404, or a redirect to another title).
+ *  - `null`: no answer (network error, timeout, blocked or server error).
+ */
+export async function readRtScore(
+  url: string,
+  title: string,
+  year: number | null | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ verified: true; url: string; score: string | null } | { verified: false } | null> {
+  try {
+    const res = await fetchImpl(url, {
+      headers: RT_HEADERS,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(RT_TIMEOUT_MS),
+    });
+    if (res.status === 404 || res.status === 410) return { verified: false };
+    if (res.status !== 200) return null;
+    const body = await res.text();
+    if (!pageMatches(body, title, year)) return { verified: false };
+    return { verified: true, url: res.url || url, score: parseTomatometer(body) };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -111,7 +202,7 @@ export async function resolveRtUrl(
   const tryPage = async (url: string): Promise<{ url: string; body: string } | null> => {
     try {
       const res = await fetchImpl(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        headers: RT_HEADERS,
         redirect: 'follow',
         signal: AbortSignal.timeout(RT_TIMEOUT_MS),
       });
@@ -126,21 +217,10 @@ export async function resolveRtUrl(
 
   const verifyPage = (
     page: { url: string; body: string },
-  ): { url: string; score: string | null; verified: boolean } => {
-    const identity = parsePageIdentity(page.body);
-
-    // Title must be present and normalised titles must match
-    if (!identity.title || normaliseTitle(identity.title) !== normaliseTitle(title)) {
-      return { url: searchUrl, score: null, verified: false };
-    }
-
-    // Year check: only enforce when both sides have a year; allow ±1 tolerance
-    if (identity.year != null && year != null && Math.abs(identity.year - year) > 1) {
-      return { url: searchUrl, score: null, verified: false };
-    }
-
-    return { url: page.url, score: parseTomatometer(page.body), verified: true };
-  };
+  ): { url: string; score: string | null; verified: boolean } =>
+    pageMatches(page.body, title, year)
+      ? { url: page.url, score: parseTomatometer(page.body), verified: true }
+      : { url: searchUrl, score: null, verified: false };
 
   // Attempt 1: bare slug
   const url1 = `https://www.rottentomatoes.com/${path}/${slug}`;
