@@ -173,6 +173,20 @@ export function setTitleRtFromPage(
 }
 
 /**
+ * Record that no Rotten Tomatoes page could be confirmed as this title. A stored
+ * page is dropped with its score, since it belongs to another title; a score
+ * that came without a page (OMDb's) is kept.
+ */
+export function setTitleRtUnconfirmed(db: InstanceType<typeof Database>, titleId: number): void {
+  db.prepare(`
+    UPDATE titles SET
+      rt_rating = CASE WHEN rt_url IS NULL THEN rt_rating ELSE NULL END,
+      rt_url = NULL, rt_verified_at = NULL, rt_checked_at = ?
+    WHERE id = ?
+  `).run(Math.floor(Date.now() / 1000), titleId);
+}
+
+/**
  * Save a scraped Rotten Tomatoes score. Unlike updateTitleRatings this leaves
  * rating_checked_at alone: OMDb has not been asked about this title.
  */

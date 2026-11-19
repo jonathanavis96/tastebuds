@@ -5,7 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { slugifyRtTitle, parseTomatometer, resolveRtUrl, readRtScore, parsePageIdentity, normaliseTitle } from './resolve.js';
+import { slugifyRtTitle, parseTomatometer, resolveRtUrl, readRtScore, findRtPage, parsePageIdentity, normaliseTitle } from './resolve.js';
 
 // ─── slugifyRtTitle ───────────────────────────────────────────────────────────
 
@@ -426,3 +426,60 @@ describe('readRtScore', () => {
     expect(await readRtScore(pageUrl, 'Elementary', 2012, failing)).toBeNull();
   });
 });
+
+// ─── pages that name no year ─────────────────────────────────────────────────
+
+describe('a page that names no year', () => {
+  const stub = '<meta property="og:title" content="Mercy | Rotten Tomatoes" />';
+  const scoredNoYear = `<meta property="og:title" content="Mercy | Rotten Tomatoes" />${scoreLd(70)}`;
+  const own = `<meta property="og:title" content="Mercy (2026) | Rotten Tomatoes" />${scoreLd(24)}`;
+  const bare = 'https://www.rottentomatoes.com/m/mercy';
+  const dated = 'https://www.rottentomatoes.com/m/mercy_2026';
+
+  it('is not the title when it carries no score either: the year-suffixed page is used', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: bare, body: stub }, { status: 200, url: dated, body: own }]);
+    expect(await resolveRtUrl('Mercy', 2026, 'movie', fetchMock)).toEqual({ url: dated, score: '24%', verified: true });
+  });
+
+  it('is kept when it carries a score and no page with the right year exists', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: bare, body: scoredNoYear }, { status: 404, url: dated }]);
+    expect(await resolveRtUrl('Mercy', 2026, 'movie', fetchMock)).toEqual({ url: bare, score: '70%', verified: true });
+  });
+
+  it('loses to a page whose year agrees', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: bare, body: scoredNoYear }, { status: 200, url: dated, body: own }]);
+    expect(await resolveRtUrl('Mercy', 2026, 'movie', fetchMock)).toEqual({ url: dated, score: '24%', verified: true });
+  });
+
+  it('is not confirmed on a re-read when it has no score', async () => {
+    expect(await readRtScore(bare, 'Mercy', 2026, makeFetch([{ status: 200, url: bare, body: stub }]))).toEqual({ verified: false });
+  });
+});
+
+describe('findRtPage', () => {
+  const own = `<meta property="og:title" content="Mercy (2026) | Rotten Tomatoes" />${scoreLd(24)}`;
+  const other = '<meta property="og:title" content="Mercy | Rotten Tomatoes" />';
+  const title = { title: 'Mercy', year: 2026, media_type: 'movie' as const };
+  const bare = 'https://www.rottentomatoes.com/m/mercy';
+  const dated = 'https://www.rottentomatoes.com/m/mercy_2026';
+
+  it("moves from a stored page that is not the title to the title's own page", async () => {
+    const fetchMock = makeFetch([
+      { status: 200, url: bare, body: other },
+      { status: 200, url: bare, body: other },
+      { status: 200, url: dated, body: own },
+    ]);
+    expect(await findRtPage({ ...title, rt_url: bare }, fetchMock)).toEqual({ url: dated, score: '24%' });
+  });
+
+  it('says so when no page can be confirmed', async () => {
+    expect(await findRtPage({ ...title, rt_url: null }, makeFetch([]))).toBe('unconfirmed');
+  });
+
+  it('returns null when the stored page gives no answer, without looking further', async () => {
+    const fetchMock = makeFetch([{ status: 403, url: bare }]);
+    expect(await findRtPage({ ...title, rt_url: bare }, fetchMock)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+

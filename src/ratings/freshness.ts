@@ -1,8 +1,8 @@
 import type Database from 'better-sqlite3';
 import type { Config } from '../config.js';
 import { applyCachedImdbRatings } from '../imdb/dataset.js';
-import { readRtScore, resolveRtUrl } from '../rt/resolve.js';
-import { markTitleRtChecked, setTitleRtFromPage } from '../db/repos/titles.js';
+import { findRtPage } from '../rt/resolve.js';
+import { setTitleRtFromPage, setTitleRtUnconfirmed } from '../db/repos/titles.js';
 
 const HOUR = 60 * 60;
 const DAY = 24 * HOUR;
@@ -46,20 +46,10 @@ async function refreshRt(
   fetchImpl: typeof fetch,
   isOpen: () => boolean,
 ): Promise<void> {
-  if (t.rt_url) {
-    const page = await readRtScore(t.rt_url, t.title, t.year, fetchImpl);
-    if (!isOpen() || page === null) return;
-    if (page.verified) {
-      setTitleRtFromPage(db, t.id, page);
-      return;
-    }
-    // The stored page is another title (often an older film of the same name):
-    // look for the title's own page, which may carry the year in its address.
-  }
-  const found = await resolveRtUrl(t.title, t.year, t.media_type, fetchImpl);
-  if (!isOpen()) return;
-  if (found?.verified) setTitleRtFromPage(db, t.id, found);
-  else markTitleRtChecked(db, t.id);
+  const page = await findRtPage(t, fetchImpl);
+  if (!isOpen() || page === null) return;
+  if (page === 'unconfirmed') setTitleRtUnconfirmed(db, t.id);
+  else setTitleRtFromPage(db, t.id, page);
 }
 
 /**

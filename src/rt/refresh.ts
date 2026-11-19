@@ -3,10 +3,12 @@
  * page of titles that have an rt_url. Scores move as reviews come in, and every
  * score scraped before migration 015 was dropped because it came from another
  * title, so titles never verified go first, then the ones verified longest ago.
+ * A stored page that is not the title is replaced by the title's own page when
+ * one can be found, and dropped when none can.
  */
 import type Database from 'better-sqlite3';
-import { markTitleRtChecked, setTitleRtFromPage } from '../db/repos/titles.js';
-import { readRtScore } from './resolve.js';
+import { setTitleRtFromPage, setTitleRtUnconfirmed } from '../db/repos/titles.js';
+import { findRtPage } from './resolve.js';
 
 /** One page a second: the site is scraped, so it is asked politely. */
 const PAUSE_MS = 1000;
@@ -19,6 +21,7 @@ interface Candidate {
   id: number;
   title: string;
   year: number | null;
+  media_type: 'movie' | 'tv';
   rt_url: string;
 }
 
@@ -27,7 +30,7 @@ export interface RtRefreshResult {
   verified: number;
   /** Of those, pages that show no critics score (the stored score is cleared). */
   noScore: number;
-  /** Pages that answered but are not the title (gone, or another title): left as they were. */
+  /** Titles whose stored page is gone or another title, with no page of their own found: the page is dropped. */
   unconfirmed: number;
   /** Requests that got no answer. */
   failed: number;
@@ -48,7 +51,7 @@ export async function refreshRtScores(
   // it is tried again, so dead pages cannot hold the front of the queue.
   const candidates = db
     .prepare<[number, number, number], Candidate>(
-      `SELECT id, title, year, rt_url FROM titles
+      `SELECT id, title, year, media_type, rt_url FROM titles
        WHERE rt_url IS NOT NULL
          AND (rt_verified_at IS NOT NULL OR rt_checked_at IS NULL OR rt_checked_at < ?)
        ORDER BY rt_verified_at IS NOT NULL, COALESCE(rt_verified_at, rt_checked_at, 0),
@@ -63,7 +66,7 @@ export async function refreshRtScores(
   for (const [i, t] of candidates.entries()) {
     if (i > 0 && pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs));
 
-    const page = await readRtScore(t.rt_url, t.title, t.year, opts.fetchImpl);
+    const page = await findRtPage(t, opts.fetchImpl);
     if (page === null) {
       result.failed++;
       if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -74,13 +77,13 @@ export async function refreshRtScores(
     }
     consecutiveFailures = 0;
 
-    if (page.verified) {
+    if (page === 'unconfirmed') {
+      setTitleRtUnconfirmed(db, t.id);
+      result.unconfirmed++;
+    } else {
       setTitleRtFromPage(db, t.id, page);
       result.verified++;
       if (page.score === null) result.noScore++;
-    } else {
-      markTitleRtChecked(db, t.id);
-      result.unconfirmed++;
     }
   }
 

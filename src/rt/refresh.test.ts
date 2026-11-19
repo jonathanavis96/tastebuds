@@ -100,22 +100,22 @@ describe('refreshRtScores', () => {
     expect(rtRow(db, 1).rt_verified_at).not.toBeNull();
   });
 
-  it('keeps what a title has when its page is gone or is another title, and waits a week to retry', async () => {
+  it("replaces a stored page that is another title with the title's own, and drops one that leads nowhere", async () => {
     const db = createTestDb();
-    insertTitle(db, 1, 'Relay', 2025, { url: 'https://www.rottentomatoes.com/m/relay_2025', rating: '71%' });
+    insertTitle(db, 1, 'Relay', 2025, { url: 'https://www.rottentomatoes.com/tv/relay_2025', rating: '71%' });
     insertTitle(db, 2, 'Elementary', 2012, { url: HAPPY_VALLEY, rating: '50%' });
-    const fetchImpl = siteFetch({ [HAPPY_VALLEY]: { body: fixture('tv_happy_valley') } });
+    const fetchImpl = siteFetch({ [HAPPY_VALLEY]: { body: fixture('tv_happy_valley') }, [ELEMENTARY]: { body: fixture('tv_elementary') } });
 
     const result = await refreshRtScores(db, { cap: 10, fetchImpl, pauseMs: 0 });
 
-    expect(result).toMatchObject({ verified: 0, unconfirmed: 2 });
-    expect(rtRow(db, 1)).toMatchObject({ rt_rating: '71%', rt_verified_at: null });
-    expect(rtRow(db, 2)).toMatchObject({ rt_rating: '50%', rt_verified_at: null });
+    expect(result).toMatchObject({ verified: 1, unconfirmed: 1 });
+    expect(rtRow(db, 1)).toMatchObject({ rt_url: null, rt_rating: null, rt_verified_at: null });
     expect(rtRow(db, 1).rt_checked_at).not.toBeNull();
+    expect(rtRow(db, 2)).toMatchObject({ rt_url: ELEMENTARY, rt_rating: '96%' });
 
     fetchImpl.mockClear();
     await refreshRtScores(db, { cap: 10, fetchImpl, pauseMs: 0 });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toEqual([ELEMENTARY]);
   });
 
   it('reads never-verified titles first, then the oldest verified, up to the cap', async () => {
@@ -130,7 +130,8 @@ describe('refreshRtScores', () => {
 
     await refreshRtScores(db, { cap: 3, fetchImpl, pauseMs: 0 });
 
-    expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toEqual([
+    // Each stored page is a 404 here, so every title is also looked for at its usual addresses.
+    expect(fetchImpl.mock.calls.map((c) => String(c[0])).filter((url) => url.startsWith('https://rt.test/'))).toEqual([
       'https://rt.test/never',
       'https://rt.test/tried',
       'https://rt.test/old',
@@ -166,18 +167,17 @@ describe('refreshRtScores order among titles never tried', () => {
   it('reads the newest released titles first and unreleased ones last', async () => {
     const db = createTestDb();
     const thisYear = new Date().getUTCFullYear();
-    insertTitle(db, 1, 'Older Show', thisYear - 14, { url: 'https://www.rottentomatoes.com/tv/older_show' });
-    insertTitle(db, 2, 'Unreleased Show', thisYear + 2, { url: 'https://www.rottentomatoes.com/tv/unreleased_show' });
-    insertTitle(db, 3, 'Newer Show', thisYear, { url: 'https://www.rottentomatoes.com/tv/newer_show' });
-    const asked: string[] = [];
-    const fetchImpl = (async (url: string | URL | Request) => {
-      asked.push(String(url).replace('https://www.rottentomatoes.com/tv/', ''));
-      return new Response('', { status: 404 });
-    }) as typeof fetch;
+    insertTitle(db, 1, 'Older Show', thisYear - 14, { url: 'https://rt.test/older' });
+    insertTitle(db, 2, 'Unreleased Show', thisYear + 2, { url: 'https://rt.test/unreleased' });
+    insertTitle(db, 3, 'Newer Show', thisYear, { url: 'https://rt.test/newer' });
+    const fetchImpl = siteFetch({});
 
     await refreshRtScores(db, { cap: 3, fetchImpl, pauseMs: 0 });
 
-    expect(asked).toEqual(['newer_show', 'older_show', 'unreleased_show']);
+    expect(fetchImpl.mock.calls.map((c) => String(c[0])).filter((url) => url.startsWith('https://rt.test/'))).toEqual([
+      'https://rt.test/newer',
+      'https://rt.test/older',
+      'https://rt.test/unreleased',
+    ]);
   });
 });
-

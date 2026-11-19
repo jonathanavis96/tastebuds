@@ -132,11 +132,26 @@ export function parseTomatometer(body: string): string | null {
   return null;
 }
 
-/** True when the page is the title asked for: same normalised title, year within one when both are known. */
-function pageMatches(body: string, title: string, year: number | null | undefined): boolean {
+/**
+ * The page's critics score when the page is the title asked for, else null.
+ * `exact` means the year agrees too (within one), or no year was asked for.
+ *
+ * A page that names no year proves little by its title: Rotten Tomatoes keeps
+ * bare stub pages for same-named titles (m/mercy beside m/mercy_2026). Such a
+ * page counts only when it carries a score, and then as a weaker match than a
+ * page whose year agrees.
+ */
+function confirmPage(
+  body: string,
+  title: string,
+  year: number | null | undefined,
+): { score: string | null; exact: boolean } | null {
   const identity = parsePageIdentity(body);
-  if (!identity.title || normaliseTitle(identity.title) !== normaliseTitle(title)) return false;
-  return identity.year == null || year == null || Math.abs(identity.year - year) <= 1;
+  if (!identity.title || normaliseTitle(identity.title) !== normaliseTitle(title)) return null;
+  const score = parseTomatometer(body);
+  if (year == null) return { score, exact: true };
+  if (identity.year == null) return score === null ? null : { score, exact: false };
+  return Math.abs(identity.year - year) <= 1 ? { score, exact: true } : null;
 }
 
 const RT_HEADERS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
@@ -146,8 +161,8 @@ const RT_HEADERS = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
  *  - `{ verified: true, url, score }`: the page is this title (same check as
  *    resolveRtUrl); `url` is where any redirect ended; `score` is null when the
  *    page has no critics score.
- *  - `{ verified: false }`: the site answered but the page is not this title
- *    (a 404, or a redirect to another title).
+ *  - `{ verified: false }`: the site answered but the page cannot be confirmed
+ *    as this title (a 404, another title, or a stub naming no year and no score).
  *  - `null`: no answer (network error, timeout, blocked or server error).
  */
 export async function readRtScore(
@@ -164,9 +179,9 @@ export async function readRtScore(
     });
     if (res.status === 404 || res.status === 410) return { verified: false };
     if (res.status !== 200) return null;
-    const body = await res.text();
-    if (!pageMatches(body, title, year)) return { verified: false };
-    return { verified: true, url: res.url || url, score: parseTomatometer(body) };
+    const page = confirmPage(await res.text(), title, year);
+    if (!page) return { verified: false };
+    return { verified: true, url: res.url || url, score: page.score };
   } catch {
     return null;
   }
@@ -183,8 +198,10 @@ export async function readRtScore(
  *
  * After fetching a 200 page, the page's og:title and year are compared against
  * the input. On match (title match + year within ±1), returns `verified: true`
- * with the canonical URL and scraped score. On mismatch, returns a search-URL
- * shape: `url = https://www.rottentomatoes.com/search?search=<title>`,
+ * with the canonical URL and scraped score. A page that names no year is kept
+ * only if it carries a score, and only when the year-suffixed address does not
+ * give a page whose year agrees. On mismatch, returns a search-URL shape:
+ * `url = https://www.rottentomatoes.com/search?search=<title>`,
  * `score = null`, `verified = false`.
  *
  * Default fetch follows redirects; response.url is the final URL after any redirect.
@@ -215,38 +232,49 @@ export async function resolveRtUrl(
     }
   };
 
-  const verifyPage = (
-    page: { url: string; body: string },
-  ): { url: string; score: string | null; verified: boolean } =>
-    pageMatches(page.body, title, year)
-      ? { url: page.url, score: parseTomatometer(page.body), verified: true }
-      : { url: searchUrl, score: null, verified: false };
+  // The bare slug first, then the slug with the year. A page whose year agrees
+  // is returned at once; a scored page naming no year is kept in case the
+  // year-suffixed address has nothing better.
+  const addresses = [`https://www.rottentomatoes.com/${path}/${slug}`];
+  if (year != null) addresses.push(`https://www.rottentomatoes.com/${path}/${slug}_${year}`);
 
-  // Attempt 1: bare slug
-  const url1 = `https://www.rottentomatoes.com/${path}/${slug}`;
-  const page1 = await tryPage(url1);
   let gotAnyPage = false;
-  if (page1 !== null) {
+  let weaker: { url: string; score: string | null; verified: boolean } | null = null;
+  for (const address of addresses) {
+    const page = await tryPage(address);
+    if (page === null) continue;
     gotAnyPage = true;
-    const result1 = verifyPage(page1);
-    if (result1.verified) return result1;
-    // 200 but wrong identity — fall through and try the year-suffixed URL before giving up
+    const confirmed = confirmPage(page.body, title, year);
+    if (!confirmed) continue;
+    const result = { url: page.url, score: confirmed.score, verified: true };
+    if (confirmed.exact) return result;
+    weaker ??= result;
   }
+  if (weaker) return weaker;
 
-  // Attempt 2: slug with year suffix.
-  // Tried whenever url1 was a 404 OR returned a 200 with a mismatched identity.
-  if (year != null) {
-    const url2 = `https://www.rottentomatoes.com/${path}/${slug}_${year}`;
-    const page2 = await tryPage(url2);
-    if (page2 !== null) {
-      gotAnyPage = true;
-      const result2 = verifyPage(page2);
-      if (result2.verified) return result2;
-    }
-  }
-
-  // Neither attempt produced a verified match.
-  // If we received at least one 200 page (wrong content), return a search-URL fallback
-  // so the caller can surface something to the user. If both 404'd, return null.
+  // No page could be confirmed. If at least one answered 200 (another title),
+  // return a search-URL fallback so the caller can surface something to the
+  // user; if every address was a 404, return null.
   return gotAnyPage ? { url: searchUrl, score: null, verified: false } : null;
+}
+
+/**
+ * What the title's own page says now. Starts from the stored page when there is
+ * one; when there is none, or the stored one turns out not to be the title,
+ * looks for the title's page at its usual addresses.
+ *  - `{ url, score }`: the confirmed page; `score` is null when it shows none.
+ *  - `'unconfirmed'`: the site answered, but no page could be confirmed.
+ *  - `null`: the stored page gave no answer (network error, timeout, blocked).
+ */
+export async function findRtPage(
+  t: { title: string; year: number | null; media_type: 'movie' | 'tv'; rt_url: string | null },
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ url: string; score: string | null } | 'unconfirmed' | null> {
+  if (t.rt_url) {
+    const stored = await readRtScore(t.rt_url, t.title, t.year, fetchImpl);
+    if (stored === null) return null;
+    if (stored.verified) return { url: stored.url, score: stored.score };
+  }
+  const found = await resolveRtUrl(t.title, t.year, t.media_type, fetchImpl);
+  return found?.verified ? { url: found.url, score: found.score } : 'unconfirmed';
 }

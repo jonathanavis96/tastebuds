@@ -133,16 +133,20 @@ describe('ensureFreshRatings', () => {
     expect(storedPagesRead.sort()).toEqual(['https://rt.test/older-due', 'https://rt.test/recent']);
   });
 
-  it('finds the page when none is stored, and keeps what a title has when its page cannot be confirmed', async () => {
+  it('finds the page when none is stored, and drops a stored page that is another title', async () => {
     const db = createTestDb();
     const found = insertTitle(db, {});
-    const unconfirmed = insertTitle(db, { title: 'Happy Valley', year: 2014, rtUrl: ELEMENTARY, rtRating: '91%' });
+    const wrongPage = insertTitle(db, { title: 'Happy Valley', year: 2014, rtUrl: ELEMENTARY, rtRating: '91%' });
+    const noPage = insertTitle(db, { title: 'Nowhere', year: 2020, rtRating: '64%' });
     const fetchImpl = pageFetch({ [ELEMENTARY]: fixture('tv_elementary') });
 
-    await ensureFreshRatings(db, [found, unconfirmed], config, fetchImpl);
+    await ensureFreshRatings(db, [found, wrongPage, noPage], config, fetchImpl);
 
     expect(row(db, found)).toMatchObject({ rt_url: ELEMENTARY, rt_rating: '96%' });
-    expect(row(db, unconfirmed)).toMatchObject({ rt_url: ELEMENTARY, rt_rating: '91%', rt_verified_at: null });
+    // The stored page and its score belonged to another title.
+    expect(row(db, wrongPage)).toMatchObject({ rt_url: null, rt_rating: null, rt_verified_at: null });
+    // A score that came without a page (OMDb's) is kept when no page is found.
+    expect(row(db, noPage)).toMatchObject({ rt_url: null, rt_rating: '64%', rt_verified_at: null });
   });
 
   it("looks for the title's own page when the stored one is another title", async () => {
