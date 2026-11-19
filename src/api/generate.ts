@@ -298,7 +298,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   const olderCount = picks.filter(p => p.older).length;
   const inList = matched - planned.unseen;
   const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, inList, picks.length, olderCount) };
-  const ruleNote = olderCount > 0 ? olderPickNote(rules, matched) : null;
+  const ruleNote = olderCount > 0 ? olderPickNote(rules, matched, inList) : null;
   for (const p of picks) {
     upsertRecommendation(db, {
       profile_id: profile.id,
@@ -456,9 +456,20 @@ async function freshlyRated(ctx: Context, picks: RequestPick[], planned: Planned
   return [...all.filter(p => !p.older), ...all.filter(p => p.older)];
 }
 
+/**
+ * Why older titles were added: "only 6 titles from 2021 on matched", or, when
+ * some were already in the list, "only 2 new titles from 2021 on matched".
+ */
+function recentShortfall(rules: RequestRules, matched: number, inList: number): string {
+  const fresh = matched - inList;
+  return inList > 0
+    ? `${countPhrase(fresh).replace(/titles?$/, m => `new ${m}`)} from ${rules.yearMin} on matched`
+    : `${countPhrase(matched)} from ${rules.yearMin} on matched`;
+}
+
 /** Why an older title is in the list: "Older pick: only 6 titles from 2021 on matched." */
-function olderPickNote(rules: RequestRules, matched: number): string {
-  return `Older pick: ${countPhrase(matched)} from ${rules.yearMin} on matched.`;
+function olderPickNote(rules: RequestRules, matched: number, inList: number): string {
+  return `Older pick: ${recentShortfall(rules, matched, inList)}.`;
 }
 
 function countPhrase(n: number): string {
@@ -472,7 +483,7 @@ function countPhrase(n: number): string {
  */
 function summaryNote(rules: RequestRules, olderRules: RequestRules | null, matched: number, inList: number, picked: number, older: number): string | null {
   if (older > 0 && olderRules) {
-    return `${capitalise(countPhrase(matched))} from ${rules.yearMin} on matched, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
+    return `${capitalise(recentShortfall(rules, matched, inList))}, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
       `${older === 1 ? 'was' : 'were'} added. Say "any year" to see older ones.`;
   }
   if (picked >= FULL_SET) return null;

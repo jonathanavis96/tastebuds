@@ -357,7 +357,8 @@ describe('generatePicks for a request', () => {
 
       const added = stored(db).filter(r => r.title.startsWith('Older'));
       expect(added).toHaveLength(3);
-      expect(added.every(r => r.rule_note === 'Older pick: only 10 titles from 2021 on matched.')).toBe(true);
+      expect(added.every(r => r.rule_note === 'Older pick: no new titles from 2021 on matched.')).toBe(true);
+      expect(out.ok && out.feed.request?.note).toBe('No new titles from 2021 on matched, so 3 from 2016 to 2020 were added. Say "any year" to see older ones.');
       expect(out.ok && out.feed.sections[0].recIds).toHaveLength(13);
     });
 

@@ -381,7 +381,10 @@
   // would hide every pick it was just given.
   function followRequestMedia(feed: FeedResponse, request: string) {
     if (mediaFilter === 'all') return;
-    const kinds = new Set(feed.recs.filter(r => r.request_text?.trim() === request.trim()).map(r => r.media_type));
+    // The request's section comes first: the server groups a request typed again
+    // in other case or spacing with the earlier one.
+    const ids = new Set(feed.sections[0]?.recIds ?? []);
+    const kinds = new Set(feed.recs.filter(r => ids.has(r.id)).map(r => r.media_type));
     if (kinds.size === 0 || kinds.has(mediaFilter)) return;
     mediaFilter = kinds.has('movie') && kinds.has('tv') ? 'all' : kinds.has('tv') ? 'tv' : 'movie';
   }
@@ -533,7 +536,11 @@
         {#each Array(6) as _}<div class="skel"></div>{/each}
       </div>
     {:else if visibleSections.length === 0 && !generating}
-      <p class="empty">No picks yet. Type what you feel like watching above, or tap Generate More.</p>
+      {#if recommendations.length > 0}
+        <p class="empty">Your picks are all {mediaFilter === 'movie' ? 'series' : 'films'}. Tap All to see them.</p>
+      {:else}
+        <p class="empty">No picks yet. Type what you feel like watching above, or tap Generate More.</p>
+      {/if}
     {:else}
       {#each visibleSections as section (section.text ?? '')}
         <RequestSummary text={section.text} summary={section.summary} shown={section.recs.length} />

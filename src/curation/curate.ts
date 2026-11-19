@@ -200,7 +200,10 @@ export async function curateCandidates(
       category: result.category,
       score: title.score,
       why_blurb: result.why,
-      request_text: request,
+      // Only Surprise Me passes text here, as a hint; its picks do not obey that
+      // text's rules, so they are stored without it and are not listed under a
+      // request with the same words.
+      request_text: null,
       state: 'pending',
       kind: result.kind,
       predicted_rating: result.predictedRating,
