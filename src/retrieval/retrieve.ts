@@ -262,13 +262,11 @@ export async function refreshTasteVector(
 const RERANK_FETCH_MULTIPLIER = 4;
 /** On-taste / request pools are widened until they hold at least this many rows. */
 export const MIN_POOL_ROWS = 20;
-/** Flat request candidates handed to curation (was 30; the request prompt now asks for ≥10 picks). */
-export const REQUEST_CANDIDATE_LIMIT = 60;
 
 /** Wildcards are "off-taste but real": rank them by quality + popularity, not similarity. */
 const WILDCARD_WEIGHTS: RerankWeights = { similarity: 0, affinity: 0.2, quality: 0.5, popularity: 0.3 };
 /** Explicit requests are request-dominant (mirrors the 0.7/0.3 vector blend): relevance leads, taste and quality tie-break. */
-const REQUEST_WEIGHTS: RerankWeights = { similarity: 0.55, affinity: 0.15, quality: 0.20, popularity: 0.10 };
+export const REQUEST_WEIGHTS: RerankWeights = { similarity: 0.55, affinity: 0.15, quality: 0.20, popularity: 0.10 };
 
 /** SQL fragment + params for opts.hardFilters (or the widened variant `f`). Empty when disabled. */
 function filterClause(f: HardFilters | undefined): { sql: string; params: unknown[] } {
@@ -736,24 +734,6 @@ export async function retrieveColdStartPool(
   return { onTaste, wildcards, adversarial: [] };
 }
 
-/**
- * Run a single flat request-pool query: titles ranked by cosine distance to a
- * pre-built query vector (taste ⊕ request), excluding titles in watch_events for
- * any vetoProfileIds plus opts.excludeTitleIds, optionally filtered by media type.
- * Hated-genre veto is intentionally NOT applied — the user asked for this explicitly.
- */
-function runRequestQuery(
-  db: InstanceType<typeof Database>,
-  queryBuf: Buffer,
-  vetoProfileIds: number[],
-  opts: RetrieveOpts,
-  f: HardFilters | undefined,
-  mediaType: 'movie' | 'tv' | undefined,
-  limit: number,
-): CandidateTitle[] {
-  return runPoolQuery(db, queryBuf, vetoProfileIds, opts.excludeTitleIds ?? [], opts, f, mediaType, 'ASC', limit);
-}
-
 /** Build the query buffer from a base taste vector blended with the embedded request. */
 export function blendRequestQueryBuf(baseVec: number[], reqVec: number[]): Buffer {
   let queryVec: number[];
@@ -769,81 +749,44 @@ export function blendRequestQueryBuf(baseVec: number[], reqVec: number[]): Buffe
 }
 
 /**
- * Shared tail of the two request paths: fetch a wide slate under (widened)
- * filters, rerank by taste WITHOUT the genre veto (an explicit request overrides
- * a passive dislike — soft affinity still orders the list), and trim.
+ * What a typed request is ranked against for one profile: the taste vector the
+ * request is blended with (null at cold start, when only the request counts),
+ * the profiles whose watch history hides a title, and the genre affinity that
+ * softly orders the result (no veto: an explicit request overrides a passive
+ * dislike).
  */
-function finishRequest(
-  db: InstanceType<typeof Database>,
-  queryBuf: Buffer,
-  vetoIds: number[],
-  opts: RetrieveOpts,
-  taste: TasteContext,
-): CandidateTitle[] {
-  const softTaste: TasteContext = { affinity: taste.affinity, vetoed: new Set() };
-  const total = opts.limit ?? REQUEST_CANDIDATE_LIMIT;
-  const half = Math.ceil(total / 2);
-  const sideLimit = opts.mediaType ? total : half;
-  const fetched = balancedWithWidening(opts, sideLimit * RERANK_FETCH_MULTIPLIER, (f, mt, limit) =>
-    runRequestQuery(db, queryBuf, vetoIds, opts, f, mt, limit));
-  if (opts.mediaType) return top(fetched.single, softTaste, total, REQUEST_WEIGHTS);
-  return [...top(fetched.movie, softTaste, half, REQUEST_WEIGHTS), ...top(fetched.tv, softTaste, half, REQUEST_WEIGHTS)];
+export interface RequestBase {
+  tasteVec: number[] | null;
+  vetoProfileIds: number[];
+  affinity: GenreAffinity;
 }
 
-/**
- * Retrieve a flat, request-relevant candidate list for a single profile.
- *
- * Used when the viewer types a free-text request. The request is embedded and
- * blended with the taste vector (request-dominant), then titles are ranked by
- * cosine distance to that blend — so "mind-bending sci-fi" actually returns sci-fi,
- * ordered toward the viewer's taste. When mediaType is unset the result is balanced
- * across movies + series. Returns a flat array (→ legacy "rank by request" prompt),
- * NOT a 7+2+1 pool: a specific ask shouldn't be diluted with random/adversarial picks.
- */
-export async function retrieveRequestCandidates(
-  db: InstanceType<typeof Database>,
-  profileId: number,
-  requestText: string,
-  opts: RetrieveOpts,
-  config: Pick<Config, 'ollamaUrl'>,
-  embedFn: (text: string, config: Pick<Config, 'ollamaUrl'>) => Promise<number[]> = embedText,
-): Promise<CandidateTitle[]> {
+export function soloRequestBase(db: InstanceType<typeof Database>, profileId: number): RequestBase {
   const sig = getTasteSignature(db, profileId);
-  if (!sig?.taste_vector) return [];
-  const tasteVec = vecFromBuffer(sig.taste_vector);
-  const reqVec = await embedFn(requestText, config);
-  const queryBuf = blendRequestQueryBuf(tasteVec, reqVec);
-  return finishRequest(db, queryBuf, [profileId], opts, soloTaste(db, profileId));
+  return {
+    tasteVec: sig?.taste_vector ? vecFromBuffer(sig.taste_vector) : null,
+    vetoProfileIds: [profileId],
+    affinity: genreAffinityForProfile(db, profileId),
+  };
 }
 
-/**
- * Retrieve a flat, request-relevant candidate list for the Joint profile.
- * Same as retrieveRequestCandidates but the base vector is the Joint blend
- * (couple-own ⊕ solo-blend) and the watch veto spans Alex OR Sam OR Joint.
- */
-export async function retrieveJointRequestCandidates(
+/** The Joint base: the couple-own ⊕ solo blend, and a veto spanning both partners and the Joint profile. */
+export function jointRequestBase(
   db: InstanceType<typeof Database>,
   alexId: number,
   samId: number,
-  requestText: string,
-  opts: RetrieveOpts,
-  config: Pick<Config, 'ollamaUrl'>,
-  embedFn: (text: string, config: Pick<Config, 'ollamaUrl'>) => Promise<number[]> = embedText,
-): Promise<CandidateTitle[]> {
-  const alexSig = getTasteSignature(db, alexId);
-  const samSig = getTasteSignature(db, samId);
-  const individualBlend = partnerBlend(alexSig?.taste_vector, samSig?.taste_vector);
-  if (!individualBlend) return [];
-  const jointId = opts.jointProfileId;
-  const jointSig = jointId != null ? getTasteSignature(db, jointId) : undefined;
-  const baseVec = jointSig?.taste_vector
-    ? blendVectors(vecFromBuffer(jointSig.taste_vector), JOINT_OWN_WEIGHT, individualBlend, JOINT_INDIVIDUAL_WEIGHT)
+  jointId: number,
+): RequestBase {
+  const individualBlend = partnerBlend(getTasteSignature(db, alexId)?.taste_vector, getTasteSignature(db, samId)?.taste_vector);
+  const jointVec = getTasteSignature(db, jointId)?.taste_vector;
+  const tasteVec = individualBlend && jointVec
+    ? blendVectors(vecFromBuffer(jointVec), JOINT_OWN_WEIGHT, individualBlend, JOINT_INDIVIDUAL_WEIGHT)
     : individualBlend;
-
-  const reqVec = await embedFn(requestText, config);
-  const queryBuf = blendRequestQueryBuf(baseVec, reqVec);
-  const vetoIds = [alexId, samId, ...(jointId != null ? [jointId] : [])];
-  return finishRequest(db, queryBuf, vetoIds, opts, jointTaste(db, alexId, samId, jointId));
+  return {
+    tasteVec,
+    vetoProfileIds: [alexId, samId, jointId],
+    affinity: jointTaste(db, alexId, samId, jointId).affinity,
+  };
 }
 
 /**

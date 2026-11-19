@@ -17,10 +17,7 @@ import { defaultHardFilters } from './filters.js';
 import {
   retrieveCandidatePool,
   retrieveJointCandidatePool,
-  retrieveRequestCandidates,
-  retrieveJointRequestCandidates,
   retrieveColdStartPool,
-  REQUEST_CANDIDATE_LIMIT,
   MIN_POOL_ROWS,
 } from './retrieve.js';
 import type { Config } from '../config.js';
@@ -101,8 +98,6 @@ function seedJunk(db: InstanceType<typeof Database>): string[] {
   return JUNK.map(([title, o]) => { seedTitle(db, title, { ...o, embedding: vec(0) }); return title; });
 }
 
-const embedFn = async () => Array.from(vec(0, 0.1).buffer.byteLength ? new Float32Array(vec(0, 0.1).buffer) : []);
-
 describe('hard filters through the real retrieval paths', () => {
   it('solo pool: no junk in any group, and the groups are full', async () => {
     const db = createTestDb();
@@ -118,7 +113,7 @@ describe('hard filters through the real retrieval paths', () => {
     expect(pool.adversarial).toHaveLength(8);
   });
 
-  it('joint pool and joint request: no junk, and titles engaged by either partner are out', async () => {
+  it('joint pool: no junk, and titles engaged by either partner are out', async () => {
     const db = createTestDb();
     const a = seedProfile(db, 'A');
     const b = seedProfile(db, 'B');
@@ -130,12 +125,9 @@ describe('hard filters through the real retrieval paths', () => {
 
     const opts = { hardFilters: DEFAULT_HARD_FILTERS, jointProfileId: j };
     const pool = await retrieveJointCandidatePool(db, a, b, opts, mockConfig);
-    const req = await retrieveJointRequestCandidates(db, a, b, 'thriller', opts, mockConfig, embedFn);
-    const all = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial, ...req].map(c => c.title);
+    const all = [...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(c => c.title);
     for (const jk of junk) expect(all).not.toContain(jk);
     expect(all).not.toContain('Seen By B');
-    expect(req.length).toBeGreaterThanOrEqual(10);
-    expect(req.length).toBeLessThanOrEqual(REQUEST_CANDIDATE_LIMIT);
   });
 
   it('cold start pool honours the filters too', async () => {
@@ -158,7 +150,7 @@ describe('hard filters through the real retrieval paths', () => {
   });
 });
 
-describe('widening through the request path', () => {
+describe('widening through the taste pool', () => {
   it('widens year → runtime → IMDb votes in order until the pool minimum is met, and reports the steps', async () => {
     const db = createTestDb();
     const pid = seedProfile(db, 'A');
@@ -176,12 +168,12 @@ describe('widening through the request path', () => {
     seedTitle(db, 'Unrated', { imdb_rating: null });
 
     let steps: string[] = [];
-    const req = await retrieveRequestCandidates(
-      db, pid, 'thriller',
+    const pool = await retrieveCandidatePool(
+      db, pid,
       { hardFilters: DEFAULT_HARD_FILTERS, mediaType: 'movie', onWidened: s => { steps = s; } },
-      mockConfig, embedFn,
+      mockConfig,
     );
-    const titles = req.map(c => c.title);
+    const titles = pool.onTaste.map(c => c.title);
     expect(steps).toEqual(['year>=2011', 'year>=2001', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150']);
     expect(titles.filter(t => t.startsWith('Strict'))).toHaveLength(4);
     expect(titles.filter(t => t.startsWith('Tens'))).toHaveLength(3);
@@ -192,7 +184,7 @@ describe('widening through the request path', () => {
     expect(titles).not.toContain('Few TMDB Votes');
     expect(titles).not.toContain('Seventies');
     expect(titles).not.toContain('Unrated');
-    expect(req.length).toBe(MIN_POOL_ROWS);
+    expect(pool.onTaste.length).toBe(MIN_POOL_ROWS);
   });
 
   it('does not widen when the strict pool is already big enough', async () => {
@@ -200,7 +192,7 @@ describe('widening through the request path', () => {
     const pid = seedProfile(db, 'A');
     seedGoodCatalogue(db);
     let steps: string[] | undefined;
-    await retrieveRequestCandidates(db, pid, 'thriller', { hardFilters: DEFAULT_HARD_FILTERS, onWidened: s => { steps = s; } }, mockConfig, embedFn);
+    await retrieveCandidatePool(db, pid, { hardFilters: DEFAULT_HARD_FILTERS, onWidened: s => { steps = s; } }, mockConfig);
     expect(steps).toEqual([]);
   });
 });

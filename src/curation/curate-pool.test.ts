@@ -116,13 +116,6 @@ describe('buildCurationPrompt with CandidatePool', () => {
     const prompt = buildCurationPrompt(mockPool, mockProfile, mockSig, 'something like Severance');
     expect(prompt).toContain('something like Severance');
   });
-
-  it('flat array overload still works (backwards compat)', () => {
-    // The existing signature takes CandidateTitle[] — it must still work
-    const prompt = buildCurationPrompt(onTasteCandidates, mockProfile, mockSig, null);
-    expect(prompt).toContain('Alex');
-    expect(prompt).toContain('OnTaste Film 0');
-  });
 });
 
 // ─── buildCurationPrompt — Surprise Me mode ───────────────────────────────────
@@ -194,10 +187,10 @@ describe('curateCandidates — kind field parsing', () => {
       { tmdb_id: 200, why: 'Surprise pick', category: 'Wildcard', kind: 'wildcard' },
       { tmdb_id: 300, why: 'Predicted dislike', category: 'Adversarial', kind: 'adversarial' },
     ];
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(items) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items } }));
     const db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }) } as unknown as Database;
 
-    const results = await curateCandidates(allCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    const results = await curateCandidates({ onTaste: allCandidates, wildcards: [], adversarial: [] }, mockProfile, mockSig, null, mockConfig, db, spawnMock);
 
     expect(results[0]).toMatchObject({ tmdbId: 100, kind: 'core' });
     expect(results[1]).toMatchObject({ tmdbId: 200, kind: 'wildcard' });
@@ -206,31 +199,30 @@ describe('curateCandidates — kind field parsing', () => {
 
   it('defaults kind to "core" when absent from model output', async () => {
     const items = [{ tmdb_id: 100, why: 'Great', category: 'Top pick' }];
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(items) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items } }));
     const db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }) } as unknown as Database;
 
-    const results = await curateCandidates(allCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    const results = await curateCandidates({ onTaste: allCandidates, wildcards: [], adversarial: [] }, mockProfile, mockSig, null, mockConfig, db, spawnMock);
 
     expect(results[0].kind).toBe('core');
   });
 
   it('passes kind to upsertRecommendation', async () => {
     const items = [{ tmdb_id: 200, why: 'Off-profile', category: 'Surprise', kind: 'wildcard' }];
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(items) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items } }));
     const runMock = vi.fn();
     const db = { prepare: vi.fn().mockReturnValue({ run: runMock }) } as unknown as Database;
 
-    await curateCandidates(allCandidates, mockProfile, mockSig, null, mockConfig, db, spawnMock);
+    await curateCandidates({ onTaste: allCandidates, wildcards: [], adversarial: [] }, mockProfile, mockSig, null, mockConfig, db, spawnMock);
 
     expect(runMock).toHaveBeenCalledWith(expect.objectContaining({ kind: 'wildcard' }));
   });
 
-  it('pool overload: accepts CandidatePool + passes candidates through', async () => {
+  it('accepts a CandidatePool and passes its candidates through', async () => {
     const items = [{ tmdb_id: 100, why: 'Great', category: 'Top pick', kind: 'core' }];
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(items) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items } }));
     const db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }) } as unknown as Database;
 
-    // curateCandidates should accept a CandidatePool as first arg too
     const results = await curateCandidates(mockPool, mockProfile, mockSig, null, mockConfig, db, spawnMock);
 
     expect(results[0]).toMatchObject({ tmdbId: 100, kind: 'core' });
@@ -241,7 +233,7 @@ describe('curateCandidates — kind field parsing', () => {
     const items = Array.from({ length: 8 }, (_, i) => ({
       tmdb_id: 100 + i, why: `Good film ${i}`, category: 'Top pick', kind: 'core',
     }));
-    const spawnMock = makeSpawnMock(JSON.stringify({ result: JSON.stringify(items) }));
+    const spawnMock = makeSpawnMock(JSON.stringify({ structured_output: { items } }));
     const db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }) } as unknown as Database;
 
     const results = await curateCandidates(

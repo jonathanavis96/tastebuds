@@ -1,11 +1,12 @@
-import { spawn as nodeSpawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
 import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import type { CandidateTitle, CandidatePool } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
-import { buildCurationPrompt, FLAT_CANDIDATE_CAP, MIN_REQUEST_PICKS } from './prompt.js';
+import { buildCurationPrompt, buildRequestPrompt, CURATION_SYSTEM_PROMPT, type RequestPromptInput } from './prompt.js';
 import { upsertRecommendation } from '../db/repos/recommendations.js';
+import { ClaudeTimeoutError, runClaudeJson, type SpawnFn } from '../claude/runJson.js';
+
+export type { SpawnFn };
 
 export interface CurationResult {
   tmdbId: number;
@@ -24,8 +25,6 @@ function normalizePredictedRating(v: unknown): number | null {
   return Math.min(5, Math.max(1, snapped));
 }
 
-export type SpawnFn = typeof nodeSpawn;
-
 /** Pinned so curation quality/cost does not drift with the account's default model. */
 export const CURATION_MODEL = 'claude-sonnet-5';
 
@@ -34,15 +33,9 @@ export const CURATION_MODEL = 'claude-sonnet-5';
  * and the caller's rate-limit slot, with no limit at all.
  */
 export const CURATION_TIMEOUT_MS = 5 * 60_000;
-/** Grace after SIGTERM before SIGKILL. */
-const CURATION_KILL_GRACE_MS = 5_000;
 
-class CurationTimeoutError extends Error {
-  constructor() {
-    super(`claude -p timed out after ${CURATION_TIMEOUT_MS / 1000}s`);
-    this.name = 'CurationTimeoutError';
-  }
-}
+/** More items than any prompt lists candidates: anything past this was invented. */
+const MAX_RESULT_ITEMS = 60;
 
 /**
  * Structured-output schema passed via `--json-schema`. Top level must be an
@@ -70,31 +63,58 @@ export const CURATION_SCHEMA = {
   required: ['items'],
 } as const;
 
-/**
- * Robustly extract a JSON array from an LLM text response that may wrap it in
- * markdown fences (```json ... ```), surround it with prose, or include a
- * trailing comma. Throws if no parseable array is found.
- */
-export function extractJsonArray(text: string): unknown {
-  let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) t = fence[1].trim();
-  const start = t.indexOf('[');
-  const end = t.lastIndexOf(']');
-  if (start !== -1 && end > start) t = t.slice(start, end + 1);
-  t = t.replace(/,(\s*[\]}])/g, '$1'); // strip trailing commas
-  return JSON.parse(t);
+type RawItem = { tmdb_id?: unknown; why?: unknown; category?: unknown; kind?: unknown; predicted_rating?: unknown };
+
+function toResult(item: RawItem): CurationResult {
+  return {
+    tmdbId: Number(item.tmdb_id),
+    why: String(item.why ?? ''),
+    category: String(item.category ?? ''),
+    kind: item.kind === 'wildcard' || item.kind === 'adversarial' ? item.kind : 'core',
+    predictedRating: normalizePredictedRating(item.predicted_rating),
+  };
 }
 
 /**
- * Top up a request's picks to `min` from the reranked candidate order, skipping
- * anything the model already chose and anything with a tmdb_id it hallucinated.
- * Kept separate (and exported) so the guarantee is unit-testable without a spawn.
+ * One curation call through the lean `claude -p` (runClaudeJson), retried once
+ * when it fails for any reason but a timeout (retrying a stall only doubles the
+ * wait). Rejects when both attempts fail.
+ */
+async function runCuration(prompt: string, config: Pick<Config, 'claudeToken'>, spawnFn?: SpawnFn): Promise<CurationResult[]> {
+  const MAX_ATTEMPTS = 2;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const out = await runClaudeJson<{ items?: unknown }>({
+        prompt,
+        system: CURATION_SYSTEM_PROMPT,
+        model: CURATION_MODEL,
+        schema: CURATION_SCHEMA,
+        token: config.claudeToken,
+        timeoutMs: CURATION_TIMEOUT_MS,
+        spawnFn,
+      });
+      if (!Array.isArray(out.items)) throw new Error('Unusable claude -p output: no items array');
+      return (out.items as RawItem[]).slice(0, MAX_RESULT_ITEMS).map(toResult);
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof ClaudeTimeoutError) break;
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Top up `picks` to `min` from the ranked candidate order, skipping anything the
+ * model already chose and anything with a tmdb_id it hallucinated. A padded
+ * pick carries `why`. Kept separate (and exported) so the guarantee is
+ * unit-testable without a spawn.
  */
 export function padRequestPicks(
   picks: CurationResult[],
   candidates: CandidateTitle[],
   min: number,
+  why: string,
 ): CurationResult[] {
   const known = new Set(candidates.map(c => c.tmdb_id));
   const kept = picks.filter(p => known.has(p.tmdbId));
@@ -104,13 +124,7 @@ export function padRequestPicks(
     if (out.length >= min) break;
     if (chosen.has(c.tmdb_id)) continue;
     chosen.add(c.tmdb_id);
-    out.push({
-      tmdbId: c.tmdb_id,
-      why: 'Strong match for your request by rating and taste fit.',
-      category: 'Based on your request',
-      kind: 'core',
-      predictedRating: null,
-    });
+    out.push({ tmdbId: c.tmdb_id, why, category: 'Based on your request', kind: 'core', predictedRating: null });
   }
   return out;
 }
@@ -121,7 +135,7 @@ export function padRequestPicks(
  * the wrong title, so only the better-ranked of the two is offered. `seen` spans
  * the groups of a pool.
  */
-function withoutTmdbIdClashes(candidates: CandidateTitle[], seen: Set<number>): CandidateTitle[] {
+export function withoutTmdbIdClashes(candidates: CandidateTitle[], seen: Set<number> = new Set()): CandidateTitle[] {
   return candidates.filter((c) => {
     if (seen.has(c.tmdb_id)) return false;
     seen.add(c.tmdb_id);
@@ -130,140 +144,31 @@ function withoutTmdbIdClashes(candidates: CandidateTitle[], seen: Set<number>): 
 }
 
 /**
- * Curate candidates via the claude -p subprocess.
- *
- * Accepts either:
- *   - CandidateTitle[]  — legacy flat list (backwards compatible)
- *   - CandidatePool     — new 3-group pool (7+2+1 composition)
+ * Curate a pool (a call without a request: Generate More, Surprise Me, cold
+ * start) via one `claude -p` call, and store the picks as pending
+ * recommendations. Surprise Me keeps 5; a call with film vs series open keeps
+ * 5 of each where it can; otherwise the top 10.
  */
 export async function curateCandidates(
-  candidates: CandidateTitle[] | CandidatePool,
+  candidates: CandidatePool,
   profile: ProfileRow,
   sig: TasteSignatureRow,
   request: string | null,
   config: Config,
   db: Database,
-  spawnFn: SpawnFn = nodeSpawn,
+  spawnFn?: SpawnFn,
   balanceMedia = false,
   surprise = false,
 ): Promise<CurationResult[]> {
   const seenTmdbIds = new Set<number>();
-  candidates = Array.isArray(candidates)
-    ? withoutTmdbIdClashes(candidates, seenTmdbIds)
-    : {
-        ...candidates,
-        onTaste: withoutTmdbIdClashes(candidates.onTaste, seenTmdbIds),
-        wildcards: withoutTmdbIdClashes(candidates.wildcards, seenTmdbIds),
-        adversarial: withoutTmdbIdClashes(candidates.adversarial, seenTmdbIds),
-      };
+  const pool: CandidatePool = {
+    onTaste: withoutTmdbIdClashes(candidates.onTaste, seenTmdbIds),
+    wildcards: withoutTmdbIdClashes(candidates.wildcards, seenTmdbIds),
+    adversarial: withoutTmdbIdClashes(candidates.adversarial, seenTmdbIds),
+  };
 
-  const prompt = buildCurationPrompt(candidates, profile, sig, request, balanceMedia, surprise);
-
-  // Flatten pool → map for tmdb_id lookup
-  const allCandidates: CandidateTitle[] = Array.isArray(candidates)
-    ? (candidates as CandidateTitle[])
-    : [
-        ...(candidates as CandidatePool).onTaste,
-        ...(candidates as CandidatePool).wildcards,
-        ...(candidates as CandidatePool).adversarial,
-      ];
-
-  // One claude -p call → parsed CurationResult[]. Rejects on spawn/exit/parse failure.
-  const runOnce = (): Promise<CurationResult[]> =>
-    new Promise<CurationResult[]>((resolve, reject) => {
-      const proc: ChildProcess = spawnFn('claude', [
-        '-p', prompt,
-        '--model', CURATION_MODEL,
-        '--output-format', 'json',
-        '--json-schema', JSON.stringify(CURATION_SCHEMA),
-      ], {
-        env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: config.claudeToken },
-        // Ignore stdin: the prompt is passed as an arg, so claude has no stdin to read.
-        // Without this it warns and blocks ~3s ("no stdin data received in 3s") on every call.
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      const timer = setTimeout(() => {
-        proc.kill('SIGTERM');
-        setTimeout(() => proc.kill('SIGKILL'), CURATION_KILL_GRACE_MS).unref();
-        reject(new CurationTimeoutError());
-      }, CURATION_TIMEOUT_MS);
-      timer.unref();
-
-      proc.stdout!.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-      proc.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-
-      proc.on('close', (code) => {
-        clearTimeout(timer);
-        if (code !== 0) {
-          reject(new Error(`claude -p exited with code ${code}: ${stderr}`));
-          return;
-        }
-        try {
-          // claude --output-format json wraps in {type, subtype, result, ...}.
-          // With --json-schema the CLI also returns `structured_output`, already
-          // parsed and quote-safe — prefer it. Fall back to the text path for
-          // older CLIs (or tests) that only provide `result`.
-          const outer = JSON.parse(stdout) as { result?: string; structured_output?: { items?: unknown } };
-          type RawItem = {
-            tmdb_id: number;
-            why: string;
-            category: string;
-            kind?: string;
-            predicted_rating?: number;
-          };
-          let parsed: RawItem[];
-          if (outer.structured_output && Array.isArray(outer.structured_output.items)) {
-            parsed = outer.structured_output.items as RawItem[];
-          } else {
-            const inner = outer.result ?? stdout;
-            // The model's text may wrap the JSON array in markdown fences or prose,
-            // and occasionally emit a trailing comma — extract + sanitise robustly.
-            parsed = extractJsonArray(inner) as RawItem[];
-          }
-          if (!Array.isArray(parsed)) throw new Error('Expected JSON array from claude');
-          // No cap here — balance/surprise cap is applied in the outer scope after
-          // media_type lookup via titleMap. Guard against runaway LLM responses (more
-          // candidates than FLAT_CANDIDATE_CAP were never sent, so extra picks are hallucinated).
-          resolve(parsed.slice(0, FLAT_CANDIDATE_CAP).map(item => ({
-            tmdbId: item.tmdb_id,
-            why: item.why,
-            category: item.category,
-            kind: (item.kind === 'wildcard' || item.kind === 'adversarial') ? item.kind : 'core',
-            predictedRating: normalizePredictedRating(item.predicted_rating),
-          })));
-        } catch (err) {
-          reject(new Error(`Failed to parse claude -p output: ${(err as Error).message}\nOutput: ${stdout.slice(0, 200)}`));
-        }
-      });
-
-      proc.on('error', (err: Error) => {
-        clearTimeout(timer);
-        reject(new Error(`Failed to spawn claude: ${err.message}`));
-      });
-    });
-
-  // The model occasionally emits unparseable JSON (unescaped quotes etc.) — retry once before failing.
-  const MAX_ATTEMPTS = 2;
-  let results: CurationResult[] | undefined;
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      results = await runOnce();
-      break;
-    } catch (err) {
-      lastErr = err;
-      if (err instanceof CurationTimeoutError) break; // retrying a stall only doubles the wait
-    }
-  }
-  if (!results) throw lastErr;
-
-  // Apply surprise / balance / plain cap before persisting.
-  // titleMap is needed for media_type lookup so this block sits here (not inside runOnce).
-  const titleMap = new Map(allCandidates.map(c => [c.tmdb_id, c]));
+  const results = await runCuration(buildCurationPrompt(pool, profile, sig, request, balanceMedia, surprise), config, spawnFn);
+  const titleMap = new Map([...pool.onTaste, ...pool.wildcards, ...pool.adversarial].map(c => [c.tmdb_id, c]));
 
   let finalResults: CurationResult[];
   if (surprise) {
@@ -285,15 +190,6 @@ export async function curateCandidates(
     finalResults = results.slice(0, 10);
   }
 
-  // A free-text request must come back with at least MIN_REQUEST_PICKS titles
-  // whenever the (already filtered + reranked) flat list allows it. If the model
-  // still under-delivers, pad from the retrieval order — DB-only, no second
-  // claude -p call — so the user never sees "2 options" again.
-  if (request && Array.isArray(candidates) && !surprise) {
-    finalResults = padRequestPicks(finalResults, candidates as CandidateTitle[], MIN_REQUEST_PICKS);
-  }
-
-  // Persist as recommendations
   for (const result of finalResults) {
     const title = titleMap.get(result.tmdbId);
     if (!title) continue;
@@ -311,4 +207,52 @@ export async function curateCandidates(
   }
 
   return finalResults;
+}
+
+/**
+ * Ask the model to order a request's candidates and write the "why" lines.
+ * Returns its picks in its order, keeping only tmdb_ids it was shown, each
+ * once; storing them is the caller's job. Rejects when the call fails.
+ * `input.candidates` and `input.older` must not share a tmdb_id (see
+ * withoutTmdbIdClashes).
+ */
+export async function curateRequest(
+  input: RequestPromptInput,
+  profile: ProfileRow,
+  sig: TasteSignatureRow,
+  config: Pick<Config, 'claudeToken'>,
+  spawnFn?: SpawnFn,
+): Promise<CurationResult[]> {
+  const results = await runCuration(buildRequestPrompt(input, profile, sig), config, spawnFn);
+  const known = new Set([...input.candidates, ...input.older].map(c => c.tmdb_id));
+  const seen = new Set<number>();
+  const kept = results.filter((r) => {
+    if (!known.has(r.tmdbId) || seen.has(r.tmdbId)) return false;
+    seen.add(r.tmdbId);
+    return true;
+  });
+  return kept.map(r => ({ ...r, kind: 'core' as const }));
+}
+
+/**
+ * The final order of a request's picks. Titles from the request's own year
+ * window come first and fill the list up to MIN_REQUEST_PICKS; older titles
+ * (offered only when the default window had too few) follow, never more than
+ * `olderRoom`. Within each group the model's order leads and the ranked
+ * candidates pad what it left out, so a failed or short answer still returns
+ * every title the rules allow, in rank order.
+ */
+export function arrangeRequestPicks(
+  chosen: CurationResult[],
+  groups: { recent: CandidateTitle[]; older: CandidateTitle[]; olderRoom: number },
+  padWhy: string,
+  size: number,
+): { recent: CurationResult[]; older: CurationResult[] } {
+  const recentIds = new Set(groups.recent.map(c => c.tmdb_id));
+  const olderIds = new Set(groups.older.map(c => c.tmdb_id));
+  const recentTarget = Math.min(size, groups.recent.length);
+  const olderTarget = Math.min(groups.olderRoom, groups.older.length, Math.max(0, size - recentTarget));
+  const recent = padRequestPicks(chosen.filter(p => recentIds.has(p.tmdbId)).slice(0, recentTarget), groups.recent, recentTarget, padWhy);
+  const older = padRequestPicks(chosen.filter(p => olderIds.has(p.tmdbId)).slice(0, olderTarget), groups.older, olderTarget, padWhy);
+  return { recent, older };
 }

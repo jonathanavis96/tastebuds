@@ -1,16 +1,9 @@
 /**
- * On-demand request coverage — ensures the DB contains titles relevant to a
- * user's free-text request BEFORE retrieval runs.
+ * On-demand request coverage: makes sure the library holds titles that can
+ * satisfy a request's rules before retrieval runs (ensureRulesCoverage), and
+ * carries the genres a request named into the profile's loved genres.
  *
- * When a user types "scary thrillers" and the DB has no horror/thriller series,
- * the retrieval step finds nothing. This module plugs that gap by:
- *   1. Parsing the request text into canonical genre names (Horror, Thriller, …)
- *   2. For each media type in scope, resolving genres → TMDB genre ids + keyword terms
- *   3. Discovering titles via genre ids, keyword ids, and a direct title search
- *   4. For new (not-yet-in-DB) titles: fetch details → embed → upsert
- *   5. Enforcing the daily request_added budget so we never spam TMDB
- *
- * All TMDB + embed calls are injectable via a `deps` param so tests never hit
+ * All TMDB and embed calls are injectable via a `deps` param so tests never hit
  * the network (pattern mirrors how retrieve.ts injects embedFn).
  */
 
@@ -19,118 +12,13 @@ import type { Config } from '../config.js';
 import type { DiscoverOpts, TmdbTitle, TmdbTitleDetail } from '../tmdb/types.js';
 import { getTitleByTmdbId, upsertTitle } from '../db/repos/titles.js';
 import { getUsage, bumpRequestAdded, today } from '../db/repos/apiUsage.js';
-import {
-  discoverTitles,
-  getTitleDetails,
-  searchTitles,
-  searchKeyword,
-} from '../tmdb/client.js';
+import { discoverTitles, getTitleDetails, searchTitles, searchKeyword } from '../tmdb/client.js';
 import { mapTmdbToTitleRow } from '../tmdb/mappers.js';
 import { embedText } from '../ollama/embed.js';
-import { resolveGenreNames, tmdbQueryForGenre } from '../tmdb/taxonomy.js';
+import { tmdbQueryForGenre } from '../tmdb/taxonomy.js';
 import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import { applyCachedImdbRatings } from '../imdb/dataset.js';
 import type { RequestRules, RuleClause } from '../request/rules.js';
-
-// ── Synonym table ─────────────────────────────────────────────────────────────
-// Maps vibe words → canonical TMDB genre names. Matched case-insensitively on
-// word boundaries in the request string. Canonical names must match MOVIE_GENRE_MAP
-// keys (and/or TV_KEYWORD_GENRES keys for TV-only vibes).
-const SYNONYM_MAP: Array<{ terms: string[]; genre: string }> = [
-  {
-    terms: ['scary', 'spooky', 'creepy', 'frightening', 'chilling', 'haunting', 'horror'],
-    genre: 'Horror',
-  },
-  {
-    terms: ['thriller', 'tense', 'gripping', 'suspense', 'suspenseful', 'edge-of-your-seat', 'thrilling'],
-    genre: 'Thriller',
-  },
-  {
-    terms: ['funny', 'hilarious', 'comedy', 'lighthearted', 'comedic', 'laugh'],
-    genre: 'Comedy',
-  },
-  {
-    terms: ['romantic', 'romance', 'love story', 'love'],
-    genre: 'Romance',
-  },
-  {
-    terms: ['mind-bending', 'sci-fi', 'science fiction', 'space', 'futuristic', 'scifi'],
-    genre: 'Science Fiction',
-  },
-  {
-    terms: ['crime', 'heist', 'detective', 'gangster', 'mob'],
-    genre: 'Crime',
-  },
-  {
-    terms: ['mystery', 'whodunit', 'whodunnit', 'puzzling', 'enigmatic'],
-    genre: 'Mystery',
-  },
-  {
-    terms: ['drama', 'dramatic', 'emotional', 'moving', 'poignant'],
-    genre: 'Drama',
-  },
-  {
-    terms: ['action', 'action-packed', 'explosive', 'adrenaline'],
-    genre: 'Action',
-  },
-  {
-    terms: ['adventure', 'adventurous', 'quest', 'journey', 'epic'],
-    genre: 'Adventure',
-  },
-  {
-    terms: ['animated', 'animation', 'cartoon'],
-    genre: 'Animation',
-  },
-  {
-    terms: ['documentary', 'docuseries', 'doc', 'real story', 'true story'],
-    genre: 'Documentary',
-  },
-  {
-    terms: ['fantasy', 'magical', 'fantastical', 'fairy tale'],
-    genre: 'Fantasy',
-  },
-];
-
-/**
- * Parse a free-text request into a set of canonical genre names by matching
- * vibe-word synonyms. Returns an array of unique canonical genre names found.
- *
- * Matching is case-insensitive and uses word-boundary checks so "action-packed"
- * doesn't falsely match "action" in "inaction".
- */
-export function resolveRequestToGenres(request: string): string[] {
-  const lower = request.toLowerCase();
-  const found = new Set<string>();
-
-  for (const { terms, genre } of SYNONYM_MAP) {
-    for (const term of terms) {
-      // Word-boundary match: the term must be preceded and followed by a
-      // non-word character (or start/end of string). We use a simple approach:
-      // check if the lowercased request contains the term as a whole word.
-      const termLower = term.toLowerCase();
-      const idx = lower.indexOf(termLower);
-      if (idx === -1) continue;
-
-      const before = idx === 0 ? '' : lower[idx - 1];
-      // Allow a trailing 's' for plurals (e.g. "thrillers" matches "thriller",
-      // "horrors" matches "horror") — an 's' after the term still counts as a
-      // word boundary end if the next char after the 's' is non-word or EOL.
-      const afterIdx = idx + termLower.length;
-      let afterPos = afterIdx;
-      if (afterPos < lower.length && lower[afterPos] === 's') afterPos++;
-      const after = afterPos >= lower.length ? '' : lower[afterPos];
-
-      const boundaryBefore = before === '' || /[\W_]/.test(before);
-      const boundaryAfter = after === '' || /[\W_]/.test(after);
-      if (boundaryBefore && boundaryAfter) {
-        found.add(genre);
-        break; // already matched this entry, move to next
-      }
-    }
-  }
-
-  return [...found];
-}
 
 /**
  * Injectable dependencies — real implementations are the default; tests inject
@@ -240,119 +128,6 @@ async function ingestTitle(
 export interface OnDemandResult {
   added: number;
   errors: string[];
-}
-
-/**
- * Ensure the DB contains titles relevant to the given free-text request.
- *
- * This is called from /generate before retrieval. It's a best-effort, non-fatal
- * operation: errors are collected and returned (never thrown), so a TMDB blip
- * can't break /generate.
- *
- * @param db       - SQLite database
- * @param request  - Free-text user request ("scary thrillers", "mind-bending sci-fi")
- * @param mediaType - Optional filter: 'movie'|'tv'. When undefined, both are searched.
- * @param config   - App config (budget limits, api keys, ollama url)
- * @param deps     - Injectable TMDB/embed functions for testing (defaults to real impls)
- */
-export async function ensureRequestCoverage(
-  db: InstanceType<typeof Database>,
-  request: string,
-  mediaType: 'movie' | 'tv' | undefined,
-  config: Config,
-  deps: OnDemandDeps = realDeps,
-): Promise<OnDemandResult> {
-  const result: OnDemandResult = { added: 0, errors: [] };
-
-  // ── Budget gate ─────────────────────────────────────────────────────────
-  const runDay = today();
-  const usage = getUsage(db, runDay);
-  let remaining = Math.max(0, config.requestLookupDailyBudget - usage.request_added);
-  if (remaining === 0) return result;
-
-  // ── Resolve request to genre names ──────────────────────────────────────
-  const genreNames = resolveRequestToGenres(request);
-  if (genreNames.length === 0) {
-    // No genre clues — still run a title search so literal matches land in the DB
-  }
-
-  // ── Determine which media types to search ───────────────────────────────
-  const mediaTypes: Array<'movie' | 'tv'> =
-    mediaType != null ? [mediaType] : ['movie', 'tv'];
-
-  // Collect (tmdbId, mediaType) pairs from all discovery paths, then dedup
-  const candidates = new Map<string, { tmdbId: number; mediaType: 'movie' | 'tv' }>();
-
-  const addCandidate = (t: TmdbTitle, mt: 'movie' | 'tv') => {
-    const key = `${t.id}:${mt}`;
-    if (!candidates.has(key)) candidates.set(key, { tmdbId: t.id, mediaType: mt });
-  };
-
-  for (const mt of mediaTypes) {
-    // Resolve genre names to ids + keyword terms for this media type
-    const { genreIds, keywordTerms } = resolveGenreNames(genreNames, mt);
-
-    // ── Genre-based discovery ────────────────────────────────────────────
-    if (genreIds.length > 0) {
-      try {
-        const titles = await deps.discoverTitles(
-          { mediaType: mt, genreIds, sortBy: 'vote_count.desc', voteCountGte: mt === 'movie' ? 100 : 50 },
-          config,
-        );
-        for (const t of titles) addCandidate(t, mt);
-      } catch (err) {
-        result.errors.push(`discoverTitles(${mt}, genres) failed: ${String(err)}`);
-      }
-    }
-
-    // ── Keyword-based discovery (TV Horror/Thriller workaround) ──────────
-    for (const term of keywordTerms) {
-      try {
-        const kwId = await resolveKeywordId(term, config, deps);
-        if (kwId == null) {
-          result.errors.push(`Could not resolve keyword id for "${term}"`);
-          continue;
-        }
-        const titles = await deps.discoverTitles(
-          { mediaType: mt, keywordIds: [kwId], sortBy: 'vote_count.desc', voteCountGte: 50 },
-          config,
-        );
-        for (const t of titles) addCandidate(t, mt);
-      } catch (err) {
-        result.errors.push(`discoverTitles(${mt}, keyword="${term}") failed: ${String(err)}`);
-      }
-    }
-
-    // ── Literal title search (catches exact name matches) ────────────────
-    try {
-      const titles = await deps.searchTitles(request, mt, config);
-      for (const t of titles) addCandidate(t, mt);
-    } catch (err) {
-      result.errors.push(`searchTitles(${mt}) failed: ${String(err)}`);
-    }
-  }
-
-  // ── Ingest new titles up to the remaining budget ─────────────────────────
-  for (const [, { tmdbId, mediaType: mt }] of candidates.entries()) {
-    if (remaining <= 0) break;
-
-    // Skip titles already in the DB — budget is for new content only
-    const existing = getTitleByTmdbId(db, tmdbId, mt);
-    if (existing) continue;
-
-    if ((await ingestTitle(db, { tmdbId, mediaType: mt }, config, deps, result.errors)) != null) {
-      result.added++;
-      remaining--;
-    }
-  }
-
-  // Persist the request_added counter so subsequent calls and harvest runs know
-  // how much of today's budget has been consumed.
-  if (result.added > 0) {
-    bumpRequestAdded(db, runDay, result.added);
-  }
-
-  return result;
 }
 
 // ── Rules-driven discovery ───────────────────────────────────────────────────
@@ -655,18 +430,17 @@ async function ingestBounded(
  * runs: ask TMDB for titles inside the rules' year window, genres, exclusions,
  * language and media type (most popular and most voted first), look up the
  * reference titles by name, and add the ones not stored yet with their
- * details, embedding and IMDb rating. Best effort and budgeted like
- * ensureRequestCoverage: errors are collected, never thrown.
+ * details, embedding and IMDb rating. Best effort and bounded by the daily
+ * request budget: errors are collected, never thrown.
  *
  * `uiMediaType` is the Films/Series filter chosen in the app; the rules' own
- * media type wins when the request states one. `requestText` is not searched
- * as a title: whole sentences matched unrelated titles, and the references a
- * request names are already in `rules.similarTo`.
+ * media type wins when the request states one. The request text itself is not
+ * searched as a title: whole sentences matched unrelated titles, and the
+ * references a request names are already in `rules.similarTo`.
  */
 export async function ensureRulesCoverage(
   db: InstanceType<typeof Database>,
   rules: RequestRules,
-  requestText: string,
   uiMediaType: 'movie' | 'tv' | undefined,
   config: Config,
   deps: OnDemandDeps = realDeps,
@@ -715,10 +489,11 @@ const MAX_LOVED_GENRES = 12;
 /**
  * Persist explicit request genre affinity into the profile's taste signature.
  *
- * When a user makes a free-text request that resolves to ≥1 canonical genre,
- * those genres are merged into `prefs.loved_genres` so the affinity persists
- * into future passive browsing (retrieval reads `loved_genres` to bias the
- * candidate pool).
+ * The genres a request asked for outright (its single-genre must clauses, as
+ * read into rules) are merged into `prefs.loved_genres`, so the affinity
+ * persists into future passive browsing (retrieval reads `loved_genres` to bias
+ * the candidate pool). A clause such as "thriller or horror" names no one genre
+ * and adds nothing.
  *
  * Merge semantics:
  *   - Existing genres are kept in their current order (oldest first).
@@ -728,14 +503,14 @@ const MAX_LOVED_GENRES = 12;
  *   - All other prefs keys (hated_genres, loved_themes, etc.) are untouched.
  *   - The existing taste_vector and refreshed_at are preserved; only `prefs`
  *     is written back, so a vector refresh isn't triggered.
- *   - No-ops when resolveRequestToGenres returns [] (no recognised genre vibe).
+ *   - No-ops when the rules name no single genre.
  */
 export function mergeRequestGenresToProfile(
   db: InstanceType<typeof Database>,
   profileId: number,
-  request: string,
+  rules: Pick<RequestRules, 'must'>,
 ): void {
-  const genres = resolveRequestToGenres(request);
+  const genres = [...new Set(rules.must.filter((c) => c.genres.length === 1).map((c) => c.genres[0]))];
   if (genres.length === 0) return;
 
   const existing = getTasteSignature(db, profileId);
