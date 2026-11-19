@@ -275,6 +275,20 @@ describe('generatePicks for a request', () => {
     expect(titles).not.toContain('Thriller 0');
   });
 
+  it('returns the picks of a request for a language the household does not usually watch', async () => {
+    const db = setupDb();
+    for (let i = 0; i < 3; i++) seed(db, `Korean ${i}`, { original_language: 'ko' });
+    seed(db, 'English One');
+    const { spawn } = fakeClaude();
+
+    const out = await generatePicks(db, config, { profileId: 1, request: 'Korean thriller' }, deps({ spawnFn: spawn }));
+
+    expect(stored(db).map(r => r.title).sort()).toEqual(['Korean 0', 'Korean 1', 'Korean 2']);
+    // The feed shows them: it does not filter them by the household's languages again.
+    expect(out.ok && out.feed.recs.map(r => r.title).sort()).toEqual(['Korean 0', 'Korean 1', 'Korean 2']);
+    expect(out.ok && out.feed.request?.understood).toContain('Korean');
+  });
+
   it('takes film or series from the app filter when the request names neither', async () => {
     const db = setupDb();
     for (let i = 0; i < 3; i++) seed(db, `Film ${i}`);

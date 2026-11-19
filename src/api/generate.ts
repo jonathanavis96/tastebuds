@@ -183,11 +183,11 @@ function takeBatch(ctx: Context): number[] {
  * candidates, so no new pick collides with one), so a failed or empty generate
  * never leaves Picks empty. Shown/dismissed recs and watch history are untouched,
  * and so is a pending pick the profile has watched, rated or watchlisted (its row
- * carries the predicted_rating the calibration widget needs). A media-filtered
- * generate replaces only picks of that media type.
+ * carries the predicted_rating the calibration widget needs). A generate for
+ * films or for series (`mediaType`) replaces only picks of that media type.
  */
-function replaceOldPending(ctx: Context, fresh: number[]): void {
-  if (ctx.hadPending && fresh.length > 0) clearPendingRecommendations(ctx.db, ctx.profile.id, ctx.lastOldId, ctx.mediaType);
+function replaceOldPending(ctx: Context, fresh: number[], mediaType: 'movie' | 'tv' | undefined = ctx.mediaType): void {
+  if (ctx.hadPending && fresh.length > 0) clearPendingRecommendations(ctx.db, ctx.profile.id, ctx.lastOldId, mediaType);
 }
 
 // ── Calls without a request ──────────────────────────────────────────────────
@@ -308,7 +308,8 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
       rule_note: p.older ? ruleNote : null,
     });
   }
-  replaceOldPending(ctx, takeBatch(ctx));
+  // The media type the request ended up with (its own words, else the app's filter).
+  replaceOldPending(ctx, takeBatch(ctx), rules.mediaType ?? undefined);
 
   const fmt = (name: string) => (stages.ms[name] == null ? '-' : `${stages.ms[name]}ms`);
   console.log(

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Recommendation } from '../lib/types.js';
-  import { kindMeta } from '../lib/categories.js';
+  import { badgeLabel, kindMeta } from '../lib/categories.js';
 
   interface Props {
     recommendations?: Recommendation[];
@@ -27,7 +27,6 @@
   {/if}
   {#each recommendations as rec (rec.id)}
     {@const meta = kindMeta(rec)}
-    {@const badgeLabel = (rec.kind ?? 'core') === 'core' ? (rec.category || meta.label) : meta.label}
     {@const dismissed = dismissedIds.includes(rec.id)}
     <button
       class="poster-card"
@@ -43,7 +42,7 @@
         {#if dismissed}
           <span class="badge dismissed-badge">✗ Not interested</span>
         {:else}
-          <span class="badge" style="background:{meta.color};color:{meta.text}">{meta.icon} {badgeLabel}</span>
+          <span class="badge" style="background:{meta.color};color:{meta.text}">{meta.icon} {badgeLabel(rec)}</span>
         {/if}
       </div>
       <div class="poster-info">

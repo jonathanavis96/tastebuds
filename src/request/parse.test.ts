@@ -380,3 +380,32 @@ describe('words that only look like a rule', () => {
     expect(leftoverWords('christmas movies', NOW)).toEqual([]);
   });
 });
+
+describe('more than one exclusion, and exclusions that have no rule', () => {
+  const excluded = (text: string) => parseRequest(text, NOW).mustNot.map((c) => c.label);
+  const required = (text: string) => parseRequest(text, NOW).must.map((c) => c.label);
+
+  it('reads each "no …" joined by "and" as its own exclusion', () => {
+    expect([required('no horror and no comedy'), excluded('no horror and no comedy')]).toEqual([[], ['horror', 'comedy']]);
+    expect([required('not romance and not horror'), excluded('not romance and not horror')]).toEqual([[], ['romance', 'horror']]);
+    expect([required('no kids and no animation'), excluded('no kids and no animation')]).toEqual([[], ['kids', 'animation']]);
+    expect([required('thriller, no gore and no nuns'), excluded('thriller, no gore and no nuns')]).toEqual([['Thriller'], ['gore', 'nuns']]);
+    expect([required('without romance and without gore'), excluded('without romance and without gore')]).toEqual([[], ['romance', 'gore']]);
+  });
+
+  it('never makes a negator itself an excluded word', () => {
+    for (const text of ['no horror and no comedy', 'not romance and not horror', 'no gore or no nuns']) {
+      expect(parseRequest(text, NOW).mustNot.flatMap((c) => c.terms)).not.toContain('no');
+      expect(parseRequest(text, NOW).mustNot.flatMap((c) => c.terms)).not.toContain('not');
+    }
+  });
+
+  it('never reads a negated language as a request for that language', () => {
+    for (const text of ['not in english', 'comedy but not in english', 'not in french', 'nothing in english', 'not english']) {
+      expect(parseRequest(text, NOW).language, text).toBeNull();
+    }
+    expect(required('comedy but not in english')).toEqual(['Comedy']);
+    expect(parseRequest('comedy in english', NOW).language).toBe('en');
+  });
+});
+

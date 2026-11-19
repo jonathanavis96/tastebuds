@@ -476,6 +476,12 @@ describe('findRtPage', () => {
     expect(await findRtPage({ ...title, rt_url: null }, makeFetch([]))).toBe('unconfirmed');
   });
 
+  it('takes a page that names no title at all (a challenge page served as 200) as no answer', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: bare, body: '<html><body>Checking your browser…</body></html>' }]);
+    expect(await findRtPage({ ...title, rt_url: bare }, fetchMock)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('returns null when the stored page gives no answer, without looking further', async () => {
     const fetchMock = makeFetch([{ status: 403, url: bare }]);
     expect(await findRtPage({ ...title, rt_url: bare }, fetchMock)).toBeNull();

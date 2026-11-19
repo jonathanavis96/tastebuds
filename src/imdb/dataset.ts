@@ -16,6 +16,12 @@ export const IMDB_BASICS_URL = 'https://datasets.imdbws.com/title.basics.tsv.gz'
 const USER_AGENT = 'TasteBuds/0.1 (self-hosted film and series recommender)';
 /** The ratings file is about 8 MB; the basics file about 230 MB. */
 const RATINGS_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+/**
+ * A new ratings file must list at least this share of the titles that have a
+ * rating now. A well-formed file with a fraction of its usual rows would
+ * otherwise clear the rating of every title it leaves out.
+ */
+const MIN_FILE_COVERAGE = 0.5;
 const BASICS_DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 
 export interface ImdbRatingsSyncResult {
@@ -74,6 +80,10 @@ export async function syncImdbRatings(
   let found: Map<string, ImdbRating>;
   try {
     found = await readRatings(downloaded.tempPath, rows);
+    const rated = rows.filter((r) => r.imdb_rating != null).length;
+    if (found.size < rated * MIN_FILE_COVERAGE) {
+      throw new Error(`IMDb ratings file lists only ${found.size} of ${rated} rated titles; the stored ratings are kept`);
+    }
     await rename(downloaded.tempPath, path);
   } catch (err) {
     await rm(downloaded.tempPath, { force: true });
@@ -86,7 +96,9 @@ export async function syncImdbRatings(
 /**
  * Set imdb_rating / imdb_votes for `titleIds` from the ratings file already on
  * disk (titles added since the last sync). Returns how many got a rating; 0 when
- * there is no file yet.
+ * there is no file yet. A title the file does not list is left as it is: the
+ * file on disk may be a day old, so only the nightly sync, on a fresh file,
+ * decides that a title has no rating.
  */
 export async function applyCachedImdbRatings(
   db: InstanceType<typeof Database>,
@@ -102,8 +114,9 @@ export async function applyCachedImdbRatings(
   if (rows.length === 0) return 0;
 
   const found = await readRatings(path, rows, { stopWhenAllFound: true });
-  writeComparison(db, rows, found, syncedAt);
-  return rows.filter((r) => found.has(r.imdb_id)).length;
+  const listed = rows.filter((r) => found.has(r.imdb_id));
+  writeComparison(db, listed, found, syncedAt);
+  return listed.length;
 }
 
 /**

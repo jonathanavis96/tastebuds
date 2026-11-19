@@ -345,13 +345,25 @@
       if (mediaFilter === 'movie') opts.mediaType = 'movie';
       if (mediaFilter === 'tv') opts.mediaType = 'tv';
       if (request) opts.request = request;
-      showFeed(await generateRecommendations(opts));
+      const feed = await generateRecommendations(opts);
+      showFeed(feed);
+      if (request) followRequestMedia(feed, request);
       dismissedRecIds = [];
     } catch (e) {
       error = String(e);
     } finally {
       generating = false;
     }
+  }
+
+  // The request's own words win over the Films/Series toggle ("thriller series"
+  // typed with Movies on): move the toggle to what came back, or the screen
+  // would hide every pick it was just given.
+  function followRequestMedia(feed: FeedResponse, request: string) {
+    if (mediaFilter === 'all') return;
+    const kinds = new Set(feed.recs.filter(r => r.request_text?.trim() === request.trim()).map(r => r.media_type));
+    if (kinds.size === 0 || kinds.has(mediaFilter)) return;
+    mediaFilter = kinds.has('movie') && kinds.has('tv') ? 'all' : kinds.has('tv') ? 'tv' : 'movie';
   }
 
   // Surprise Me: 5 top picks only (no wildcard/adversarial), APPENDED to the list

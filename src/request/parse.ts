@@ -323,7 +323,7 @@ function namesTitle(part: Token[]): boolean {
 const NEGATORS = new Set(['no', 'not', 'without', 'nothing', 'avoid', 'never', 'dont']);
 const NEGATION_SKIP = new Set([
   'too', 'any', 'more', 'a', 'an', 'the', 'so', 'very', 'overly', 'much', 'want', 'like', 'need',
-  'include', 'with', 'anything', 'something', 'of', 'that',
+  'include', 'with', 'anything', 'something', 'of', 'that', 'in',
 ]);
 
 /** "no X", "not X", "without X", "but not X", "no X or Y" → mustNot clauses. */
@@ -338,7 +338,8 @@ function readNegations(toks: Token[], r: Reading): void {
       j += len;
       const next = toks[j]?.norm;
       const joins = next === 'or' || next === 'nor' || (next === 'and' && matchAt(toks, j + 1)?.entry.kind !== 'genre');
-      if (!joins) break;
+      // "no horror and no comedy": the second "no" starts its own exclusion.
+      if (!joins || NEGATORS.has(toks[j + 1]?.norm ?? '')) break;
       j++;
     }
     if (negated) toks[i].used = true;
@@ -348,12 +349,14 @@ function readNegations(toks: Token[], r: Reading): void {
 /** Read one excluded thing at `j`; returns how many tokens it took (0 when there is none). */
 function negateItem(toks: Token[], j: number, r: Reading): number {
   const t = toks[j];
-  if (!t || t.punct || t.used) return 0;
+  if (!t || t.punct || t.used || NEGATORS.has(t.norm)) return 0;
   const m = matchAt(toks, j);
   if (m) {
     const label = phrase(toks.slice(j, j + m.len)).toLowerCase();
     const e = m.entry;
     if (e.kind === 'theme' && isIdiom(e.theme, toks, j, m.len)) return 0;
+    // A negated language, rating word or the like has no rule to become; it is
+    // taken out of the reading so that "not in English" never asks for English.
     if (e.kind === 'genre') for (const g of e.genres) r.mustNot.push({ label, genres: [g], terms: [] });
     if (e.kind === 'theme') r.mustNot.push({ label, genres: [], terms: [...THEMES[e.theme].terms] });
     if (e.kind === 'media') r.notMedia.add(e.media);

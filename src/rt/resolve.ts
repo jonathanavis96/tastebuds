@@ -179,7 +179,11 @@ export async function readRtScore(
     });
     if (res.status === 404 || res.status === 410) return { verified: false };
     if (res.status !== 200) return null;
-    const page = confirmPage(await res.text(), title, year);
+    const body = await res.text();
+    // A challenge or error page served as 200 names no title: that is no answer,
+    // not evidence that the stored page belongs to another title.
+    if (parsePageIdentity(body).title === null) return null;
+    const page = confirmPage(body, title, year);
     if (!page) return { verified: false };
     return { verified: true, url: res.url || url, score: page.score };
   } catch {

@@ -104,7 +104,15 @@ export function enrichRec(db: Database, { request_summary: _summary, ...rec }: R
 function visibleRecs(db: Database, config: Config, profileId: number, recs: RecommendationRow[]): RecommendationRow[] {
   const memberIds = engagementMemberIds(db, profileId);
   const engagedIds = getEngagedTitleIds(db, memberIds);
-  const passing = titleIdsPassing(db, floorFilters(hardFiltersFor(db, config, memberIds)), recs.map(r => r.title_id));
+  const floor = floorFilters(hardFiltersFor(db, config, memberIds));
+  // A pick made for a typed request was checked against that request before it
+  // was stored, its language included ("Korean thriller"), so the household's
+  // language list is not applied to it a second time.
+  const titleIds = (requested: boolean) => recs.filter(r => (r.request_summary != null) === requested).map(r => r.title_id);
+  const passing = new Set([
+    ...titleIdsPassing(db, floor, titleIds(false)),
+    ...titleIdsPassing(db, { ...floor, languages: [] }, titleIds(true)),
+  ]);
   return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
 }
 

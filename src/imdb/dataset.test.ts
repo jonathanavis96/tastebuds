@@ -167,6 +167,20 @@ describe('IMDb ratings file', () => {
     expect(ratingsRow(db, 1).imdb_synced_at).toBeNull();
   });
 
+  it('keeps the stored ratings when a well-formed file lists far fewer titles than are rated', async () => {
+    const db = createTestDb();
+    insertTitle(db, 1, 'tt0000001', '7.4');
+    insertTitle(db, 2, 'tt0000002', '9.0');
+    insertTitle(db, 3, 'tt0000003', '6.1');
+    const headerOnly = gzResponse('tconst\taverageRating\tnumVotes\n');
+
+    await expect(syncImdbRatings(db, config, vi.fn().mockResolvedValueOnce(headerOnly) as unknown as typeof fetch))
+      .rejects.toThrow('only 0 of 3 rated titles');
+
+    expect([1, 2, 3].map((id) => ratingsRow(db, id).imdb_rating)).toEqual(['7.4', '9.0', '6.1']);
+    expect(existsSync(imdbRatingsPath(config))).toBe(false);
+  });
+
   it('fails on an HTTP error without touching ratings', async () => {
     const db = createTestDb();
     insertTitle(db, 1, 'tt0000001', '6.9');
@@ -198,7 +212,8 @@ describe('IMDb ratings file', () => {
 
       expect(rated).toBe(1);
       expect(ratingsRow(db, 1)).toEqual({ imdb_rating: '7.4', imdb_votes: 2500, imdb_synced_at: 1_700_000_000 });
-      expect(ratingsRow(db, 2)).toEqual({ imdb_rating: null, imdb_votes: null, imdb_synced_at: 1_700_000_000 });
+      // Not in the file on disk, which may be a day old: left as it is for the nightly sync to decide.
+      expect(ratingsRow(db, 2)).toEqual({ imdb_rating: '7.7', imdb_votes: null, imdb_synced_at: null });
       expect(ratingsRow(db, 3).imdb_synced_at).toBeNull();
     });
   });

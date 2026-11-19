@@ -58,6 +58,16 @@ export const CATEGORY_BLURBS: Record<string, string> = {
   'Based on your request': 'Chosen to match what you typed in the request box.',
 };
 
+/** The request label is too long for the badge on a phone-width card, where it was cut off mid-word. */
+const BADGE_TEXT: Record<string, string> = { 'Based on your request': 'Your request' };
+
+/** The text of a card's badge: the model's flavour label for a core pick, the structural label otherwise. */
+export function badgeLabel(rec: Pick<Recommendation, 'kind' | 'category'>): string {
+  const meta = kindMeta(rec);
+  if (kindOf(rec) !== 'core' || !rec.category) return meta.label;
+  return BADGE_TEXT[rec.category] ?? rec.category;
+}
+
 export function kindOf(rec: Pick<Recommendation, 'kind'>): RecKind {
   return rec.kind ?? 'core';
 }
