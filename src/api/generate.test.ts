@@ -299,4 +299,56 @@ describe('generatePicks for a request', () => {
     expect(stored(db).every(r => r.title.startsWith('Series'))).toBe(true);
     expect(out.ok && out.feed.request?.understood).toContain('Series');
   });
+
+  describe('asked again while its picks are still in the feed', () => {
+    const ask = (db: InstanceType<typeof Database>) =>
+      generatePicks(db, config, { profileId: 1, request: 'Thriller new 2025', mediaType: 'movie' }, deps());
+
+    it('shows the same titles again when nothing else matches, not an empty list', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 6; i++) seed(db, `Thriller ${i}`);
+
+      await ask(db);
+      const first = stored(db);
+      const out = await ask(db);
+
+      const second = stored(db);
+      expect(second.map(r => r.title).sort()).toEqual(first.map(r => r.title).sort());
+      expect(second).toHaveLength(6);
+      // Stored again with the new batch, not left as the old rows.
+      expect(Math.min(...second.map(r => r.id))).toBeGreaterThan(Math.max(...first.map(r => r.id)));
+      expect(out.ok && out.feed.recs).toHaveLength(6);
+      expect(out.ok && out.feed.request).toMatchObject({ matched: 6 });
+    });
+
+    it('shows only new titles while enough of them match', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 24; i++) seed(db, `Thriller ${i}`);
+
+      await ask(db);
+      const first = new Set(stored(db).map(r => r.title));
+      const out = await ask(db);
+
+      const second = stored(db).map(r => r.title);
+      expect(second).toHaveLength(10);
+      expect(second.filter(t => first.has(t))).toEqual([]);
+      expect(out.ok && out.feed.request).toMatchObject({ matched: 24 });
+    });
+
+    it('keeps every new title and fills the rest with the best of those already shown', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 14; i++) seed(db, `Thriller ${i}`);
+      // The model prefers whatever is listed last: it still cannot drop a new title.
+      const { spawn } = fakeClaude({ order: ids => [...ids].reverse() });
+
+      await ask(db);
+      const first = new Set(stored(db).map(r => r.title));
+      await generatePicks(db, config, { profileId: 1, request: 'Thriller new 2025', mediaType: 'movie' }, deps({ spawnFn: spawn }));
+
+      const second = stored(db).map(r => r.title);
+      expect(second).toHaveLength(10);
+      expect(second.filter(t => !first.has(t))).toHaveLength(4);
+      expect(new Set(second).size).toBe(10);
+    });
+  });
 });

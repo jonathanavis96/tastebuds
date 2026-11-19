@@ -8,7 +8,7 @@ import type { Database } from 'better-sqlite3';
 import type { Config } from '../config.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
 import { getProfile } from '../db/repos/profiles.js';
-import { clearPendingRecommendations, getRecommendations, upsertRecommendation } from '../db/repos/recommendations.js';
+import { clearPendingForTitles, clearPendingRecommendations, getRecommendations, upsertRecommendation } from '../db/repos/recommendations.js';
 import { getEngagedTitleIds } from '../db/repos/watchEvents.js';
 import { getTitleById } from '../db/repos/titles.js';
 import { getTasteSignature } from '../db/repos/tasteSignatures.js';
@@ -26,6 +26,7 @@ import {
 import { titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import {
   FULL_SET,
+  MAX_OLDER_PICKS,
   findReferenceTitles,
   olderRoom,
   requestSlate,
@@ -78,8 +79,12 @@ interface Context {
   hardFilters: HardFilters;
   /** The profile's own IMDb setting, when it has one. */
   minImdbRating: number | undefined;
-  /** Pending, dismissed and engaged titles: never picked again. */
+  /** Pending, dismissed and engaged titles: left out of a call without a request. */
   excludeTitleIds: number[];
+  /** Dismissed and engaged titles: no request brings them back. */
+  neverTitleIds: number[];
+  /** Titles of the pending picks, which a request offers again only when too few others match. */
+  pendingTitleIds: Set<number>;
   /** Highest pending id before this call: rows after it are this call's picks. */
   lastOldId: number;
   hadPending: boolean;
@@ -139,11 +144,9 @@ function buildContext(db: Database, config: Config, profile: ProfileRow, body: G
   const existingPending = getRecommendations(db, profile.id, 'pending');
   const dismissedBy = profile.is_derived ? memberIds : [profile.id];
   const dismissed = dismissedBy.flatMap(pid => getRecommendations(db, pid, 'dismissed'));
-  const excludeTitleIds = [...new Set([
-    ...existingPending.map(r => r.title_id),
-    ...dismissed.map(r => r.title_id),
-    ...getEngagedTitleIds(db, memberIds),
-  ])];
+  const pendingTitleIds = new Set(existingPending.map(r => r.title_id));
+  const neverTitleIds = [...new Set([...dismissed.map(r => r.title_id), ...getEngagedTitleIds(db, memberIds)])];
+  const excludeTitleIds = [...new Set([...pendingTitleIds, ...neverTitleIds])];
 
   // Per-profile IMDb rating threshold from the profile's config JSON; a missing
   // or malformed config means no threshold.
@@ -154,7 +157,7 @@ function buildContext(db: Database, config: Config, profile: ProfileRow, body: G
   } catch { /* malformed config → no filter */ }
 
   return {
-    db, config, profile, sig, coldStart, deps, minImdbRating, excludeTitleIds,
+    db, config, profile, sig, coldStart, deps, minImdbRating, excludeTitleIds, neverTitleIds, pendingTitleIds,
     mediaType: body.mediaType === 'movie' || body.mediaType === 'tv' ? body.mediaType : undefined,
     hardFilters: hardFiltersFor(db, config, memberIds),
     lastOldId: existingPending.reduce((m, r) => Math.max(m, r.id), 0),
@@ -230,7 +233,12 @@ async function generateFromPool(ctx: Context, body: GenerateBody): Promise<void>
 interface Planned {
   /** The rules as read, with film vs series and the reference years applied. */
   rules: RequestRules;
+  /** What is offered for this call: see newTitlesFirst. */
   retrieval: RulesRetrieval;
+  /** Every title in the year window that obeys the rules, pending picks included. */
+  matched: number;
+  /** How many of those are not pending picks. */
+  unseen: number;
 }
 
 interface RequestPick {
@@ -273,18 +281,17 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
 
   let planned = await stages.run('retrieval', plan);
   let discovered = 0;
-  if (planned.retrieval.inWindow.length < DISCOVERY_THRESHOLD) {
+  if (planned.unseen < DISCOVERY_THRESHOLD) {
     discovered = await stages.run('discovery', () => discover(ctx, planned.rules));
     if (discovered > 0) planned = await stages.run('retrieval', plan);
   }
-  const { rules, retrieval } = planned;
+  const { rules, retrieval, matched } = planned;
   const understood = describeRules(rules);
-  const matched = retrieval.inWindow.length;
 
   const why = understood.length > 0 ? `Matches your request: ${understood.join(', ')}.` : 'Matches your request.';
 
   let picks: RequestPick[] = [];
-  if (matched + retrieval.older.length > 0) {
+  if (retrieval.inWindow.length + retrieval.older.length > 0) {
     picks = await stages.run('curation', () => choosePicks(ctx, text, understood, retrieval, why));
     picks = keepObeying(picks, retrieval);
     picks = await stages.run('ratings', () => freshlyRated(ctx, picks, planned, why));
@@ -293,21 +300,25 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   const olderCount = picks.filter(p => p.older).length;
   const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, picks.length, olderCount) };
   const ruleNote = olderCount > 0 ? olderPickNote(rules, matched) : null;
-  for (const p of picks) {
-    upsertRecommendation(db, {
-      profile_id: profile.id,
-      title_id: p.title.id,
-      category: p.result.category,
-      score: p.title.score,
-      why_blurb: p.result.why,
-      request_text: text,
-      state: 'pending',
-      kind: 'core',
-      predicted_rating: p.result.predictedRating,
-      request_summary: JSON.stringify(summary),
-      rule_note: p.older ? ruleNote : null,
-    });
-  }
+  db.transaction(() => {
+    // A pending pick that was chosen again leaves its old row for one in this batch.
+    clearPendingForTitles(db, profile.id, picks.map(p => p.title.id));
+    for (const p of picks) {
+      upsertRecommendation(db, {
+        profile_id: profile.id,
+        title_id: p.title.id,
+        category: p.result.category,
+        score: p.title.score,
+        why_blurb: p.result.why,
+        request_text: text,
+        state: 'pending',
+        kind: 'core',
+        predicted_rating: p.result.predictedRating,
+        request_summary: JSON.stringify(summary),
+        rule_note: p.older ? ruleNote : null,
+      });
+    }
+  })();
   // The media type the request ended up with (its own words, else the app's filter).
   replaceOldPending(ctx, takeBatch(ctx), rules.mediaType ?? undefined);
 
@@ -344,14 +355,32 @@ function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, reque
   // a title with no IMDb rating fails it.
   const minImdb = Math.max(ownFloor, ctx.hardFilters.minImdbRating);
   const hardFilters = requestHardFilters(ctx, rules);
-  const retrieval = retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
+  const all = retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
     queryVec,
     hardFilters,
     vetoProfileIds: base.vetoProfileIds,
-    excludeTitleIds: [...ctx.excludeTitleIds, ...refs.map(r => r.id)],
+    excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id)],
     affinity: base.affinity,
   }, now);
-  return { rules, retrieval };
+  const unseen = all.inWindow.filter(t => !ctx.pendingTitleIds.has(t.id)).length;
+  const retrieval: RulesRetrieval = {
+    ...all,
+    inWindow: newTitlesFirst(all.inWindow, ctx.pendingTitleIds, FULL_SET),
+    older: newTitlesFirst(all.older, ctx.pendingTitleIds, MAX_OLDER_PICKS),
+  };
+  return { rules, retrieval, matched: all.inWindow.length, unseen };
+}
+
+/**
+ * Asking again shows new titles while there are any: the pending picks are
+ * offered only for the places the other titles cannot fill, best ranked first.
+ * Leaving them out altogether made a repeated request with few matches answer
+ * that nothing matched, with the matching titles on the screen.
+ */
+function newTitlesFirst(ranked: CandidateTitle[], pending: Set<number>, places: number): CandidateTitle[] {
+  const unseen = ranked.filter(t => !pending.has(t.id));
+  if (unseen.length >= places) return unseen;
+  return [...unseen, ...ranked.filter(t => pending.has(t.id)).slice(0, places - unseen.length)];
 }
 
 /** A language the request names replaces the household's language list for that request. */

@@ -83,6 +83,20 @@ export function clearPendingRecommendations(
   db.prepare(sql).run(...params);
 }
 
+/**
+ * Remove a profile's pending picks of these titles, so a title that is picked
+ * again is stored with its new batch (the insert skips a title that is pending).
+ */
+export function clearPendingForTitles(
+  db: InstanceType<typeof Database>,
+  profileId: number,
+  titleIds: number[],
+): void {
+  db.prepare(
+    "DELETE FROM recommendations WHERE profile_id = ? AND state = 'pending' AND title_id IN (SELECT value FROM json_each(?))",
+  ).run(profileId, JSON.stringify(titleIds));
+}
+
 export interface Calibration {
   /** Number of watched+rated titles that also had a predicted rating. */
   count: number;
