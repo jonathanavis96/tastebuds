@@ -1,5 +1,5 @@
 /**
- * TDD tests for ensureRequestCoverage and resolveRequestToGenres.
+ * Tests for ensureRulesCoverage and mergeRequestGenresToProfile.
  *
  * All TMDB and embed calls are injected via the deps parameter — no network.
  */
@@ -11,11 +11,9 @@ import { getTitleByTmdbId, upsertTitle } from '../db/repos/titles.js';
 import { getUsage, bumpRequestAdded } from '../db/repos/apiUsage.js';
 import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import {
-  ensureRequestCoverage,
   ensureRulesCoverage,
   exactKeywordIdCache,
   keywordIdCache,
-  resolveRequestToGenres,
   mergeRequestGenresToProfile,
   type OnDemandDeps,
 } from './onDemand.js';
@@ -76,225 +74,6 @@ function makeDeps(overrides: Partial<OnDemandDeps> = {}): OnDemandDeps {
   };
 }
 
-// ── resolveRequestToGenres ────────────────────────────────────────────────────
-
-describe('resolveRequestToGenres', () => {
-  it('maps "scary thrillers" to Horror and Thriller', () => {
-    const genres = resolveRequestToGenres('scary thrillers');
-    expect(genres).toContain('Horror');
-    expect(genres).toContain('Thriller');
-  });
-
-  it('maps "funny comedy" to Comedy', () => {
-    const genres = resolveRequestToGenres('funny comedy');
-    expect(genres).toContain('Comedy');
-  });
-
-  it('matches case-insensitively', () => {
-    const genres = resolveRequestToGenres('SCARY THRILLER');
-    expect(genres).toContain('Horror');
-    expect(genres).toContain('Thriller');
-  });
-
-  it('matches "science fiction" as multi-word term', () => {
-    const genres = resolveRequestToGenres('mind-bending science fiction');
-    expect(genres).toContain('Science Fiction');
-  });
-
-  it('returns empty array for unrecognised vibes', () => {
-    const genres = resolveRequestToGenres('something completely unrelated xyz');
-    expect(genres).toHaveLength(0);
-  });
-
-  it('does not double-count a genre matched by two synonyms', () => {
-    // "horror" and "scary" both map to Horror
-    const genres = resolveRequestToGenres('scary horror movies');
-    const count = genres.filter((g) => g === 'Horror').length;
-    expect(count).toBe(1);
-  });
-});
-
-// ── ensureRequestCoverage — keyword path ─────────────────────────────────────
-
-describe('ensureRequestCoverage — keyword path (TV Horror)', () => {
-  beforeEach(() => {
-    // Clear the in-process keyword cache between tests so keyword ids don't bleed
-    // across test runs. We do this by re-importing — but since ESM caches modules,
-    // we instead rely on the vi.fn() reset per makeDeps() call.
-    vi.clearAllMocks();
-  });
-
-  it('upserts a horror TV series via keyword discovery and returns added >= 1', async () => {
-    const db = createTestDb();
-    const deps = makeDeps({
-      // Keyword search resolves "horror" → 315058
-      searchKeyword: vi.fn().mockResolvedValue([{ id: 315058, name: 'horror' }]),
-      // Keyword discover returns the horror series
-      discoverTitles: vi.fn().mockImplementation(async (opts) => {
-        if (opts.keywordIds?.includes(315058)) return [horrorTvTitle];
-        return [];
-      }),
-      getTitleDetails: vi.fn().mockResolvedValue(horrorTvDetail),
-      embedText: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
-    });
-
-    const result = await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
-
-    // The horror series should be in the DB
-    const saved = getTitleByTmdbId(db, 87108, 'tv');
-    expect(saved).not.toBeNull();
-    expect(saved!.title).toBe('The Terror');
-    expect(result.added).toBeGreaterThanOrEqual(1);
-    expect(result.errors).toHaveLength(0);
-  });
-
-  it('adds a series whose TMDB id is already taken by a stored movie', async () => {
-    const db = createTestDb();
-    upsertTitle(db, {
-      tmdb_id: 87108, media_type: 'movie', title: 'Some Movie', year: 2001, genres: '[]', keywords: '[]',
-      cast: '[]', synopsis: null, poster_path: null, embedding: null, updated_at: new Date().toISOString(),
-    });
-    const deps = makeDeps({ searchTitles: vi.fn().mockResolvedValue([horrorTvTitle]) });
-
-    const result = await ensureRequestCoverage(db, 'the terror', 'tv', mockConfig, deps);
-
-    expect(result.added).toBe(1);
-    expect(getTitleByTmdbId(db, 87108, 'tv')?.title).toBe('The Terror');
-    expect(getTitleByTmdbId(db, 87108, 'movie')?.title).toBe('Some Movie');
-  });
-
-  it('bumps the request_added usage counter after ingestion', async () => {
-    const db = createTestDb();
-    const deps = makeDeps({
-      searchKeyword: vi.fn().mockResolvedValue([{ id: 315058, name: 'horror' }]),
-      discoverTitles: vi.fn().mockImplementation(async (opts) => {
-        if (opts.keywordIds?.includes(315058)) return [horrorTvTitle];
-        return [];
-      }),
-      getTitleDetails: vi.fn().mockResolvedValue(horrorTvDetail),
-    });
-
-    const today = new Date().toISOString().slice(0, 10);
-    await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
-
-    const usage = getUsage(db, today);
-    expect(usage.request_added).toBeGreaterThanOrEqual(1);
-  });
-
-  it('skips a title already in the DB (no duplicate ingest)', async () => {
-    const db = createTestDb();
-
-    // Pre-seed the title
-    db.prepare(`
-      INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at)
-      VALUES (87108, 'tv', 'The Terror', 2018, '[]', '[]', '[]', null, null, datetime('now'))
-    `).run();
-
-    const deps = makeDeps({
-      searchKeyword: vi.fn().mockResolvedValue([{ id: 315058, name: 'horror' }]),
-      discoverTitles: vi.fn().mockResolvedValue([horrorTvTitle]),
-      getTitleDetails: vi.fn().mockResolvedValue(horrorTvDetail),
-    });
-
-    const result = await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
-
-    // Title was already in DB — getTitleDetails should NOT have been called
-    expect(vi.mocked(deps.getTitleDetails)).not.toHaveBeenCalled();
-    expect(result.added).toBe(0);
-  });
-});
-
-// ── ensureRequestCoverage — budget enforcement ────────────────────────────────
-
-describe('ensureRequestCoverage — daily budget', () => {
-  it('returns added:0 and makes no TMDB calls when budget is already exhausted', async () => {
-    const db = createTestDb();
-    const today = new Date().toISOString().slice(0, 10);
-
-    // Pre-exhaust the budget
-    bumpRequestAdded(db, today, mockConfig.requestLookupDailyBudget);
-
-    const deps = makeDeps({
-      discoverTitles: vi.fn().mockResolvedValue([horrorTvTitle]),
-      getTitleDetails: vi.fn().mockResolvedValue(horrorTvDetail),
-    });
-
-    const result = await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
-
-    expect(result.added).toBe(0);
-    // No TMDB detail calls when budget is 0
-    expect(vi.mocked(deps.getTitleDetails)).not.toHaveBeenCalled();
-  });
-
-  it('stops ingesting once the remaining budget is reached mid-run', async () => {
-    const db = createTestDb();
-
-    // Budget of only 1 title
-    const tinyBudgetConfig: Config = { ...mockConfig, requestLookupDailyBudget: 1 };
-
-    // Return 3 discovery results
-    const titles: TmdbTitle[] = [
-      { ...horrorTvTitle, id: 1001 },
-      { ...horrorTvTitle, id: 1002 },
-      { ...horrorTvTitle, id: 1003 },
-    ];
-    const makeDetail = (id: number): TmdbTitleDetail => ({
-      ...horrorTvDetail,
-      id,
-      name: `Horror Show ${id}`,
-    });
-
-    const deps = makeDeps({
-      searchKeyword: vi.fn().mockResolvedValue([{ id: 315058, name: 'horror' }]),
-      discoverTitles: vi.fn().mockImplementation(async (opts) => {
-        if (opts.keywordIds?.includes(315058)) return titles;
-        return [];
-      }),
-      getTitleDetails: vi.fn().mockImplementation(async (id) => makeDetail(id as number)),
-    });
-
-    const result = await ensureRequestCoverage(db, 'scary thrillers', 'tv', tinyBudgetConfig, deps);
-
-    // Should have added exactly 1 (the budget limit)
-    expect(result.added).toBe(1);
-  });
-});
-
-// ── ensureRequestCoverage — both media types ─────────────────────────────────
-
-describe('ensureRequestCoverage — both media types', () => {
-  it('searches both movie and tv when mediaType is undefined', async () => {
-    const db = createTestDb();
-
-    const deps = makeDeps({
-      discoverTitles: vi.fn().mockResolvedValue([]),
-      searchTitles: vi.fn().mockResolvedValue([]),
-    });
-
-    await ensureRequestCoverage(db, 'scary thrillers', undefined, mockConfig, deps);
-
-    // searchTitles should have been called for both movie and tv
-    const searchCalls = vi.mocked(deps.searchTitles).mock.calls.map((c) => c[1]);
-    expect(searchCalls).toContain('movie');
-    expect(searchCalls).toContain('tv');
-  });
-
-  it('only searches tv when mediaType is tv', async () => {
-    const db = createTestDb();
-
-    const deps = makeDeps({
-      discoverTitles: vi.fn().mockResolvedValue([]),
-      searchTitles: vi.fn().mockResolvedValue([]),
-    });
-
-    await ensureRequestCoverage(db, 'scary thrillers', 'tv', mockConfig, deps);
-
-    const searchCalls = vi.mocked(deps.searchTitles).mock.calls.map((c) => c[1]);
-    expect(searchCalls).not.toContain('movie');
-    expect(searchCalls).toContain('tv');
-  });
-});
-
 // ── mergeRequestGenresToProfile ───────────────────────────────────────────────
 
 /** Insert a bare profile row and return its auto-assigned id. */
@@ -318,8 +97,8 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: new Date().toISOString(),
     });
 
-    // "mind-bending sci-fi" resolves to ["Science Fiction"]
-    mergeRequestGenresToProfile(db, profileId, 'mind-bending sci-fi');
+    // "mind-bending sci-fi": a Science Fiction clause and a theme clause
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Science Fiction'), termClause('mind-bending', 'mind bending')] });
 
     const sig = getTasteSignature(db, profileId);
     const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
@@ -337,8 +116,8 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: new Date().toISOString(),
     });
 
-    // Request resolves to Science Fiction again — should not add a second copy
-    mergeRequestGenresToProfile(db, profileId, 'mind-bending sci-fi');
+    // Science Fiction again: no second copy
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Science Fiction'), termClause('mind-bending', 'mind bending')] });
 
     const sig = getTasteSignature(db, profileId);
     const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
@@ -358,8 +137,8 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: new Date().toISOString(),
     });
 
-    // "scary horror" → resolves to Horror — would push to 13, cap kicks in
-    mergeRequestGenresToProfile(db, profileId, 'scary horror');
+    // Horror would push the list to 13, so the cap kicks in
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Horror')] });
 
     const sig = getTasteSignature(db, profileId);
     const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
@@ -369,7 +148,7 @@ describe('mergeRequestGenresToProfile', () => {
     expect(prefs.loved_genres).not.toContain('G1');
   });
 
-  it('does nothing when request resolves to no canonical genres', () => {
+  it('does nothing when no clause names a single genre (an either-or clause, a theme)', () => {
     const db = createTestDb();
     const profileId = insertTestProfile(db);
 
@@ -380,7 +159,7 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: new Date().toISOString(),
     });
 
-    mergeRequestGenresToProfile(db, profileId, 'something completely unrelated xyz');
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Thriller', 'Horror'), termClause('medical', 'hospital')] });
 
     const sig = getTasteSignature(db, profileId);
     const prefs = JSON.parse(sig!.prefs) as { loved_genres: string[] };
@@ -403,8 +182,7 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: new Date().toISOString(),
     });
 
-    // "dramatic emotional stories" → Drama
-    mergeRequestGenresToProfile(db, profileId, 'dramatic emotional stories');
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Drama')] });
 
     const sig = getTasteSignature(db, profileId);
     const prefs = JSON.parse(sig!.prefs) as {
@@ -431,7 +209,7 @@ describe('mergeRequestGenresToProfile', () => {
       refreshed_at: '2026-01-01T00:00:00.000Z',
     });
 
-    mergeRequestGenresToProfile(db, profileId, 'scary horror');
+    mergeRequestGenresToProfile(db, profileId, { must: [genreClause('Horror')] });
 
     const sig = getTasteSignature(db, profileId);
     // taste_vector must survive the prefs update
@@ -497,7 +275,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const db = createTestDb();
     const deps = rulesDeps();
 
-    await ensureRulesCoverage(db, thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, thrillerNew2025, undefined, mockConfig, deps);
 
     const calls = discoverCalls(deps);
     expect(calls.map((c) => `${c.sortBy} p${c.page}`).sort()).toEqual([
@@ -516,7 +294,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const deps = rulesDeps();
     const rules = { ...thrillerNew2025, mediaType: 'tv' as const };
 
-    await ensureRulesCoverage(db, rules, 'Thriller series new 2025', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     const calls = discoverCalls(deps);
     expect(calls).toHaveLength(4);
@@ -530,7 +308,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const deps = rulesDeps();
     const rules = { ...thrillerNew2025, must: [genreClause('Thriller', 'Horror')] };
 
-    await ensureRulesCoverage(db, rules, 'New thriller and horror movies', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     expect(discoverCalls(deps)[0]).toMatchObject({ genreIds: [53, 27], genreMatch: 'any' });
   });
@@ -540,7 +318,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const deps = rulesDeps();
     const rules = { ...thrillerNew2025, must: [genreClause('Thriller', 'Horror'), genreClause('Science Fiction')] };
 
-    await ensureRulesCoverage(db, rules, 'thriller or horror sci-fi', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     const shapes = new Set(discoverCalls(deps).map((c) => `${c.genreIds?.join(',')} ${c.genreMatch}`));
     expect([...shapes].sort()).toEqual(['27,878 all', '53,878 all']);
@@ -552,7 +330,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const medical = termClause('medical', 'medical', 'hospital', 'doctor', 'surgeon', 'nurse', 'clinic', 'paramedic', 'er');
     const rules = { ...thrillerNew2025, must: [genreClause('Drama'), medical] };
 
-    await ensureRulesCoverage(db, rules, 'medical dramas', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     const searched = vi.mocked(deps.searchKeyword).mock.calls.map(([q]) => q);
     expect(searched).toEqual(['medical', 'hospital', 'doctor', 'surgeon', 'nurse', 'clinic']);
@@ -569,7 +347,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
       mustNot: [genreClause('Horror'), termClause('nun', 'nun', 'nuns', 'convent')],
     });
 
-    await ensureRulesCoverage(db, rules, 'comedy, no horror, no nuns', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     expect(discoverCalls(deps)[0]).toMatchObject({ genreIds: [35], withoutGenreIds: [27], withoutKeywordIds: [745] });
   });
@@ -579,7 +357,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const deps = rulesDeps();
     const rules = rulesWith({ mediaType: 'tv', must: [genreClause('Comedy')], mustNot: [genreClause('Horror')] });
 
-    await ensureRulesCoverage(db, rules, 'easy watch series', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     expect(discoverCalls(deps)[0]).toMatchObject({ genreIds: [35], withoutGenreIds: [], withoutKeywordIds: [315058] });
   });
@@ -588,7 +366,7 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
     const db = createTestDb();
     const deps = rulesDeps();
 
-    await ensureRulesCoverage(db, { ...thrillerNew2025, language: 'ko' }, 'korean thriller', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, { ...thrillerNew2025, language: 'ko' }, undefined, mockConfig, deps);
 
     expect(discoverCalls(deps)[0].originalLanguage).toBe('ko');
   });
@@ -596,17 +374,17 @@ describe('ensureRulesCoverage — what TMDB is asked for', () => {
   it('searches the app filter media type when the request names none, and both when neither does', async () => {
     const rules = { ...thrillerNew2025, mediaType: null };
     const tvOnly = rulesDeps();
-    await ensureRulesCoverage(createTestDb(), rules, 'thriller', 'tv', mockConfig, tvOnly);
+    await ensureRulesCoverage(createTestDb(), rules, 'tv', mockConfig, tvOnly);
     expect(new Set(discoverCalls(tvOnly).map((c) => c.mediaType))).toEqual(new Set(['tv']));
 
     const both = rulesDeps();
-    await ensureRulesCoverage(createTestDb(), rules, 'thriller', undefined, mockConfig, both);
+    await ensureRulesCoverage(createTestDb(), rules, undefined, mockConfig, both);
     expect(new Set(discoverCalls(both).map((c) => c.mediaType))).toEqual(new Set(['movie', 'tv']));
   });
 
   it('the request media type wins over the app filter', async () => {
     const deps = rulesDeps();
-    await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'thriller movie', 'tv', mockConfig, deps);
+    await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'tv', mockConfig, deps);
     expect(new Set(discoverCalls(deps).map((c) => c.mediaType))).toEqual(new Set(['movie']));
   });
 });
@@ -616,7 +394,7 @@ describe('ensureRulesCoverage — nothing unreleased', () => {
     const deps = rulesDeps();
     const rules = rulesWith({ mediaType: 'movie', yearMin: 2025, yearMax: 2030, must: [genreClause('Thriller')] });
 
-    await ensureRulesCoverage(createTestDb(), rules, 'thriller 2025-2030', undefined, mockConfig, deps);
+    await ensureRulesCoverage(createTestDb(), rules, undefined, mockConfig, deps);
 
     for (const c of discoverCalls(deps)) expect(c.releasedTo).toBe(TODAY);
   });
@@ -625,7 +403,7 @@ describe('ensureRulesCoverage — nothing unreleased', () => {
     const deps = rulesDeps();
     const rules = rulesWith({ mediaType: 'movie', yearMin: 1990, yearMax: 1999, yearSource: 'stated' });
 
-    await ensureRulesCoverage(createTestDb(), rules, '90s films', undefined, mockConfig, deps);
+    await ensureRulesCoverage(createTestDb(), rules, undefined, mockConfig, deps);
 
     expect(discoverCalls(deps)[0]).toMatchObject({ releasedFrom: '1990-01-01', releasedTo: '1999-12-31' });
   });
@@ -634,7 +412,7 @@ describe('ensureRulesCoverage — nothing unreleased', () => {
     const deps = rulesDeps();
     const rules = rulesWith({ mediaType: 'movie', yearMin: 2027, yearSource: 'stated' });
 
-    const result = await ensureRulesCoverage(createTestDb(), rules, '2027 films', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(createTestDb(), rules, undefined, mockConfig, deps);
 
     expect(deps.discoverTitles).not.toHaveBeenCalled();
     expect(result.added).toBe(0);
@@ -651,7 +429,7 @@ describe('ensureRulesCoverage — references', () => {
     const deps = rulesDeps({ searchTitles });
     const rules = rulesWith({ mediaType: 'movie', must: [genreClause('Thriller')], similarTo: ['inception something on those lines'] });
 
-    const result = await ensureRulesCoverage(db, rules, 'Can you write something thriller light like inception something on those lines', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(db, rules, undefined, mockConfig, deps);
 
     const queries = [...new Set(searchTitles.mock.calls.map(([q]) => q))];
     expect(queries).toEqual([
@@ -666,14 +444,14 @@ describe('ensureRulesCoverage — references', () => {
 
   it('never searches the request text itself', async () => {
     const deps = rulesDeps();
-    await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    await ensureRulesCoverage(createTestDb(), thrillerNew2025, undefined, mockConfig, deps);
     expect(deps.searchTitles).not.toHaveBeenCalled();
   });
 
   it('does not search a lone article left from a phrase', async () => {
     const deps = rulesDeps();
     const rules = rulesWith({ mediaType: 'movie', similarTo: ['The Drama'] });
-    await ensureRulesCoverage(createTestDb(), rules, 'the drama type of movie', undefined, mockConfig, deps);
+    await ensureRulesCoverage(createTestDb(), rules, undefined, mockConfig, deps);
     expect([...new Set(vi.mocked(deps.searchTitles).mock.calls.map(([q]) => q))]).toEqual(['The Drama']);
   });
 });
@@ -696,13 +474,28 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     });
     const deps = rulesDeps({ getTitleDetails }, 20);
 
-    const result = await ensureRulesCoverage(db, thrillerNew2025, 'Thriller new 2025', undefined, { ...mockConfig, requestLookupDailyBudget: 500 }, deps);
+    const result = await ensureRulesCoverage(db, thrillerNew2025, undefined, { ...mockConfig, requestLookupDailyBudget: 500 }, deps);
 
     expect(result.added).toBe(40);
     expect(getTitleDetails).toHaveBeenCalledTimes(40);
     expect(getTitleDetails).not.toHaveBeenCalledWith(1000, 'movie', expect.anything());
     expect(most).toBeLessThanOrEqual(6);
     expect(most).toBeGreaterThan(1);
+  });
+
+  it('adds a series whose TMDB id is already taken by a stored movie', async () => {
+    const db = createTestDb();
+    upsertTitle(db, {
+      tmdb_id: 1000, media_type: 'movie', title: 'Some Movie', year: 2001, genres: '[]', keywords: '[]',
+      cast: '[]', synopsis: null, poster_path: null, embedding: null, updated_at: new Date().toISOString(),
+    });
+    const deps = rulesDeps({}, 1);
+
+    const result = await ensureRulesCoverage(db, { ...thrillerNew2025, mediaType: 'tv' }, undefined, mockConfig, deps);
+
+    expect(result.added).toBeGreaterThanOrEqual(1);
+    expect(getTitleByTmdbId(db, 1000, 'tv')?.title).toBe('Title 1000');
+    expect(getTitleByTmdbId(db, 1000, 'movie')?.title).toBe('Some Movie');
   });
 
   it('starts no new title once ten seconds have passed', async () => {
@@ -713,7 +506,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     });
     const deps = rulesDeps({ getTitleDetails, now: () => clock }, 20);
 
-    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'Thriller new 2025', undefined, { ...mockConfig, requestLookupDailyBudget: 500 }, deps);
+    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, undefined, { ...mockConfig, requestLookupDailyBudget: 500 }, deps);
 
     // Started at +0, +2.5 s, +5 s and +7.5 s; at +10 s nothing more starts.
     expect(result.added).toBe(4);
@@ -724,7 +517,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     bumpRequestAdded(db, new Date().toISOString().slice(0, 10), 7);
     const deps = rulesDeps({}, 20);
 
-    const result = await ensureRulesCoverage(db, thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(db, thrillerNew2025, undefined, mockConfig, deps);
 
     expect(result.added).toBe(3);
     expect(getUsage(db, new Date().toISOString().slice(0, 10)).request_added).toBe(10);
@@ -735,7 +528,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     bumpRequestAdded(db, new Date().toISOString().slice(0, 10), 10);
     const deps = rulesDeps();
 
-    const result = await ensureRulesCoverage(db, thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(db, thrillerNew2025, undefined, mockConfig, deps);
 
     expect(result).toEqual({ added: 0, errors: [] });
     expect(deps.discoverTitles).not.toHaveBeenCalled();
@@ -745,7 +538,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     const db = createTestDb();
     const deps = rulesDeps({}, 1);
 
-    await ensureRulesCoverage(db, thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    await ensureRulesCoverage(db, thrillerNew2025, undefined, mockConfig, deps);
 
     const ids = vi.mocked(deps.applyCachedImdbRatings).mock.calls[0][2];
     expect(ids).toHaveLength(4);
@@ -757,7 +550,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
   it('records a ratings failure instead of throwing', async () => {
     const deps = rulesDeps({ applyCachedImdbRatings: vi.fn().mockRejectedValue(new Error('no file')) }, 1);
 
-    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, undefined, mockConfig, deps);
 
     expect(result.added).toBe(4);
     expect(result.errors).toEqual([expect.stringContaining('no file')]);
@@ -771,7 +564,7 @@ describe('ensureRulesCoverage — bounded ingestion', () => {
     });
     const deps = rulesDeps({ discoverTitles });
 
-    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, 'Thriller new 2025', undefined, mockConfig, deps);
+    const result = await ensureRulesCoverage(createTestDb(), thrillerNew2025, undefined, mockConfig, deps);
 
     expect(result.added).toBe(3);
     expect(result.errors).toEqual([expect.stringContaining('HTTP 500')]);

@@ -13,8 +13,6 @@ import { upsertWatchEvent } from '../db/repos/watchEvents.js';
 import {
   retrieveCandidatePool,
   retrieveJointCandidatePool,
-  retrieveRequestCandidates,
-  retrieveJointRequestCandidates,
   type CandidatePool,
 } from './retrieve.js';
 import type { Config } from '../config.js';
@@ -474,103 +472,5 @@ describe('retrieveCandidatePool — excludeTitleIds', () => {
       ...secondPool.adversarial.map(c => c.id),
     ];
     expect(allIds).not.toContain(excludeId);
-  });
-});
-
-describe('retrieveRequestCandidates — free-text request retrieval', () => {
-  // Embed a request as a one-hot vector at dim `hot` so cosine maths stays deterministic.
-  const embedAt = (hot: number) => async () => {
-    const arr = new Array(8).fill(0);
-    arr[hot] = 1;
-    return arr;
-  };
-
-  it('ranks titles matching the embedded request above pure taste matches', async () => {
-    const db = createTestDb();
-    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
-    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
-
-    // Taste points at dim-0; the request will point at dim-3.
-    upsertTasteSignature(db, {
-      profile_id: profileId,
-      taste_vector: oneHot(0),
-      prefs: JSON.stringify({ hated_genres: [] }),
-      refreshed_at: new Date().toISOString(),
-    });
-
-    // A title that matches taste (dim-0) and one that matches the request (dim-3).
-    upsertTitle(db, {
-      tmdb_id: 5000, media_type: 'movie', title: 'Taste Match', year: 2020,
-      genres: '["Drama"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
-      embedding: oneHot(0), updated_at: new Date().toISOString(),
-    });
-    upsertTitle(db, {
-      tmdb_id: 5001, media_type: 'movie', title: 'Request Match', year: 2020,
-      genres: '["Sci-Fi"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
-      embedding: oneHot(3), updated_at: new Date().toISOString(),
-    });
-
-    const results = await retrieveRequestCandidates(
-      db, profileId, 'mind-bending sci-fi', { mediaType: 'movie' }, mockConfig, embedAt(3),
-    );
-
-    // Request-dominant (0.7) blend → the dim-3 title should rank first.
-    expect(results[0].tmdb_id).toBe(5001);
-  });
-
-  it('excludes watched titles and respects excludeTitleIds', async () => {
-    const db = createTestDb();
-    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
-    const profileId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
-    upsertTasteSignature(db, {
-      profile_id: profileId, taste_vector: oneHot(0),
-      prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
-    });
-    for (let i = 0; i < 3; i++) {
-      upsertTitle(db, {
-        tmdb_id: 6000 + i, media_type: 'movie', title: `Film ${i}`, year: 2020,
-        genres: '["Sci-Fi"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
-        embedding: oneHot(3), updated_at: new Date().toISOString(),
-      });
-    }
-    const watchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=6000').get() as any).id;
-    const excludedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=6001').get() as any).id;
-    upsertWatchEvent(db, { profile_id: profileId, title_id: watchedId, status: 'watched', rating: 4, watched_at: new Date().toISOString() });
-
-    const results = await retrieveRequestCandidates(
-      db, profileId, 'sci-fi', { mediaType: 'movie', excludeTitleIds: [excludedId] }, mockConfig, embedAt(3),
-    );
-    const ids = results.map(r => r.id);
-    expect(ids).not.toContain(watchedId);
-    expect(ids).not.toContain(excludedId);
-    expect(ids).toContain((db.prepare('SELECT id FROM titles WHERE tmdb_id=6002').get() as any).id);
-  });
-
-  it('Joint request retrieval excludes titles watched by either member', async () => {
-    const db = createTestDb();
-    upsertProfile(db, { name: 'Alex', media_weighting: 0.3, is_derived: 0, config: '{}' });
-    upsertProfile(db, { name: 'Sam', media_weighting: 0.3, is_derived: 0, config: '{}' });
-    const alexId = (db.prepare("SELECT id FROM profiles WHERE name='Alex'").get() as any).id;
-    const samId = (db.prepare("SELECT id FROM profiles WHERE name='Sam'").get() as any).id;
-    for (const id of [alexId, samId]) {
-      upsertTasteSignature(db, {
-        profile_id: id, taste_vector: oneHot(0),
-        prefs: JSON.stringify({ hated_genres: [] }), refreshed_at: new Date().toISOString(),
-      });
-    }
-    for (let i = 0; i < 2; i++) {
-      upsertTitle(db, {
-        tmdb_id: 7000 + i, media_type: 'movie', title: `Film ${i}`, year: 2020,
-        genres: '["Sci-Fi"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
-        embedding: oneHot(3), updated_at: new Date().toISOString(),
-      });
-    }
-    const samWatched = (db.prepare('SELECT id FROM titles WHERE tmdb_id=7000').get() as any).id;
-    upsertWatchEvent(db, { profile_id: samId, title_id: samWatched, status: 'watched', rating: 5, watched_at: new Date().toISOString() });
-
-    const results = await retrieveJointRequestCandidates(
-      db, alexId, samId, 'sci-fi', { mediaType: 'movie' }, mockConfig, embedAt(3),
-    );
-    expect(results.map(r => r.id)).not.toContain(samWatched);
   });
 });

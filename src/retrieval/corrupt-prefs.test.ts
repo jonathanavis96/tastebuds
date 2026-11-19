@@ -12,7 +12,7 @@ import { upsertTasteSignature } from '../db/repos/tasteSignatures.js';
 import {
   retrieveColdStartPool,
   retrieveJointCandidatePool,
-  retrieveJointRequestCandidates,
+  jointRequestBase,
   retrieveCandidatePool,
 } from './retrieve.js';
 import { buildCurationPrompt } from '../curation/prompt.js';
@@ -47,8 +47,6 @@ function setup() {
   return { db, a: ids[0], b: ids[1] };
 }
 
-const embed = async () => Array.from(new Float32Array(oneHot(1).buffer));
-
 describe('corrupt prefs row', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -58,7 +56,7 @@ describe('corrupt prefs row', () => {
     expect((await retrieveCandidatePool(db, a, {}, cfg)).onTaste.length).toBeGreaterThan(0);
     expect((await retrieveColdStartPool(db, a, {}, cfg)).onTaste.length).toBeGreaterThan(0);
     expect((await retrieveJointCandidatePool(db, a, b, {}, cfg)).onTaste.length).toBeGreaterThan(0);
-    expect((await retrieveJointRequestCandidates(db, a, b, 'x', {}, cfg, embed)).length).toBeGreaterThan(0);
+    expect(jointRequestBase(db, a, b, 999).tasteVec).not.toBeNull();
     expect(warn).toHaveBeenCalled();
   });
 
@@ -66,7 +64,7 @@ describe('corrupt prefs row', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const profile = { id: 1, name: 'Alex', media_weighting: 0.5, is_derived: 0, config: '{}' } as unknown as ProfileRow;
     const sig = { profile_id: 1, taste_vector: null, prefs: BAD, refreshed_at: '' } as unknown as TasteSignatureRow;
-    const prompt = buildCurationPrompt([], profile, sig, null);
+    const prompt = buildCurationPrompt({ onTaste: [], wildcards: [], adversarial: [] }, profile, sig, null);
     expect(prompt).toContain('Hated genres: none');
     expect(warn).toHaveBeenCalled();
   });

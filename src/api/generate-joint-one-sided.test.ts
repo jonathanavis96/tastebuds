@@ -15,9 +15,8 @@ import { curateCandidates } from '../curation/curate.js';
 import type { CandidatePool } from '../retrieval/retrieve.js';
 import type { Config } from '../config.js';
 
-vi.mock('../rt/resolve.js', () => ({ resolveRtUrl: vi.fn() }));
 vi.mock('../curation/curate.js', () => ({ curateCandidates: vi.fn() }));
-vi.mock('../omdb/client.js', () => ({ getOmdbRatings: vi.fn() }));
+vi.mock('../ratings/freshness.js', () => ({ ensureFreshRatings: vi.fn() }));
 
 const config: Config = {
   tmdbApiKey: 'test', ollamaUrl: 'http://localhost:9',
@@ -35,7 +34,7 @@ describe('POST /generate, Joint with one partner lacking a taste vector', () => 
   it('curates a pool ranked by the partner who has a vector, not a cold-start pool', async () => {
     let captured: CandidatePool | undefined;
     vi.mocked(curateCandidates).mockImplementation(async (pool) => {
-      captured = pool as CandidatePool;
+      captured = pool;
       return [];
     });
     const db = new Database(':memory:');
