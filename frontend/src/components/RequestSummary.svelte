@@ -1,45 +1,44 @@
 <script lang="ts">
-  import type { Recommendation, RequestSummary } from '../lib/types.js';
+  import type { RequestSummary } from '../lib/types.js';
 
   interface Props {
-    /** The newest request's summary; null renders nothing (no request behind the feed). */
+    /** The request as typed; null for the picks made without one. */
+    text: string | null;
+    /** How the request was read; null when it was not stored or cannot be read. */
     summary: RequestSummary | null;
-    /** The picks on screen; those carrying this request's text are the ones that answer it. */
-    recommendations: Recommendation[];
+    /** How many of this request's picks are on screen. */
+    shown: number;
   }
 
-  let { summary, recommendations }: Props = $props();
-
-  const text = $derived(summary?.text.trim() ?? '');
-  const shown = $derived(recommendations.filter(r => (r.request_text ?? '').trim() === text).length);
-  const earlier = $derived(recommendations.length - shown);
+  let { text, summary, shown }: Props = $props();
 
   function matchLine(matched: number, count: number): string {
-    if (matched === 1) return '1 title matches';
-    const total = matched.toLocaleString();
-    return count >= matched ? `${total} titles match, all shown` : `${total} titles match, showing ${count}`;
+    const total = matched === 1 ? '1 title matches' : `${matched.toLocaleString()} titles match`;
+    if (count === 0) return total;
+    return count >= matched ? `${total}, all in your list` : `${total}, ${count} in your list`;
   }
 </script>
 
-{#if summary}
-  <section class="request-summary" aria-label="How your request was read">
-    {#if text}<p class="asked">“{text}”</p>{/if}
+<section class="request-summary" aria-label={text ? `Picks for “${text}”` : 'Picks for your taste'}>
+  {#if text}
+    <h2 class="asked">“{text}”</h2>
+  {:else}
+    <h2 class="asked">Picked for your taste</h2>
+  {/if}
+  {#if summary}
     {#if summary.understood.length}
       <ul class="chips" aria-label="Understood as">
         {#each summary.understood as rule}<li class="chip">{rule}</li>{/each}
       </ul>
     {/if}
-    {#if summary.matched === 0}
-      <p class="count none">
-        Nothing in the library matches all of that. Try loosening the year, or lower the IMDb filter.
-        {#if earlier > 0}The picks below are from earlier requests.{/if}
-      </p>
-    {:else}
-      <p class="count">{matchLine(summary.matched, shown)}</p>
+    {#if summary.matched > 0}<p class="count">{matchLine(summary.matched, shown)}</p>{/if}
+    {#if summary.note}
+      <p class="note" class:none={summary.matched === 0}>{summary.note}</p>
+    {:else if summary.matched === 0}
+      <p class="note none">Nothing in the library matches all of that.</p>
     {/if}
-    {#if summary.note}<p class="note">{summary.note}</p>{/if}
-  </section>
-{/if}
+  {/if}
+</section>
 
 <style>
   .request-summary {
@@ -51,6 +50,6 @@
   .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.3rem; }
   .chip { font-size: 0.68rem; font-weight: 600; background: #0f3460; color: #8ec5ff; padding: 2px 8px; border-radius: 20px; }
   .count { font-size: 0.76rem; color: #9a9ab8; line-height: 1.35; }
-  .count.none { color: #e9728a; }
   .note { font-size: 0.76rem; color: #c5c5dd; line-height: 1.35; }
+  .note.none { color: #e9728a; }
 </style>

@@ -11,11 +11,10 @@
   import RequestSummary from './components/RequestSummary.svelte';
   import { compareTimestamps } from './lib/time.js';
   import type {
-    Profile, Recommendation, WatchEvent, MediaFilter, DismissReason, FeedResponse,
-    RequestSummary as RequestSummaryData,
+    Profile, Recommendation, WatchEvent, MediaFilter, DismissReason, FeedResponse, FeedSection,
   } from './lib/types.js';
   import {
-    getProfiles, getRecommendations, generateRecommendations,
+    getProfiles, getRecommendations, generateRecommendations, clearPicks,
     rateTitle, addToWatchlist, markWatched, dismissRecommendation, undismissRecommendation, dismissReason,
     removeWatch, getWatched, getWatchlist, saveNote, getStats, type CatalogueStats,
     getCalibration, type Calibration, updateProfileConfig,
@@ -63,9 +62,9 @@
   let profiles = $state<Profile[]>([]);
   let activeProfileId = $state<number | null>(null);
   let recommendations = $state<Recommendation[]>([]);
-  // What the server read the newest request as. It comes back with the feed too, so
-  // it survives a reload.
-  let requestSummary = $state<RequestSummaryData | null>(null);
+  // The list in sections, one per request, newest first, each with how the server
+  // read its request. It comes back with every feed, so it survives a reload.
+  let sections = $state<FeedSection[]>([]);
   // Rec ids the user marked "Not interested" THIS session. They stay visible in the
   // feed (marked, dimmed) instead of vanishing — so the grid never jumps — and clear
   // on the next Generate/Surprise/profile-switch (when a fresh pending list loads).
@@ -127,12 +126,21 @@
   }
 
   // The media filter also narrows what's already on screen (not just biasing the
-  // next generate). media_type comes through on each enriched rec.
-  const visibleRecs = $derived(
-    mediaFilter === 'all'
-      ? recommendations
-      : recommendations.filter(r => r.media_type === mediaFilter),
-  );
+  // next generate). media_type comes through on each enriched rec. A section the
+  // filter empties is hidden; one that came back empty (the request just asked
+  // found nothing new) keeps its heading, which says why.
+  const visibleSections = $derived.by(() => {
+    const byId = new Map(recommendations.map(r => [r.id, r]));
+    return sections
+      .map(s => ({
+        ...s,
+        recs: s.recIds.map(id => byId.get(id)).filter((r): r is Recommendation =>
+          r !== undefined && (mediaFilter === 'all' || r.media_type === mediaFilter)),
+      }))
+      .filter(s => s.recs.length > 0 || s.recIds.length === 0);
+  });
+  // The modal steps through the picks in the order they are on screen.
+  const visibleRecs = $derived(visibleSections.flatMap(s => s.recs));
 
   // Watchlist / Watched: filter by media type then sort. New arrays (slice) so we never
   // mutate the source lists in place.
@@ -318,7 +326,19 @@
 
   function showFeed(feed: FeedResponse) {
     recommendations = feed.recs;
-    requestSummary = feed.request;
+    sections = feed.sections;
+  }
+
+  // Clear list: every pick leaves the Picks list (the server keeps the rows).
+  async function handleClear() {
+    if (!activeProfileId || !confirm('Clear every pick from this list? Your ratings, watchlist and history stay.')) return;
+    error = '';
+    try {
+      showFeed(await clearPicks(activeProfileId));
+      dismissedRecIds = [];
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function switchProfile(id: number) {
@@ -326,7 +346,7 @@
     closeModal();
     // Clear stale data so a slow fetch never shows the previous profile's lists.
     recommendations = [];
-    requestSummary = null;
+    sections = [];
     dismissedRecIds = [];
     watchlist = [];
     watched = [];
@@ -366,8 +386,8 @@
     mediaFilter = kinds.has('movie') && kinds.has('tv') ? 'all' : kinds.has('tv') ? 'tv' : 'movie';
   }
 
-  // Surprise Me: 5 top picks only (no wildcard/adversarial), APPENDED to the list
-  // (newest first), never replacing it.
+  // Surprise Me: 5 top picks only (no wildcard/adversarial), added to the list
+  // like every other generate.
   async function handleSurpriseMe() {
     if (!activeProfileId) return;
     generating = true;
@@ -484,12 +504,15 @@
       </div>
     </div>
 
-    <CategoryLegend />
+    <div class="list-tools">
+      <div class="legend-slot"><CategoryLegend /></div>
+      {#if recommendations.length > 0}
+        <button class="clear-btn" onclick={handleClear} disabled={generating}>Clear list</button>
+      {/if}
+    </div>
 
     {#if error}<p class="error">{error}</p>{/if}
 
-    <!-- The status and the summary share one slot, so the summary replaces the
-         status when picks arrive instead of pushing the feed down. -->
     {#if generating}
       <div class="gen-status" role="status">
         <span class="spinner"></span>
@@ -503,16 +526,21 @@
           {/if}
         </div>
       </div>
-    {:else if !loading}
-      <RequestSummary summary={requestSummary} recommendations={visibleRecs} />
     {/if}
 
     {#if loading && !generating}
       <div class="poster-skeleton">
         {#each Array(6) as _}<div class="skel"></div>{/each}
       </div>
+    {:else if visibleSections.length === 0 && !generating}
+      <p class="empty">No picks yet. Type what you feel like watching above, or tap Generate More.</p>
     {:else}
-      <PosterFeed recommendations={visibleRecs} dismissedIds={dismissedRecIds} onOpen={openRec} />
+      {#each visibleSections as section (section.text ?? '')}
+        <RequestSummary text={section.text} summary={section.summary} shown={section.recs.length} />
+        {#if section.recs.length > 0}
+          <PosterFeed recommendations={section.recs} dismissedIds={dismissedRecIds} onOpen={openRec} />
+        {/if}
+      {/each}
     {/if}
   {:else if tab === 'watchlist'}
     {#if loading}
@@ -642,6 +670,12 @@
   .rating-filter-label { font-size: 0.75rem; color: #8a8ab0; white-space: nowrap; }
   .rating-select { padding: 0.35rem 0.5rem; }
   .error { color: #e94560; padding: 1rem; text-align: center; font-size: 0.9rem; }
+  .empty { color: #888; text-align: center; padding: 2rem 1rem; }
+  .list-tools { display: flex; align-items: flex-start; gap: 0.75rem; padding-right: 1rem; }
+  .legend-slot { flex: 1; min-width: 0; }
+  .clear-btn { background: none; border: none; color: #8a8ab0; font-size: 0.78rem; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; padding: 0.4rem 0; white-space: nowrap; }
+  .clear-btn:hover { color: #fff; }
+  .clear-btn:disabled { opacity: 0.5; cursor: default; }
   .loading { color: #888; padding: 1rem; text-align: center; font-size: 0.9rem; }
 
   .gen-status { display: flex; align-items: center; gap: 0.85rem; margin: 0.25rem 1rem 0; padding: 0.85rem 1rem; background: #14142b; border: 1px solid #2a2a4a; border-radius: 10px; }

@@ -88,9 +88,3 @@ describe('PosterFeed — ratings, tags and rule note on tiles', () => {
   });
 });
 
-describe('PosterFeed — empty feed', () => {
-  it('tells the viewer to type a request or tap Generate', () => {
-    const { getByText } = render(PosterFeed, { recommendations: [] });
-    expect(getByText(/Type what you feel like watching above, or tap Generate/)).toBeTruthy();
-  });
-});

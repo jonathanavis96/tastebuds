@@ -345,6 +345,22 @@ describe('generatePicks for a request', () => {
       expect(out.ok && out.feed.sections[0].recIds).toHaveLength(6);
     });
 
+    it('asked again with no year stated, adds a few older titles, each saying why, once the recent ones are listed', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 10; i++) seed(db, `Recent ${i}`, { year: 2024 });
+      for (let i = 0; i < 5; i++) seed(db, `Older ${i}`, { year: 2018 });
+      const thriller = () => generatePicks(db, config, { profileId: 1, request: 'thriller', mediaType: 'movie' }, deps());
+
+      await thriller();
+      expect(stored(db).every(r => r.title.startsWith('Recent'))).toBe(true);
+      const out = await thriller();
+
+      const added = stored(db).filter(r => r.title.startsWith('Older'));
+      expect(added).toHaveLength(3);
+      expect(added.every(r => r.rule_note === 'Older pick: only 10 titles from 2021 on matched.')).toBe(true);
+      expect(out.ok && out.feed.sections[0].recIds).toHaveLength(13);
+    });
+
     it('puts a different request on top and keeps the earlier picks below it', async () => {
       const db = setupDb();
       for (let i = 0; i < 12; i++) seed(db, `Thriller ${i}`);

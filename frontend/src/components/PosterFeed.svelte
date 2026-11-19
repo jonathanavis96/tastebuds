@@ -22,9 +22,6 @@
 </script>
 
 <div class="poster-feed">
-  {#if recommendations.length === 0}
-    <p class="empty">No picks yet. Type what you feel like watching above, or tap Generate.</p>
-  {/if}
   {#each recommendations as rec (rec.id)}
     {@const meta = kindMeta(rec)}
     {@const dismissed = dismissedIds.includes(rec.id)}
@@ -92,7 +89,7 @@
   .poster-card.wildcard { border-color: color-mix(in srgb, var(--kc) 45%, #21294a); }
   .poster-card.adversarial { border-color: color-mix(in srgb, var(--kc) 55%, #21294a); }
   /* "Not interested" — dimmed and desaturated, still tappable to undo. Stays in the
-     grid (no jump) until the next Generate replaces the list. */
+     grid (no jump) until the list next loads. */
   .poster-card.dismissed { border-color: #5a3a44; opacity: 0.55; }
   .poster-card.dismissed:hover { opacity: 0.8; }
   .poster-card.dismissed .poster-img-wrap img { filter: grayscale(0.7); }
@@ -121,5 +118,4 @@
   .rule-note { font-size: 0.68rem; color: #9a9ab8; margin-top: 4px; line-height: 1.3; }
   .why { font-size: 0.74rem; color: #aab; margin-top: 5px; line-height: 1.35;
          display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .empty { color: #888; text-align: center; padding: 2rem; grid-column: 1 / -1; }
 </style>

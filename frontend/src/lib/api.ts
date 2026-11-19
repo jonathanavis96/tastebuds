@@ -62,6 +62,13 @@ export async function getRecommendations(profileId: number): Promise<FeedRespons
   return res.json();
 }
 
+/** Empty the profile's Picks list ("Clear list"). */
+export async function clearPicks(profileId: number): Promise<FeedResponse> {
+  const res = await postChange(`/recommendations/${profileId}/clear`, {});
+  if (!res.ok) throw new Error(`clear failed: ${res.status}`);
+  return res.json();
+}
+
 export async function generateRecommendations(opts: {
   profileId: number;
   mediaType?: string;

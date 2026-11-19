@@ -66,9 +66,19 @@ export interface RequestSummary {
   note: string | null;
 }
 
-/** GET /recommendations and POST /generate: the pending picks and the request behind the newest batch. */
+/** One request's picks in the list, or (text null) the picks made without one. */
+export interface FeedSection {
+  text: string | null;
+  summary: RequestSummary | null;
+  recIds: number[];
+}
+
+/** GET /recommendations, POST /generate and Clear list: the picks, in sections, newest request first. */
 export interface FeedResponse {
+  /** Every pick, in the order of `sections`. */
   recs: Recommendation[];
+  sections: FeedSection[];
+  /** The request just run, on POST /generate with a request; otherwise null. */
   request: RequestSummary | null;
 }
 

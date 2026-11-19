@@ -349,18 +349,20 @@ function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, reque
   // a title with no IMDb rating fails it.
   const minImdb = Math.max(ownFloor, ctx.hardFilters.minImdbRating);
   const hardFilters = requestHardFilters(ctx, rules);
-  const all = retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
+  const retrieve = (exclude: number[]) => retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
     queryVec,
     hardFilters,
     vetoProfileIds: base.vetoProfileIds,
-    excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id)],
+    excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id), ...exclude],
     affinity: base.affinity,
   }, now);
-  // Titles already in the list count as matching, so asking again never answers
-  // "nothing matches" while they are on the screen, but only new ones are offered.
-  const notInList = (list: CandidateTitle[]) => list.filter(t => !ctx.pendingTitleIds.has(t.id));
-  const retrieval: RulesRetrieval = { ...all, inWindow: notInList(all.inWindow), older: notInList(all.older) };
-  return { rules, retrieval, matched: all.inWindow.length, unseen: retrieval.inWindow.length };
+  // Only titles not yet in the list are offered, so asking again adds new ones,
+  // and older titles join when too few new recent ones are left. Titles already
+  // in the list still count as matching, so a repeat never answers "nothing
+  // matches" while they are on the screen.
+  const retrieval = retrieve([...ctx.pendingTitleIds]);
+  const matched = ctx.pendingTitleIds.size > 0 ? retrieve([]).inWindow.length : retrieval.inWindow.length;
+  return { rules, retrieval, matched, unseen: retrieval.inWindow.length };
 }
 
 /** A language the request names replaces the household's language list for that request. */
