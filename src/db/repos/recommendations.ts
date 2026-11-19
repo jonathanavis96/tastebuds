@@ -1,9 +1,11 @@
 import type Database from 'better-sqlite3';
 import type { RecommendationRow } from '../types.js';
 
-type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating' | 'dismiss_reason'> & {
+type UpsertRec = Omit<RecommendationRow, 'id' | 'created_at' | 'kind' | 'predicted_rating' | 'dismiss_reason' | 'request_summary' | 'rule_note'> & {
   kind?: 'core' | 'wildcard' | 'adversarial';
   predicted_rating?: number | null;
+  request_summary?: string | null;
+  rule_note?: string | null;
 };
 
 export function upsertRecommendation(

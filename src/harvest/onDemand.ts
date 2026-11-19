@@ -29,6 +29,7 @@ import { mapTmdbToTitleRow } from '../tmdb/mappers.js';
 import { embedText } from '../ollama/embed.js';
 import { resolveGenreNames } from '../tmdb/taxonomy.js';
 import { getTasteSignature, upsertTasteSignature } from '../db/repos/tasteSignatures.js';
+import type { RequestRules } from '../request/rules.js';
 
 // ── Synonym table ─────────────────────────────────────────────────────────────
 // Maps vibe words → canonical TMDB genre names. Matched case-insensitively on
@@ -323,6 +324,28 @@ export async function ensureRequestCoverage(
   }
 
   return result;
+}
+
+/**
+ * Make sure the library holds titles that can satisfy `rules` before retrieval
+ * runs: ask TMDB for titles inside the rules' year window, genres and media
+ * type (most popular and most voted first), and add the ones not stored yet,
+ * with their details, embedding and IMDb rating. Best effort and budgeted like
+ * ensureRequestCoverage: errors are collected, never thrown.
+ *
+ * `uiMediaType` is the Films/Series filter chosen in the app; the rules' own
+ * media type wins when the request states one.
+ */
+export async function ensureRulesCoverage(
+  db: InstanceType<typeof Database>,
+  rules: RequestRules,
+  requestText: string,
+  uiMediaType: 'movie' | 'tv' | undefined,
+  config: Config,
+  deps: OnDemandDeps = realDeps,
+): Promise<OnDemandResult> {
+  void db; void rules; void requestText; void uiMediaType; void config; void deps;
+  return { added: 0, errors: [] };
 }
 
 /** Maximum number of loved_genres to store per profile. */

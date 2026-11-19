@@ -10,7 +10,8 @@ function cand(tmdb_id: number): CandidateTitle {
     genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
     embedding: null, updated_at: '', imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
     popularity: 10, vote_count: 1000, rating_checked_at: null, rt_checked_at: null, original_language: 'en',
-    runtime_minutes: 100, vote_average: 7, status: 'Released', meta_checked_at: null, score: 0.2,
+    runtime_minutes: 100, vote_average: 7, status: 'Released', meta_checked_at: null,
+    imdb_votes: null, imdb_synced_at: null, imdb_genres: null, imdb_id_checked_at: null, rt_verified_at: null, score: 0.2,
   };
 }
 

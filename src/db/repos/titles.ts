@@ -15,6 +15,11 @@ const OPTIONAL_TITLE_FIELDS = [
   'vote_average',
   'status',
   'meta_checked_at',
+  'imdb_votes',
+  'imdb_synced_at',
+  'imdb_genres',
+  'imdb_id_checked_at',
+  'rt_verified_at',
 ] as const;
 
 type OptionalTitleField = (typeof OPTIONAL_TITLE_FIELDS)[number];

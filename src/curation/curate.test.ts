@@ -33,6 +33,7 @@ const mockCandidates: CandidateTitle[] = [
     imdb_id: null, imdb_rating: null, rt_rating: null, rt_url: null,
     popularity: null, vote_count: null, rating_checked_at: null, rt_checked_at: null,
     original_language: null, runtime_minutes: null, vote_average: null, status: null, meta_checked_at: null,
+    imdb_votes: null, imdb_synced_at: null, imdb_genres: null, imdb_id_checked_at: null, rt_verified_at: null,
   },
 ];
 

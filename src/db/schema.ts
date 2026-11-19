@@ -201,3 +201,49 @@ export const MIGRATE_005_DEDUP_PENDING = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_rec_pending_unique
      ON recommendations (profile_id, title_id) WHERE state = 'pending'`,
 ];
+
+// Migration 015: IMDb as the rating authority, and Rotten Tomatoes scores that
+// are known to come from the title's own page.
+//  - imdb_votes / imdb_synced_at: the vote count behind imdb_rating and when
+//    IMDb's daily ratings file last confirmed (or cleared) it. Ratings used to be
+//    fetched once and never again, so a new release stayed unrated or kept its
+//    opening-week score for good.
+//  - imdb_genres: IMDb's genres (JSON array). TMDB has no Thriller or Horror
+//    genre for series, so a "thriller series" request needs a second source.
+//  - imdb_id_checked_at: when TMDB was last asked for a missing imdb_id.
+//  - rt_verified_at: when rt_rating was last read from the title's own RT page.
+//    NULL means the score came from OMDb or has not been verified.
+export const MIGRATE_015_RATING_SOURCES = [
+  `ALTER TABLE titles ADD COLUMN imdb_votes INTEGER`,
+  `ALTER TABLE titles ADD COLUMN imdb_synced_at INTEGER`,
+  `ALTER TABLE titles ADD COLUMN imdb_genres TEXT`,
+  `ALTER TABLE titles ADD COLUMN imdb_id_checked_at INTEGER`,
+  `ALTER TABLE titles ADD COLUMN rt_verified_at INTEGER`,
+];
+
+// Runs once, with migration 015. Every score scraped before it was read with a
+// pattern that matched a site-wide "trending" block present on every Rotten
+// Tomatoes page, so the stored number belonged to an unrelated title. A row has
+// rt_url only when its page was scraped, so those scores are dropped (the URL is
+// kept: it was verified by title and year) and the refresh job reads them again.
+export const MIGRATE_015_DROP_SCRAPED_RT = `
+  UPDATE titles SET rt_rating = NULL, rt_checked_at = NULL WHERE rt_url IS NOT NULL
+`;
+
+// Migration 016: what a request was understood to mean, stored with its picks.
+//  - request_summary: JSON RequestSummary (src/request/rules.ts) for picks made
+//    from a free-text request; NULL for picks made without one.
+//  - rule_note: why this one pick is an exception (an older title added because
+//    too few recent ones matched); NULL for an ordinary pick.
+export const MIGRATE_016_REQUEST_SUMMARY = [
+  `ALTER TABLE recommendations ADD COLUMN request_summary TEXT`,
+  `ALTER TABLE recommendations ADD COLUMN rule_note TEXT`,
+];
+
+// Runs once, with migration 016. Picks made before requests were enforced as
+// rules can break the request they were made for (a 1995 film for "new 2025"),
+// so they leave the Picks feed. 'shown' keeps the row: calibration still reads
+// its predicted rating, and the title can be picked again by a later request.
+export const MIGRATE_016_ARCHIVE_PENDING = `
+  UPDATE recommendations SET state = 'shown' WHERE state = 'pending'
+`;

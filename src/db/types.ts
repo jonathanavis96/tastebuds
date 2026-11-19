@@ -24,6 +24,16 @@ export interface TitleRow {
   vote_average: number | null;
   status: string | null;
   meta_checked_at: number | null;
+  /** Votes behind imdb_rating, from IMDb's ratings file. */
+  imdb_votes: number | null;
+  /** Unix seconds when IMDb's ratings file last confirmed or cleared imdb_rating. */
+  imdb_synced_at: number | null;
+  /** IMDb's genres as a JSON array, or null when not known yet. */
+  imdb_genres: string | null;
+  /** Unix seconds when TMDB was last asked for a missing imdb_id. */
+  imdb_id_checked_at: number | null;
+  /** Unix seconds when rt_rating was last read from the title's own RT page; null = unverified. */
+  rt_verified_at: number | null;
 }
 
 export interface ProfileRow {
@@ -64,5 +74,9 @@ export interface RecommendationRow {
   kind: 'core' | 'wildcard' | 'adversarial'; // defaults to 'core' via DB column default
   predicted_rating: number | null; // Sonnet's predicted star rating (1–5) for this pick
   dismiss_reason: string | null; // tile key chosen on dismiss (see DismissReason), null if none/not dismissed
+  /** JSON RequestSummary (src/request/rules.ts) for a pick made from a request; null otherwise. */
+  request_summary: string | null;
+  /** Why this pick is an exception to the request's default year window; null for an ordinary pick. */
+  rule_note: string | null;
   created_at: string;
 }

@@ -19,6 +19,10 @@ import {
   MIGRATE_012_ADD_DISMISS_REASON,
   MIGRATE_013_ADD_TITLE_META,
   MIGRATE_014_ADD_RT_CHECKED_AT,
+  MIGRATE_015_RATING_SOURCES,
+  MIGRATE_015_DROP_SCRAPED_RT,
+  MIGRATE_016_REQUEST_SUMMARY,
+  MIGRATE_016_ARCHIVE_PENDING,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -148,5 +152,31 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
         db.exec(sql);
       }
     }
+
+    // Migration 015: IMDb votes/genres/sync marker and the RT verification marker.
+    // The scraped-score cleanup runs only on the run that adds rt_verified_at.
+    const titleColNames15 = columnNames(db, 'titles');
+    const addsRtVerified = !titleColNames15.includes('rt_verified_at');
+    addMissingColumns(db, MIGRATE_015_RATING_SOURCES, titleColNames15);
+    if (addsRtVerified) db.exec(MIGRATE_015_DROP_SCRAPED_RT);
+
+    // Migration 016: request summary on picks. Archiving the old pending picks
+    // runs only on the run that adds request_summary.
+    const recColNames16 = columnNames(db, 'recommendations');
+    const addsRequestSummary = !recColNames16.includes('request_summary');
+    addMissingColumns(db, MIGRATE_016_REQUEST_SUMMARY, recColNames16);
+    if (addsRequestSummary) db.exec(MIGRATE_016_ARCHIVE_PENDING);
   })();
+}
+
+function columnNames(db: InstanceType<typeof Database>, table: 'titles' | 'recommendations'): string[] {
+  return (db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>).map(c => c.name);
+}
+
+/** Run each "ALTER TABLE … ADD COLUMN <name> …" whose column is not in `existing`. */
+function addMissingColumns(db: InstanceType<typeof Database>, statements: string[], existing: string[]): void {
+  for (const sql of statements) {
+    const colName = sql.split('ADD COLUMN ')[1].split(' ')[0];
+    if (!existing.includes(colName)) db.exec(sql);
+  }
 }
