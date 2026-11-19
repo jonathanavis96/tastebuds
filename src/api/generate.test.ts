@@ -190,7 +190,8 @@ describe('generatePicks for a request', () => {
   it('fills a short default window with older titles, after the recent ones, each saying why', async () => {
     const db = setupDb();
     for (let i = 0; i < 3; i++) seed(db, `Recent ${i}`, { year: 2024 });
-    for (let i = 0; i < 12; i++) seed(db, `Older ${i}`, { year: 2018 });
+    // Farther from the request than the recent ones, so a feed sorted by distance alone would show them first.
+    for (let i = 0; i < 12; i++) seed(db, `Older ${i}`, { year: 2018, embedding: vec(3) });
     // The model puts older titles first; the code puts the recent ones ahead.
     const { spawn } = fakeClaude({ order: ids => [...ids].reverse() });
 
@@ -201,6 +202,8 @@ describe('generatePicks for a request', () => {
     expect(rows.slice(0, 3).every(r => r.year === 2024 && r.rule_note === null)).toBe(true);
     expect(rows.slice(3).every(r => r.year === 2018 && r.rule_note === 'Older pick: only 3 titles from 2021 on matched.')).toBe(true);
     expect(out.ok && out.feed.request).toMatchObject({ matched: 3, note: expect.stringContaining('7 older ones were added') });
+    // The feed shows them in the stored order: recent first.
+    expect(out.ok && out.feed.recs.map(r => r.year)).toEqual([2024, 2024, 2024, ...Array(7).fill(2018)]);
   });
 
   it('never widens a stated year: fewer picks come back, with a note on what would show more', async () => {

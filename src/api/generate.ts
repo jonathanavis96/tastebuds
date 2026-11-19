@@ -163,18 +163,31 @@ function buildContext(db: Database, config: Config, profile: ProfileRow, body: G
 }
 
 /**
+ * This call's new pending picks, oldest id first, stamped with one time so the
+ * feed keeps the batch together and in the order it was stored (rank order).
+ */
+function takeBatch(ctx: Context): number[] {
+  const fresh = getRecommendations(ctx.db, ctx.profile.id, 'pending')
+    .filter(r => r.id > ctx.lastOldId)
+    .sort((a, b) => a.id - b.id);
+  if (fresh.length > 0) {
+    ctx.db.prepare('UPDATE recommendations SET created_at = ? WHERE id IN (SELECT value FROM json_each(?))')
+      .run(new Date().toISOString(), JSON.stringify(fresh.map(r => r.id)));
+  }
+  return fresh.map(r => r.title_id);
+}
+
+/**
  * A fresh generate replaces the profile's pending set. The old rows go only once
  * this call has written at least one new pick (they were excluded from the
  * candidates, so no new pick collides with one), so a failed or empty generate
  * never leaves Picks empty. Shown/dismissed recs and watch history are untouched,
  * and so is a pending pick the profile has watched, rated or watchlisted (its row
  * carries the predicted_rating the calibration widget needs). A media-filtered
- * generate replaces only picks of that media type. Returns this call's new picks.
+ * generate replaces only picks of that media type.
  */
-function replaceOldPending(ctx: Context): number[] {
-  const fresh = getRecommendations(ctx.db, ctx.profile.id, 'pending').filter(r => r.id > ctx.lastOldId);
+function replaceOldPending(ctx: Context, fresh: number[]): void {
   if (ctx.hadPending && fresh.length > 0) clearPendingRecommendations(ctx.db, ctx.profile.id, ctx.lastOldId, ctx.mediaType);
-  return fresh.map(r => r.title_id);
 }
 
 // ── Calls without a request ──────────────────────────────────────────────────
@@ -206,10 +219,9 @@ async function generateFromPool(ctx: Context, body: GenerateBody): Promise<void>
   // Surprise Me keeps the text typed beside it in the prompt, as a hint.
   await curateCandidates(pool, profile, ctx.sig, body.request?.trim() || null, config, db, ctx.deps.spawnFn, !ctx.mediaType, surprise);
 
+  const fresh = takeBatch(ctx);
   // Surprise Me appends to the list and never replaces it (see App.svelte).
-  const fresh = surprise
-    ? getRecommendations(db, profile.id, 'pending').filter(r => r.id > ctx.lastOldId).map(r => r.title_id)
-    : replaceOldPending(ctx);
+  if (!surprise) replaceOldPending(ctx, fresh);
   await ensureFreshRatings(db, fresh, config, ctx.deps.fetchImpl);
 }
 
@@ -227,7 +239,7 @@ interface RequestPick {
   older: boolean;
 }
 
-/** Times each stage of a request, for the one log line per request. */
+/** Times each stage of a request (read, embed, discovery, retrieval, curation, ratings), for the one log line per request. */
 class Stages {
   readonly ms: Record<string, number> = {};
   async run<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
@@ -256,7 +268,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   }
 
   const base = requestBase(ctx);
-  const requestEmbedding = await stages.run('retrieval', () => (deps.embedFn ?? embedText)(text, config));
+  const requestEmbedding = await stages.run('embed', () => (deps.embedFn ?? embedText)(text, config));
   const plan = (): Planned => planRequest(ctx, asked, base, requestEmbedding, now);
 
   let planned = await stages.run('retrieval', plan);
@@ -296,14 +308,14 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
       rule_note: p.older ? ruleNote : null,
     });
   }
-  replaceOldPending(ctx);
+  replaceOldPending(ctx, takeBatch(ctx));
 
   const fmt = (name: string) => (stages.ms[name] == null ? '-' : `${stages.ms[name]}ms`);
   console.log(
     `[tastebuds] request profile=${profile.id} text=${JSON.stringify(text)} chips=[${understood.join(', ')}] ` +
     `matched=${matched} picked=${picks.length} older=${olderCount}` +
     `${retrieval.olderRules ? ` widened=${describeYearWindow(retrieval.olderRules) ?? 'any year'}` : ''} discovered=${discovered} ` +
-    `read=${fmt('read')} discovery=${fmt('discovery')} retrieval=${fmt('retrieval')} curation=${fmt('curation')} ratings=${fmt('ratings')}`,
+    `read=${fmt('read')} embed=${fmt('embed')} discovery=${fmt('discovery')} retrieval=${fmt('retrieval')} curation=${fmt('curation')} ratings=${fmt('ratings')}`,
   );
 
   // Nothing matched: nothing was stored and the older picks stay as they are,
@@ -466,5 +478,6 @@ function capitalise(s: string): string {
 }
 
 function joinOr(items: string[]): string {
-  return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`;
+  if (items.length <= 2) return items.join(' or ');
+  return `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`;
 }

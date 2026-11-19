@@ -108,9 +108,19 @@ function visibleRecs(db: Database, config: Config, profileId: number, recs: Reco
   return recs.filter(r => !engagedIds.has(r.title_id) && passing.has(r.title_id));
 }
 
+/**
+ * Newest batch first, as getRecommendations returns them, and within a batch
+ * (one created_at, see takeBatch in generate.ts) in the order they were stored.
+ */
+function inBatchOrder(recs: RecommendationRow[]): RecommendationRow[] {
+  const batchRank = new Map<string, number>();
+  recs.forEach((r, i) => { if (!batchRank.has(r.created_at)) batchRank.set(r.created_at, i); });
+  return [...recs].sort((a, b) => batchRank.get(a.created_at)! - batchRank.get(b.created_at)! || a.id - b.id);
+}
+
 /** The visible pending picks, newest batch first, and the stored summary of the request behind the newest of them. */
 export function feedFor(db: Database, config: Config, profileId: number): FeedResponse {
-  const visible = visibleRecs(db, config, profileId, getRecommendations(db, profileId, 'pending'));
+  const visible = inBatchOrder(visibleRecs(db, config, profileId, getRecommendations(db, profileId, 'pending')));
   return { recs: visible.map(r => enrichRec(db, r)), request: parseRequestSummary(visible[0]?.request_summary ?? null) };
 }
 
