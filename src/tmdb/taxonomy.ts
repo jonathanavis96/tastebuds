@@ -10,6 +10,8 @@
  * a single authoritative map.
  */
 
+import type { CanonGenre } from '../request/rules.js';
+
 /** Movie genre name → TMDB genre id. */
 export const MOVIE_GENRE_MAP: Record<string, number> = {
   Action: 28,
@@ -26,6 +28,10 @@ export const MOVIE_GENRE_MAP: Record<string, number> = {
   Thriller: 53,
   Documentary: 99,
   Family: 10751,
+  History: 36,
+  Music: 10402,
+  War: 10752,
+  Western: 37,
 };
 
 /**
@@ -42,6 +48,8 @@ export const MOVIE_GENRE_MAP: Record<string, number> = {
  */
 export const TV_GENRE_MAP: Record<string, number> = {
   'Action & Adventure': 10759,
+  Action: 10759,
+  Adventure: 10759,
   Animation: 16,
   Comedy: 35,
   Crime: 80,
@@ -55,6 +63,8 @@ export const TV_GENRE_MAP: Record<string, number> = {
   'Science Fiction': 10765,
   Documentary: 99,
   Family: 10751,
+  War: 10768,
+  Western: 37,
 };
 
 /**
@@ -113,4 +123,19 @@ export function resolveGenreNames(names: string[], mediaType: 'movie' | 'tv'): G
   }
 
   return { genreIds, keywordTerms };
+}
+
+/** How TMDB can be asked for one canonical genre: by genre id, or by a keyword still to be resolved to an id. */
+export type TmdbGenreQuery = { genreId: number } | { keyword: string };
+
+/**
+ * The TMDB filter for a canonical genre (src/request/rules.ts CANON_GENRES).
+ * Series Thriller and Horror have no TV genre, so they go through keywords;
+ * null when TMDB has neither (Reality films; Romance, History, Music series).
+ */
+export function tmdbQueryForGenre(genre: CanonGenre, mediaType: 'movie' | 'tv'): TmdbGenreQuery | null {
+  const keyword = mediaType === 'tv' ? TV_KEYWORD_GENRES[genre] : undefined;
+  if (keyword !== undefined) return { keyword };
+  const genreId = (mediaType === 'movie' ? MOVIE_GENRE_MAP : TV_GENRE_MAP)[genre];
+  return genreId === undefined ? null : { genreId };
 }

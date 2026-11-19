@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { DiscoverOpts, TmdbTitle, TmdbTitleDetail } from './types.js';
+import type { DiscoverOpts, IdMatch, TmdbTitle, TmdbTitleDetail } from './types.js';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 /** Per call: harvest and /generate loop over these, so a stall must fail fast. */
@@ -14,16 +14,32 @@ async function tmdbFetch<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function joinIds(ids: number[] | undefined, match: IdMatch = 'all'): string | undefined {
+  return ids?.length ? ids.join(match === 'any' ? '|' : ',') : undefined;
+}
+
 export async function discoverTitles(
   opts: DiscoverOpts,
   config: Pick<Config, 'tmdbApiKey'>,
 ): Promise<TmdbTitle[]> {
-  const genreParam = opts.genreIds?.length ? `&with_genres=${opts.genreIds.join(',')}` : '';
-  const keywordParam = opts.keywordIds?.length ? `&with_keywords=${opts.keywordIds.join(',')}` : '';
-  const pageParam = `&page=${opts.page ?? 1}`;
-  const sortParam = opts.sortBy ? `&sort_by=${encodeURIComponent(opts.sortBy)}` : '';
-  const voteParam = opts.voteCountGte != null ? `&vote_count.gte=${opts.voteCountGte}` : '';
-  const url = `${TMDB_BASE}/discover/${opts.mediaType}?api_key=${config.tmdbApiKey}${genreParam}${keywordParam}${pageParam}${sortParam}${voteParam}`;
+  const dateField = opts.mediaType === 'movie' ? 'primary_release_date' : 'first_air_date';
+  const params: Array<[string, string | number | undefined]> = [
+    ['with_genres', joinIds(opts.genreIds, opts.genreMatch)],
+    ['without_genres', joinIds(opts.withoutGenreIds, 'any')],
+    ['with_keywords', joinIds(opts.keywordIds, opts.keywordMatch)],
+    ['without_keywords', joinIds(opts.withoutKeywordIds, 'any')],
+    [`${dateField}.gte`, opts.releasedFrom],
+    [`${dateField}.lte`, opts.releasedTo],
+    ['with_original_language', opts.originalLanguage],
+    ['page', opts.page ?? 1],
+    ['sort_by', opts.sortBy],
+    ['vote_count.gte', opts.voteCountGte],
+  ];
+  const query = params
+    .filter((p): p is [string, string | number] => p[1] !== undefined)
+    .map(([key, value]) => `&${key}=${encodeURIComponent(String(value))}`)
+    .join('');
+  const url = `${TMDB_BASE}/discover/${opts.mediaType}?api_key=${config.tmdbApiKey}${query}`;
   const data = await tmdbFetch<{ results: TmdbTitle[] }>(url);
   return data.results;
 }
