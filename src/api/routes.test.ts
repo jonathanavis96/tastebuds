@@ -30,6 +30,12 @@ const mockConfig: Config = {
   harvestMaxPage: 30,
 };
 
+/** A release year inside the feed's rolling recent window, whatever today's date. */
+const RECENT_YEAR = new Date().getFullYear() - 1;
+
+/** Feed response from GET /recommendations and POST /generate. */
+type Feed = { recs: Array<Record<string, unknown>>; request: unknown };
+
 function setupDb() {
   const db = new Database(':memory:');
   runMigrations(db);
@@ -88,33 +94,36 @@ describe('GET /api/recommendations/:profileId', () => {
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(Array.isArray(body)).toBe(true);
-    expect(body).toHaveLength(0);
+    expect(await res.json()).toEqual({ recs: [], request: null });
   });
 
   it('hides stored picks whose title fails the loosest hard-filter floor, keeps widened-but-legit ones', async () => {
     const db = setupDb();
     const base = {
       media_type: 'movie' as const, genres: '["Thriller"]', keywords: '[]', cast: '[]', synopsis: 's',
-      poster_path: null, embedding: null, updated_at: '2026-01-01', year: 2015, original_language: 'en',
-      runtime_minutes: 100, vote_average: 7.1, vote_count: 2000, status: 'Released', popularity: 20,
+      poster_path: null, embedding: null, updated_at: '2026-01-01', year: RECENT_YEAR, original_language: 'en',
+      runtime_minutes: 100, vote_average: 7.1, vote_count: 2000, status: 'Released', popularity: 20, imdb_rating: '7.2',
     };
-    upsertTitle(db, { ...base, tmdb_id: 1, title: 'Good Recent', year: 2015 });
-    upsertTitle(db, { ...base, tmdb_id: 2, title: 'Widened Eighties', year: 1984 }); // below strict 1995, above floor 1980
-    upsertTitle(db, { ...base, tmdb_id: 3, title: 'Unreleased Zero Votes', year: 2027, vote_count: 0, vote_average: 0, status: 'Post Production' });
+    upsertTitle(db, { ...base, tmdb_id: 1, title: 'Good Recent' });
+    upsertTitle(db, { ...base, tmdb_id: 2, title: 'Widened Lesser Known', runtime_minutes: 45, vote_count: 25 });
+    upsertTitle(db, { ...base, tmdb_id: 3, title: 'Unreleased Zero Votes', year: RECENT_YEAR + 2, vote_count: 0, vote_average: 0, status: 'Post Production' });
     upsertTitle(db, { ...base, tmdb_id: 4, title: 'Foreign Short', original_language: 'zh', runtime_minutes: 14 });
+    // No year floor: a request may ask for an old film, and its pick was checked against that request.
     upsertTitle(db, { ...base, tmdb_id: 5, title: 'Silent Era', year: 1927 });
+    upsertTitle(db, { ...base, tmdb_id: 6, title: 'No IMDb Rating', imdb_rating: null });
+    upsertTitle(db, { ...base, tmdb_id: 7, title: 'Few IMDb Votes' });
+    db.prepare('UPDATE titles SET imdb_votes = ?').run(1500);
+    db.prepare("UPDATE titles SET imdb_votes = 299 WHERE title = 'Few IMDb Votes'").run();
     const idOf = (t: string) => (db.prepare('SELECT id FROM titles WHERE title = ?').get(t) as { id: number }).id;
-    for (const t of ['Good Recent', 'Widened Eighties', 'Unreleased Zero Votes', 'Foreign Short', 'Silent Era']) {
+    for (const t of ['Good Recent', 'Widened Lesser Known', 'Unreleased Zero Votes', 'Foreign Short', 'Silent Era', 'No IMDb Rating', 'Few IMDb Votes']) {
       upsertRecommendation(db, { profile_id: 1, title_id: idOf(t), category: 'Top pick', score: 0.3, why_blurb: 'w', request_text: null, state: 'pending' });
     }
     const api = createApiRoutes(db, mockConfig);
     const app = new Hono().route('/api', api);
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const titles = ((await res.json()) as Array<{ title: string }>).map(r => r.title).sort();
-    expect(titles).toEqual(['Good Recent', 'Widened Eighties']);
+    const titles = ((await res.json()) as Feed).recs.map(r => r.title as string).sort();
+    expect(titles).toEqual(['Good Recent', 'Silent Era', 'Widened Lesser Known']);
   });
 
   it('returns 400 for invalid profileId', async () => {
@@ -152,8 +161,8 @@ describe('POST /api/watchlist', () => {
 describe('GET /api/recommendations/:profileId — enrichRec includes rating fields', () => {
   it('returns imdb_rating and rt_rating from joined title', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, imdb_rating, rt_rating)
-      VALUES (997, 'movie', 'Rated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt0000001', '8.5', '92%')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_id, imdb_rating, imdb_votes, rt_rating)
+      VALUES (997, 'movie', 'Rated Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', 'tt0000001', '8.5', 41000, '92%')`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=997').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Great film', null, 'pending', datetime('now'))`).run(titleId);
@@ -163,15 +172,17 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json() as Array<Record<string, unknown>>;
-    expect(body[0].imdb_rating).toBe('8.5');
-    expect(body[0].rt_rating).toBe('92%');
+    const { recs } = await res.json() as Feed;
+    expect(recs[0].imdb_rating).toBe('8.5');
+    expect(recs[0].imdb_votes).toBe(41000);
+    expect(recs[0].rt_rating).toBe('92%');
+    expect(recs[0].rule_note).toBeNull();
   });
 
-  it('returns null imdb_rating and rt_rating when not set', async () => {
+  it('returns a null rt_rating when Rotten Tomatoes has no score', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (996, 'movie', 'Unrated Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (996, 'movie', 'No RT Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '6.8', 2500)`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=996').get() as any).id;
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
       VALUES (1, ?, 'Top pick', 0.9, 'Fine film', null, 'pending', datetime('now'))`).run(titleId);
@@ -180,9 +191,88 @@ describe('GET /api/recommendations/:profileId — enrichRec includes rating fiel
     const app = new Hono().route('/api', api);
 
     const res = await app.request('/api/recommendations/1');
-    const body = await res.json() as Array<Record<string, unknown>>;
-    expect(body[0].imdb_rating).toBeNull();
-    expect(body[0].rt_rating).toBeNull();
+    const { recs } = await res.json() as Feed;
+    expect(recs[0].imdb_rating).toBe('6.8');
+    expect(recs[0].rt_rating).toBeNull();
+  });
+
+  it('never shows a pick whose title has no IMDb rating', async () => {
+    const db = setupDb();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
+      VALUES (995, 'movie', 'Unrated Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run(RECENT_YEAR);
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=995').get() as any).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'Fine film', null, 'pending', datetime('now'))`).run(titleId);
+
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const { recs } = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(recs).toEqual([]);
+  });
+});
+
+describe('feed response: the request summary stored with the newest pick', () => {
+  function addPick(db: ReturnType<typeof setupDb>, tmdbId: number, createdAt: string, summary: string | null, ruleNote: string | null = null): number {
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (?, 'movie', ?, ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(tmdbId, `Film ${tmdbId}`, RECENT_YEAR);
+    const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
+    db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, request_summary, rule_note, created_at)
+      VALUES (1, ?, 'Top pick', 0.9, 'w', null, 'pending', ?, ?, ?)`).run(titleId, summary, ruleNote, createdAt);
+    return titleId;
+  }
+  const older = { text: 'comedy', understood: ['Comedy'], matched: 40, note: null };
+  const newer = { text: 'thriller new 2025', understood: ['Thriller', '2025 or newer'], matched: 6, note: 'Only 6 titles match.' };
+
+  it('returns the summary of the newest visible pick once, beside the recs, and each pick\'s rule note', async () => {
+    const db = setupDb();
+    addPick(db, 801, '2026-11-01T10:00:00.000Z', JSON.stringify(older), 'Released 2012: too few recent comedies matched.');
+    addPick(db, 802, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.request).toEqual(newer);
+    expect(feed.recs.map(r => r.tmdb_id)).toEqual([802, 801]);
+    expect(feed.recs.map(r => r.rule_note)).toEqual([null, 'Released 2012: too few recent comedies matched.']);
+    for (const r of feed.recs) expect(r).not.toHaveProperty('request_summary');
+  });
+
+  it('skips a newest pick that is no longer visible', async () => {
+    const db = setupDb();
+    addPick(db, 811, '2026-11-01T10:00:00.000Z', JSON.stringify(older));
+    const watched = addPick(db, 812, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
+    upsertWatchEvent(db, { profile_id: 1, title_id: watched, status: 'watched', rating: 4, watched_at: null });
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+    expect(feed.request).toEqual(older);
+  });
+
+  it('returns a null request when the newest pick has no summary or an unreadable one', async () => {
+    for (const stored of [null, '{not json', JSON.stringify({ text: 'x' }), 'null']) {
+      const db = setupDb();
+      addPick(db, 821, '2026-11-01T10:00:00.000Z', JSON.stringify(older));
+      addPick(db, 822, '2026-11-02T10:00:00.000Z', stored);
+      const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+      const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
+      expect(feed.request).toBeNull();
+      expect(feed.recs).toHaveLength(2);
+    }
+  });
+
+  it('POST /generate returns the same feed shape', async () => {
+    vi.mocked(curateCandidates).mockResolvedValue([] as any);
+    const db = setupDb();
+    addPick(db, 831, '2026-11-02T10:00:00.000Z', JSON.stringify(newer));
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+
+    const res = await app.request('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1 }),
+    });
+    expect(res.status).toBe(200);
+    const feed = await res.json() as Feed;
+    expect(feed.request).toEqual(newer);
+    expect(feed.recs.map(r => r.tmdb_id)).toEqual([831]);
   });
 });
 
@@ -190,10 +280,10 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
   it('excludes pending recs whose title has been watched by the solo profile', async () => {
     const db = setupDb();
     // Insert two titles
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (991, 'movie', 'Watched Film', 2020, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (992, 'movie', 'Unwatched Film', 2021, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (991, 'movie', 'Watched Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (992, 'movie', 'Unwatched Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
     const watchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=991').get() as any).id;
     const unwatchedId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=992').get() as any).id;
 
@@ -211,16 +301,16 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
 
     const res = await app.request('/api/recommendations/1');
     expect(res.status).toBe(200);
-    const body = await res.json() as Array<Record<string, unknown>>;
+    const { recs } = await res.json() as Feed;
     // Only the unwatched film should appear
-    expect(body).toHaveLength(1);
-    expect(body[0].tmdb_id).toBe(992);
+    expect(recs).toHaveLength(1);
+    expect(recs[0].tmdb_id).toBe(992);
   });
 
   it('excludes watchlist-only titles from Picks (already chosen)', async () => {
     const db = setupDb();
-    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status)
-      VALUES (993, 'movie', 'Watchlist Film', 2022, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released')`).run();
+    db.prepare(`INSERT INTO titles (tmdb_id, media_type, title, year, genres, keywords, cast, synopsis, poster_path, updated_at, original_language, runtime_minutes, vote_average, vote_count, status, imdb_rating, imdb_votes)
+      VALUES (993, 'movie', 'Watchlist Film', ?, '[]', '[]', '[]', null, null, datetime('now'), 'en', 100, 7.0, 1000, 'Released', '7.0', 2000)`).run(RECENT_YEAR);
     const titleId = (db.prepare('SELECT id FROM titles WHERE tmdb_id=993').get() as any).id;
 
     db.prepare(`INSERT INTO recommendations (profile_id, title_id, category, score, why_blurb, request_text, state, created_at)
@@ -233,9 +323,9 @@ describe('GET /api/recommendations/:profileId — watched-title exclusion', () =
     const app = new Hono().route('/api', api);
 
     const res = await app.request('/api/recommendations/1');
-    const body = await res.json() as Array<Record<string, unknown>>;
+    const { recs } = await res.json() as Feed;
     // A watchlisted title is already chosen — it must not remain in Picks.
-    expect(body).toHaveLength(0);
+    expect(recs).toHaveLength(0);
   });
 });
 

@@ -18,13 +18,14 @@ export class OmdbUnavailableError extends Error {
 
 /**
  * Resolves with OMDb's answer, which is all-null when it does not know the title.
+ * `genres` are IMDb's genres as OMDb lists them ("Crime, Drama, Thriller").
  * Rejects with OmdbUnavailableError when it did not answer at all.
  */
 export async function getOmdbRatings(
   imdbId: string,
   config: Pick<Config, 'omdbApiKey'>,
-): Promise<{ imdb: string | null; rottenTomatoes: string | null }> {
-  const none = { imdb: null, rottenTomatoes: null };
+): Promise<{ imdb: string | null; rottenTomatoes: string | null; genres?: string[] | null }> {
+  const none = { imdb: null, rottenTomatoes: null, genres: null };
 
   if (!config.omdbApiKey) return none;
 
@@ -33,6 +34,7 @@ export async function getOmdbRatings(
     Response?: string;
     Error?: string;
     imdbRating?: string;
+    Genre?: string;
     Ratings?: Array<{ Source: string; Value: string }>;
   };
   try {
@@ -61,5 +63,7 @@ export async function getOmdbRatings(
   const rottenTomatoes =
     rtEntry && rtEntry.Value !== 'N/A' ? rtEntry.Value : null;
 
-  return { imdb, rottenTomatoes };
+  const genres = (data.Genre ?? '').split(',').map((g) => g.trim()).filter((g) => g && g !== 'N/A');
+
+  return { imdb, rottenTomatoes, genres: genres.length > 0 ? genres : null };
 }

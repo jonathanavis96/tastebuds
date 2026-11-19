@@ -344,7 +344,7 @@ describe('IMDb rating filter (minImdbRating)', () => {
     return (db.prepare('SELECT id FROM titles WHERE tmdb_id = ?').get(tmdbId) as { id: number }).id;
   }
 
-  it('retrieveCandidates: excludes 5.0, includes 7.5 and NULL when minImdbRating=7', async () => {
+  it('retrieveCandidates: excludes 5.0 and unrated, includes 7.5 when minImdbRating=7', async () => {
     const db = new Database(':memory:');
     sqliteVec.load(db);
     runMigrations(db);
@@ -362,14 +362,14 @@ describe('IMDb rating filter (minImdbRating)', () => {
 
     mkTitleWithRating(db, 3001, 'Low Rating', '5.0');   // should be excluded
     mkTitleWithRating(db, 3002, 'High Rating', '7.5');   // should be included
-    mkTitleWithRating(db, 3003, 'Unrated Title', null);  // NULL → lenient, included
+    mkTitleWithRating(db, 3003, 'Unrated Title', null);  // NULL → no real rating, excluded
 
     const results = await retrieveCandidates(db, profileId, { minImdbRating: 7 }, mockConfig);
     const titles = results.map(r => r.title);
 
     expect(titles).not.toContain('Low Rating');   // 5.0 < 7 → excluded
     expect(titles).toContain('High Rating');        // 7.5 >= 7 → included
-    expect(titles).toContain('Unrated Title');      // NULL → included (lenient)
+    expect(titles).not.toContain('Unrated Title');  // NULL → excluded (a pick must have a real rating)
   });
 
   it('retrieveCandidates: returns all three when no minImdbRating is set', async () => {
@@ -400,7 +400,7 @@ describe('IMDb rating filter (minImdbRating)', () => {
     expect(titles).toContain('Unrated');
   });
 
-  it('retrieveJointCandidatePool: excludes 5.0, includes 7.5 and NULL when minImdbRating=7', async () => {
+  it('retrieveJointCandidatePool: excludes 5.0 and unrated, includes 7.5 when minImdbRating=7', async () => {
     const db = new Database(':memory:');
     sqliteVec.load(db);
     runMigrations(db);
@@ -423,7 +423,7 @@ describe('IMDb rating filter (minImdbRating)', () => {
 
     expect(allTitles).not.toContain('Joint Low');        // 5.0 < 7 → excluded
     expect(allTitles.some(t => t === 'Joint High')).toBe(true);    // 7.5 >= 7 → included
-    expect(allTitles.some(t => t === 'Joint Unrated')).toBe(true); // NULL → included
+    expect(allTitles).not.toContain('Joint Unrated');    // NULL → excluded
   });
 });
 

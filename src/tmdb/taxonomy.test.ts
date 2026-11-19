@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveGenreNames } from './taxonomy.js';
+import { resolveGenreNames, tmdbQueryForGenre } from './taxonomy.js';
+import { CANON_GENRES } from '../request/rules.js';
 
 describe('resolveGenreNames — TV', () => {
   it('puts Drama and Science Fiction in genreIds, not keywordTerms', () => {
@@ -85,5 +86,40 @@ describe('resolveGenreNames — movie', () => {
     expect(genreIds).toContain(18);
     expect(genreIds).toContain(878);
     expect(keywordTerms).toHaveLength(0);
+  });
+});
+
+describe('tmdbQueryForGenre', () => {
+  it('maps every canonical film genre to a TMDB genre id except Reality', () => {
+    for (const genre of CANON_GENRES) {
+      const query = tmdbQueryForGenre(genre, 'movie');
+      if (genre === 'Reality') expect(query).toBeNull();
+      else expect(query).toEqual({ genreId: expect.any(Number) });
+    }
+    expect(tmdbQueryForGenre('History', 'movie')).toEqual({ genreId: 36 });
+    expect(tmdbQueryForGenre('Music', 'movie')).toEqual({ genreId: 10402 });
+    expect(tmdbQueryForGenre('War', 'movie')).toEqual({ genreId: 10752 });
+    expect(tmdbQueryForGenre('Western', 'movie')).toEqual({ genreId: 37 });
+  });
+
+  it('maps series genres to the TV ids, bundles included', () => {
+    expect(tmdbQueryForGenre('Science Fiction', 'tv')).toEqual({ genreId: 10765 });
+    expect(tmdbQueryForGenre('Fantasy', 'tv')).toEqual({ genreId: 10765 });
+    expect(tmdbQueryForGenre('Action', 'tv')).toEqual({ genreId: 10759 });
+    expect(tmdbQueryForGenre('Adventure', 'tv')).toEqual({ genreId: 10759 });
+    expect(tmdbQueryForGenre('War', 'tv')).toEqual({ genreId: 10768 });
+    expect(tmdbQueryForGenre('Reality', 'tv')).toEqual({ genreId: 10764 });
+    expect(tmdbQueryForGenre('Western', 'tv')).toEqual({ genreId: 37 });
+  });
+
+  it('asks for series Thriller and Horror by keyword', () => {
+    expect(tmdbQueryForGenre('Thriller', 'tv')).toEqual({ keyword: 'thriller' });
+    expect(tmdbQueryForGenre('Horror', 'tv')).toEqual({ keyword: 'horror' });
+  });
+
+  it('returns null for series genres TMDB has no genre or keyword rule for', () => {
+    expect(tmdbQueryForGenre('Romance', 'tv')).toBeNull();
+    expect(tmdbQueryForGenre('History', 'tv')).toBeNull();
+    expect(tmdbQueryForGenre('Music', 'tv')).toBeNull();
   });
 });

@@ -113,7 +113,7 @@ without a second `claude -p` call. Widening is logged as `[tastebuds] /generate 
 | **[Ollama](https://ollama.com/)** running, with `nomic-embed-text` pulled | Local embeddings | `ollama pull nomic-embed-text` |
 | **TMDB API key** (free) | Real titles + posters | *Required* — see below |
 | **Claude Pro/Max subscription** + OAuth token | Recommendation curation | *Required for the "Generate" feature* |
-| **OMDb API key** (free) | IMDb/RT ratings on picks | *Optional* |
+| **OMDb API key** (free) | First Rotten Tomatoes score for films | *Optional* |
 
 > Without the Claude token you can still browse, rate, watchlist and import history —
 > only the **Generate** button (which calls Claude) is disabled.
@@ -144,7 +144,20 @@ Copy the printed token into `CLAUDE_CODE_OAUTH_TOKEN` in your `.env`.
 
 ### 3. OMDb API key (optional, free)
 Get a free key (1000 req/day) at <https://www.omdbapi.com/apikey.aspx> and put it in
-`OMDB_API_KEY`. Leave it blank to skip IMDb/RT ratings.
+`OMDB_API_KEY`. Leave it blank to skip it: IMDb ratings and most Rotten Tomatoes scores still
+arrive without it (see **Ratings** below).
+
+### Ratings
+IMDb ratings and vote counts come from IMDb's daily non-commercial data files
+(<https://developer.imdb.com/non-commercial-datasets/>): the ratings file is downloaded each
+night (and at startup when the copy beside the database is over 36 hours old) and kept in
+`data/imdb/`; IMDb's genres are read from its basics file once a month. Rotten Tomatoes scores
+are read from the title's own Rotten Tomatoes page, about one page a second, `RT_REFRESH_CAP`
+pages a night. OMDb, when a key is set, is the first source of a film's Rotten Tomatoes score
+and of an IMDb rating for a title the ratings file has not covered yet. Just before picks are
+shown, any rating that is due is checked again. Each job can be run by hand:
+`npm run ratings:sync`, `ratings:genres`, `ratings:rt -- --cap 30`, `ratings:imdb-ids -- --cap 50`
+(in Docker: `node dist/server/ratings/cli.js sync|genres|rt|imdb-ids [--cap N]`).
 
 ### TMDB metadata (language, runtime, TMDB rating, release status)
 Each title also carries `original_language`, `runtime_minutes`, `vote_average` and `status`
@@ -259,7 +272,7 @@ just ignore the profiles you don't use.
 | `TMDB_API_KEY` | ✅ | — | TMDB v3 API key |
 | `CLAUDE_CODE_OAUTH_TOKEN` | ✅ (for Generate) | — | `claude setup-token` output |
 | `OLLAMA_URL` | — | `http://host.docker.internal:11434` | Ollama endpoint |
-| `OMDB_API_KEY` | — | — | IMDb/RT ratings |
+| `OMDB_API_KEY` | — | — | First Rotten Tomatoes score for films (see **Ratings**) |
 | `PORT` | — | `8094` | HTTP port |
 | `DB_PATH` | — | `./data/tastebuds.db` | SQLite file (persisted via the `./data` volume) |
 | `BIND_HOST` | — | `127.0.0.1` | **Docker only** — host bind address for docker-compose's port mapping — see **Security** below |
@@ -270,6 +283,7 @@ just ignore the profiles you don't use.
 | `RETRIEVAL_MIN_VOTE_AVERAGE` | — | `6.0` | Minimum TMDB average rating (never relaxed) |
 | `RETRIEVAL_LANGUAGES` | — | — | Extra ISO 639-1 codes to admit (English and languages from your liked history are always in) |
 | `META_BACKFILL_CAP` | — | `20000` | Max titles per TMDB metadata backfill run |
+| `RT_REFRESH_CAP` | — | `600` | Max Rotten Tomatoes pages re-read per nightly refresh (one a second) |
 
 ---
 

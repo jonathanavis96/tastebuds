@@ -48,6 +48,28 @@ export interface Recommendation {
   imdb_rating?: string | null;
   rt_rating?: string | null;
   rt_url?: string | null;
+  imdb_votes?: number | null;
+  /** Canonical genres (the server's titleTags), in place of the raw TMDB genres. */
+  tags?: string[];
+  /** Why this pick bends the request's rules, e.g. an older title when too few recent ones matched. */
+  rule_note?: string | null;
+}
+
+/** What the server read a typed request as, mirrored from src/request/rules.ts. */
+export interface RequestSummary {
+  /** The request as typed. */
+  text: string;
+  /** One short chip per rule, in reading order: ["Thriller", "Films", "2025 or newer"]. */
+  understood: string[];
+  /** How many titles in the library satisfy every rule. */
+  matched: number;
+  note: string | null;
+}
+
+/** GET /recommendations and POST /generate: the pending picks and the request behind the newest batch. */
+export interface FeedResponse {
+  recs: Recommendation[];
+  request: RequestSummary | null;
 }
 
 export interface WatchEvent {

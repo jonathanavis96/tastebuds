@@ -90,6 +90,11 @@ export function updateTitleImdbId(
   db.prepare('UPDATE titles SET imdb_id = ? WHERE id = ?').run(imdbId, titleId);
 }
 
+/**
+ * Save OMDb's answer and stamp rating_checked_at. OMDb lags its sources, so it
+ * never replaces an IMDb rating the ratings file has confirmed (imdb_synced_at)
+ * or a Rotten Tomatoes score read from the title's own page (rt_verified_at).
+ */
 export function updateTitleRatings(
   db: InstanceType<typeof Database>,
   titleId: number,
@@ -97,8 +102,74 @@ export function updateTitleRatings(
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(`
-    UPDATE titles SET imdb_rating = ?, rt_rating = ?, rating_checked_at = ? WHERE id = ?
+    UPDATE titles SET
+      imdb_rating = CASE WHEN imdb_synced_at IS NULL THEN ? ELSE imdb_rating END,
+      rt_rating   = CASE WHEN rt_verified_at IS NULL THEN ? ELSE rt_rating END,
+      rating_checked_at = ?
+    WHERE id = ?
   `).run(ratings.imdb, ratings.rt, now, titleId);
+}
+
+/** Store IMDb's genres (as OMDb lists them) for a title that has none yet. */
+export function fillTitleImdbGenres(
+  db: InstanceType<typeof Database>,
+  titleId: number,
+  genres: string[],
+): void {
+  db.prepare('UPDATE titles SET imdb_genres = ? WHERE id = ? AND imdb_genres IS NULL')
+    .run(JSON.stringify(genres), titleId);
+}
+
+/**
+ * Write what IMDb's ratings file says for each title, in one transaction:
+ * rating as one-decimal text and its vote count, or both cleared when the file
+ * does not list the title. Every row is stamped imdb_synced_at = `syncedAt`.
+ */
+export function applyImdbRatings(
+  db: InstanceType<typeof Database>,
+  rows: Array<{ id: number; rating: string | null; votes: number | null }>,
+  syncedAt: number,
+): void {
+  const stmt = db.prepare('UPDATE titles SET imdb_rating = ?, imdb_votes = ?, imdb_synced_at = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const r of rows) stmt.run(r.rating, r.votes, syncedAt, r.id);
+  })();
+}
+
+/** Store IMDb's genres (JSON array) for each title, in one transaction. */
+export function applyImdbGenres(
+  db: InstanceType<typeof Database>,
+  rows: Array<{ id: number; genres: string }>,
+): void {
+  const stmt = db.prepare('UPDATE titles SET imdb_genres = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const r of rows) stmt.run(r.genres, r.id);
+  })();
+}
+
+/** Record that TMDB was asked for a missing imdb_id, and the id when it had one. */
+export function markTitleImdbIdChecked(
+  db: InstanceType<typeof Database>,
+  titleId: number,
+  imdbId: string | null,
+): void {
+  db.prepare('UPDATE titles SET imdb_id = COALESCE(?, imdb_id), imdb_id_checked_at = ? WHERE id = ?')
+    .run(imdbId, Math.floor(Date.now() / 1000), titleId);
+}
+
+/**
+ * Save what the title's own Rotten Tomatoes page says: its URL (after any
+ * redirect) and its critics score, or no score when the page shows none.
+ * Stamps rt_verified_at and rt_checked_at.
+ */
+export function setTitleRtFromPage(
+  db: InstanceType<typeof Database>,
+  titleId: number,
+  page: { url: string; score: string | null },
+): void {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare('UPDATE titles SET rt_url = ?, rt_rating = ?, rt_verified_at = ?, rt_checked_at = ? WHERE id = ?')
+    .run(page.url, page.score, now, now, titleId);
 }
 
 /**

@@ -49,12 +49,15 @@ describe('POST /generate, Joint with one partner lacking a taste vector', () => 
     upsertTasteSignature(db, { profile_id: 2, taste_vector: oneHot(5), prefs: '{}', refreshed_at: now });
     for (let i = 0; i < 8; i++) {
       upsertTitle(db, {
-        tmdb_id: 500 + i, media_type: 'movie', title: `G${i}`, year: 2020, genres: '["Drama"]',
+        tmdb_id: 500 + i, media_type: 'movie', title: `G${i}`, year: new Date().getFullYear() - 1, genres: '["Drama"]',
         keywords: '[]', cast: '[]', synopsis: 's', poster_path: null,
         embedding: oneHot(i), updated_at: now,
         vote_count: 2000, vote_average: 7, original_language: 'en', runtime_minutes: 100, status: 'Released',
+        imdb_rating: '7.0',
       });
     }
+    // upsertTitle does not write imdb_votes; a pick needs enough of them to pass the hard filters.
+    db.prepare('UPDATE titles SET imdb_votes = 5000').run();
 
     const app = new Hono().route('/api', createApiRoutes(db, config));
     const res = await app.request('/api/generate', {

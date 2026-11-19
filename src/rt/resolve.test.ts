@@ -1,9 +1,11 @@
 /**
- * Unit tests for slugifyRtTitle, parseTomatometer, and resolveRtUrl.
+ * Unit tests for slugifyRtTitle, parseTomatometer, resolveRtUrl and readRtScore.
  * Network is never hit — fetch is injected as a mock.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { slugifyRtTitle, parseTomatometer, resolveRtUrl, parsePageIdentity, normaliseTitle } from './resolve.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { slugifyRtTitle, parseTomatometer, resolveRtUrl, readRtScore, parsePageIdentity, normaliseTitle } from './resolve.js';
 
 // ─── slugifyRtTitle ───────────────────────────────────────────────────────────
 
@@ -47,24 +49,57 @@ describe('slugifyRtTitle', () => {
 
 // ─── parseTomatometer ────────────────────────────────────────────────────────
 
+/** Pages saved from rottentomatoes.com, cut to the blocks that matter (see fixtures/). */
+function fixture(name: string): string {
+  return readFileSync(fileURLToPath(new URL(`./fixtures/${name}.html`, import.meta.url)), 'utf8');
+}
+
+/** The smallest JSON-LD block that carries a page's own critics score. */
+function scoreLd(score: number): string {
+  return `<script type="application/ld+json">{"aggregateRating":{"name":"Tomatometer","ratingValue":"${score}"}}</script>`;
+}
+
+const LD_SCRIPT = /<script type="application\/ld\+json">[\s\S]*?<\/script>/;
+const SCORECARD_SCRIPT = /<script\s+id="media-scorecard-json"[\s\S]*?<\/script>/;
+
 describe('parseTomatometer', () => {
-  it('parses tomatometer score from page body', () => {
-    const body = 'some html "tomatometer":91 more html';
-    expect(parseTomatometer(body)).toBe('91%');
+  it.each([
+    ['tv_elementary', '96%'],
+    ['tv_happy_valley', '98%'],
+    ['m_inception', '86%'],
+  ])('reads the page\'s own score from %s, not the trending block', (name, score) => {
+    const page = fixture(name);
+    expect(page).toContain('"tomatometer":{"tomatometer":80');
+    expect(parseTomatometer(page)).toBe(score);
   });
 
-  it('parses nested tomatometer object (e.g. Oppenheimer pattern)', () => {
-    const body = '"tomatometer":{"tomatometer":98}';
-    // First match is the outer key with value starting { — not digits; second is 98
-    // The regex matches the first `"tomatometer":<digits>` pattern, so we need to test
-    // what the actual match produces: the outer `"tomatometer":{"tomatometer":98}` the
-    // first `"tomatometer":` is followed by `{`, not digits — regex won't match.
-    // The second `"tomatometer":98` will match.
-    expect(parseTomatometer(body)).toBe('98%');
+  it('finds no score on the 404 page although its trending block has scores', () => {
+    const page = fixture('m_relay_2025');
+    expect(page).toContain('"tomatometer":{"tomatometer":80');
+    expect(parseTomatometer(page)).toBeNull();
   });
 
-  it('returns null when tomatometer is not present', () => {
-    expect(parseTomatometer('<html>no score here</html>')).toBeNull();
+  it('falls back to the media scorecard when the page has no JSON-LD rating', () => {
+    expect(parseTomatometer(fixture('tv_elementary').replace(LD_SCRIPT, ''))).toBe('96%');
+  });
+
+  it('returns null when the page has neither block', () => {
+    const page = fixture('m_inception').replace(LD_SCRIPT, '').replace(SCORECARD_SCRIPT, '');
+    expect(parseTomatometer(page)).toBeNull();
+  });
+
+  it('returns null when the scorecard shows no critics score yet', () => {
+    const page = '<script id="media-scorecard-json" type="application/json">{"criticsScore":{"scorePercent":""}}</script>';
+    expect(parseTomatometer(page)).toBeNull();
+  });
+
+  it('ignores an aggregateRating that is not the Tomatometer', () => {
+    const page = '<script type="application/ld+json">{"aggregateRating":{"name":"Popcornmeter","ratingValue":"88"}}</script>';
+    expect(parseTomatometer(page)).toBeNull();
+  });
+
+  it('survives malformed JSON in a block', () => {
+    expect(parseTomatometer('<script type="application/ld+json">{not json</script>')).toBeNull();
   });
 
   it('returns null for empty string', () => {
@@ -91,7 +126,7 @@ describe('resolveRtUrl', () => {
     const fetchMock = makeFetch([{
       status: 200,
       url: 'https://www.rottentomatoes.com/m/they_cloned_tyrone',
-      body: '<meta property="og:title" content="They Cloned Tyrone (2023) - Rotten Tomatoes" /> data "tomatometer":91 more',
+      body: `<meta property="og:title" content="They Cloned Tyrone (2023) - Rotten Tomatoes" /> data ${scoreLd(91)} more`,
     }]);
     const result = await resolveRtUrl('They Cloned Tyrone', 2023, 'movie', fetchMock);
     expect(result).toEqual({
@@ -129,7 +164,7 @@ describe('resolveRtUrl', () => {
   it('returns year-suffixed url when first is 404 and second is 200', async () => {
     const fetchMock = makeFetch([
       { status: 404, url: '' },
-      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98' },
+      { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: `<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />${scoreLd(98)}` },
     ]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({
@@ -157,7 +192,7 @@ describe('resolveRtUrl', () => {
   });
 
   it('uses "m" path for movie media type', async () => {
-    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/oppenheimer', body: '"tomatometer":99' }]);
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/oppenheimer', body: `${scoreLd(99)}` }]);
     await resolveRtUrl('Oppenheimer', 2023, 'movie', fetchMock);
     expect(fetchMock).toHaveBeenCalledWith(
       'https://www.rottentomatoes.com/m/oppenheimer',
@@ -209,6 +244,11 @@ describe('parsePageIdentity', () => {
     expect(result.year).toBe(1995);
   });
 
+  it("falls back to the JSON-LD release date when the page has no releaseYear", () => {
+    const body = '<meta property="og:title" content="Blindness | Rotten Tomatoes" /><script type="application/ld+json">{"@type":"Movie","dateCreated":"2003-11-21"}</script>';
+    expect(parsePageIdentity(body).year).toBe(2003);
+  });
+
   it('returns null title when no og:title present', () => {
     expect(parsePageIdentity('<html>no meta</html>').title).toBeNull();
   });
@@ -248,14 +288,14 @@ describe('resolveRtUrl stalled requests', () => {
 
 describe('resolveRtUrl identity verification', () => {
   it('returns verified=true when og:title matches input title and year', async () => {
-    const body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const body = `<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />${scoreLd(98)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
   });
 
   it('returns verified=false with search URL when page title does not match input', async () => {
-    const body = '<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />"tomatometer":60';
+    const body = `<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />${scoreLd(60)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({
@@ -266,7 +306,7 @@ describe('resolveRtUrl identity verification', () => {
   });
 
   it('returns verified=false when page year differs from input by more than 1', async () => {
-    const body = '<meta property="og:title" content="Heat (2010) - Rotten Tomatoes" />"tomatometer":60';
+    const body = `<meta property="og:title" content="Heat (2010) - Rotten Tomatoes" />${scoreLd(60)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({
@@ -277,14 +317,14 @@ describe('resolveRtUrl identity verification', () => {
   });
 
   it('returns verified=true when year is within ±1 tolerance', async () => {
-    const body = '<meta property="og:title" content="Heat (1996) - Rotten Tomatoes" />"tomatometer":98';
+    const body = `<meta property="og:title" content="Heat (1996) - Rotten Tomatoes" />${scoreLd(98)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
   });
 
   it('returns verified=false with search URL when no og:title in page', async () => {
-    const body = '"tomatometer":98';
+    const body = `${scoreLd(98)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', 1995, 'movie', fetchMock);
     expect(result).toEqual({
@@ -295,14 +335,14 @@ describe('resolveRtUrl identity verification', () => {
   });
 
   it('verifies by title only when input year is null (any page year accepted)', async () => {
-    const body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const body = `<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />${scoreLd(98)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/heat', body }]);
     const result = await resolveRtUrl('Heat', null, 'movie', fetchMock);
     expect(result).toEqual({ url: 'https://www.rottentomatoes.com/m/heat', score: '98%', verified: true });
   });
 
   it('verifies case-insensitively and ignores punctuation differences', async () => {
-    const body = '<meta property="og:title" content="Spider-Man: No Way Home (2021) - Rotten Tomatoes" />"tomatometer":90';
+    const body = `<meta property="og:title" content="Spider-Man: No Way Home (2021) - Rotten Tomatoes" />${scoreLd(90)}`;
     const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/spider_man_no_way_home', body }]);
     const result = await resolveRtUrl('Spider-Man: No Way Home', 2021, 'movie', fetchMock);
     expect(result).toEqual({
@@ -314,7 +354,7 @@ describe('resolveRtUrl identity verification', () => {
 
   it('tries year-suffixed url2 when url1 returns 200 but identity mismatches', async () => {
     const url1Body = '<meta property="og:title" content="Heist (2015) - Rotten Tomatoes" />';
-    const url2Body = '<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />"tomatometer":98';
+    const url2Body = `<meta property="og:title" content="Heat (1995) - Rotten Tomatoes" />${scoreLd(98)}`;
     const fetchMock = makeFetch([
       { status: 200, url: 'https://www.rottentomatoes.com/m/heat', body: url1Body },
       { status: 200, url: 'https://www.rottentomatoes.com/m/heat_1995', body: url2Body },
@@ -341,5 +381,48 @@ describe('resolveRtUrl identity verification', () => {
       verified: false,
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── readRtScore ─────────────────────────────────────────────────────────────
+
+describe('readRtScore', () => {
+  const pageUrl = 'https://www.rottentomatoes.com/tv/elementary';
+
+  it('reads the score from a known page in one request', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: pageUrl, body: fixture('tv_elementary') }]);
+    const result = await readRtScore(pageUrl, 'Elementary', 2012, fetchMock);
+    expect(result).toEqual({ verified: true, url: pageUrl, score: '96%' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(pageUrl, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it('reports a verified page with no score as score null', async () => {
+    const body = fixture('m_inception').replace(LD_SCRIPT, '').replace(SCORECARD_SCRIPT, '');
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/inception', body }]);
+    const result = await readRtScore('https://www.rottentomatoes.com/m/inception', 'Inception', 2010, fetchMock);
+    expect(result).toEqual({ verified: true, url: 'https://www.rottentomatoes.com/m/inception', score: null });
+  });
+
+  it('keeps the final URL after a redirect', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: 'https://www.rottentomatoes.com/m/inception_2010', body: fixture('m_inception') }]);
+    const result = await readRtScore('https://www.rottentomatoes.com/m/inception', 'Inception', 2010, fetchMock);
+    expect(result).toEqual({ verified: true, url: 'https://www.rottentomatoes.com/m/inception_2010', score: '86%' });
+  });
+
+  it('is not verified when the page is another title', async () => {
+    const fetchMock = makeFetch([{ status: 200, url: pageUrl, body: fixture('tv_happy_valley') }]);
+    expect(await readRtScore(pageUrl, 'Elementary', 2012, fetchMock)).toEqual({ verified: false });
+  });
+
+  it('is not verified when the page is gone', async () => {
+    const fetchMock = makeFetch([{ status: 404, url: '', body: fixture('m_relay_2025') }]);
+    expect(await readRtScore('https://www.rottentomatoes.com/m/relay_2025', 'Relay', 2025, fetchMock)).toEqual({ verified: false });
+  });
+
+  it('gives no answer when blocked or the request fails', async () => {
+    expect(await readRtScore(pageUrl, 'Elementary', 2012, makeFetch([{ status: 403, url: pageUrl }]))).toBeNull();
+    const failing = vi.fn().mockRejectedValue(new Error('timeout')) as unknown as typeof fetch;
+    expect(await readRtScore(pageUrl, 'Elementary', 2012, failing)).toBeNull();
   });
 });
