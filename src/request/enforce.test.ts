@@ -61,14 +61,25 @@ describe('titleObeys', () => {
     expect(check('thriller', { ...keyworded, media_type: 'movie' }).failed).toEqual(['not Thriller']);
   });
 
-  it('matches terms on word boundaries, tolerating plurals and hyphens, in keywords, title or synopsis', () => {
+  it('matches terms on word boundaries, tolerating plurals and hyphens, in keywords or synopsis', () => {
     const medical = 'Medical dramas';
     const drama = { genres: '["Drama"]' };
     expect(check(medical, { ...drama, keywords: '["hospital"]' }).ok).toBe(true);
     expect(check(medical, { ...drama, synopsis: 'Two surgeons fight for a job.' }).ok).toBe(true);
-    expect(check(medical, { ...drama, title: 'The Nurses' }).ok).toBe(true);
+    expect(check(medical, { ...drama, title: 'The Nurses', keywords: '["nurse"]' }).ok).toBe(true);
     expect(check(medical, { ...drama, synopsis: 'A hospitality worker.' }).failed).toEqual(['not Medical']);
     expect(check('mind bending thriller', { keywords: '["mind-bending"]' }).ok).toBe(true);
+  });
+
+  it('does not take a theme from the title alone', () => {
+    // Live, 2026-11-20: "true story drama after 2020" picked the comedy-horror series of this name.
+    const comedy = {
+      title: 'Based on a True Story', year: 2023, genres: '["Comedy","Drama"]',
+      keywords: '["true crime","podcast","dark comedy"]',
+      synopsis: "The lives of a realtor, a plumber and a former tennis star collide, exposing America's obsession with true crime.",
+    };
+    expect(check('true story drama', comedy).failed).toEqual(['not True story']);
+    expect(check('christmas comedy', { title: 'Santa Clarita Diet', genres: '["Comedy"]' }).ok).toBe(false);
   });
 
   it('matches a term that is the full name of a cast member', () => {
@@ -85,6 +96,7 @@ describe('titleObeys', () => {
     expect(check(text, { ...scary, keywords: '["demonic possession"]' }).failed).toEqual(['excluded: devils']);
     expect(check(text, { ...scary, synopsis: 'A young nun is sent to Rome.' }).failed).toEqual(['excluded: nuns']);
     expect(check(text, { ...scary, synopsis: 'A family moves into a farmhouse.' }).ok).toBe(true);
+    expect(check(text, { ...scary, title: 'The Nun II', synopsis: 'Evil returns.' }).failed).toEqual(['excluded: nuns']);
   });
 
   it('never throws on malformed JSON columns', () => {

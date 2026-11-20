@@ -34,11 +34,12 @@ export function titleObeys(rules: RequestRules, title: CheckableTitle): RuleChec
   if (rules.must.length > 0 || rules.mustNot.length > 0) {
     const facts: TitleFacts = {
       tags: titleTags(title),
-      texts: [...jsonStrings(title.keywords), title.title, title.synopsis ?? ''].map(flatten),
+      texts: [...jsonStrings(title.keywords), title.synopsis ?? ''].map(flatten),
+      name: flatten(title.title),
       cast: jsonStrings(title.cast).map(flatten),
     };
-    for (const c of rules.must) if (!clauseHolds(c, facts)) failed.push(`not ${c.label}`);
-    for (const c of rules.mustNot) if (clauseHolds(c, facts)) failed.push(`excluded: ${c.label}`);
+    for (const c of rules.must) if (!clauseHolds(c, facts, false)) failed.push(`not ${c.label}`);
+    for (const c of rules.mustNot) if (clauseHolds(c, facts, true)) failed.push(`excluded: ${c.label}`);
   }
   return { ok: failed.length === 0, failed };
 }
@@ -90,8 +91,15 @@ function hiddenGemFailure(rules: RequestRules, t: CheckableTitle): string | null
 /** What a clause is checked against, each text lowercased with hyphens as spaces. */
 interface TitleFacts {
   tags: Set<CanonGenre>;
-  /** Each keyword, the title and the synopsis. */
+  /** Each keyword and the synopsis. */
   texts: string[];
+  /**
+   * The title's own name. It counts for an exclusion ("no nuns" keeps out The Nun),
+   * never on its own for a theme that must hold: on the live catalogue most titles
+   * that matched a theme only by name were wrong ("Based on a True Story", a comedy;
+   * "Killers of the Flower Moon" as space; "Santa Clarita Diet" as Christmas).
+   */
+  name: string;
   /** Cast names, matched whole: a term names a person only when it is the full name. */
   cast: string[];
 }
@@ -100,10 +108,11 @@ function flatten(s: string): string {
   return s.toLowerCase().replace(/-/g, ' ');
 }
 
-function clauseHolds(c: RuleClause, facts: TitleFacts): boolean {
+function clauseHolds(c: RuleClause, facts: TitleFacts, nameCounts: boolean): boolean {
   if (c.genres.some((g) => facts.tags.has(g))) return true;
   const re = termPattern(c);
   if (re !== null && facts.texts.some((s) => re.test(s))) return true;
+  if (re !== null && nameCounts && re.test(facts.name)) return true;
   return facts.cast.length > 0 && c.terms.some((t) => facts.cast.includes(flatten(t)));
 }
 
