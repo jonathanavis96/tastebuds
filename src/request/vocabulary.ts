@@ -242,10 +242,20 @@ const GENRE_WORDS: [string, GenreWord][] = [
 /** "Easy watch" means one of these, and never Horror, when the request names no genre. */
 export const EASY_GENRES: CanonGenre[] = ['Comedy', 'Family', 'Romance', 'Animation', 'Adventure'];
 
-const EASY_WORDS = [
-  'easy watch', 'easy watching', 'easy to watch', 'easy', 'casual', 'light', 'light hearted',
-  'lighthearted', 'feel good', 'feelgood', 'cosy', 'cozy', 'comfort', 'comforting', 'chill',
-  'relaxing', 'wholesome', 'heartwarming', 'uplifting',
+/**
+ * Tone words, each with the chip it shows. A tone is a rule: the title may not
+ * be Horror (see parse.ts), and with no genre named it must be one of EASY_GENRES.
+ */
+const EASY_WORDS: [string, string[]][] = [
+  ['Easy watch', ['easy watch', 'easy watching', 'easy to watch', 'easy', 'casual']],
+  ['Light', ['light', 'light hearted', 'lighthearted']],
+  ['Feel-good', ['feel good', 'feelgood']],
+  ['Cosy', ['cosy', 'cozy']],
+  ['Comforting', ['comfort', 'comforting']],
+  ['Relaxing', ['chill', 'relaxing']],
+  ['Wholesome', ['wholesome']],
+  ['Heartwarming', ['heartwarming']],
+  ['Uplifting', ['uplifting']],
 ];
 
 const MEDIA_WORDS: [string, 'movie' | 'tv'][] = [
@@ -283,7 +293,7 @@ const ANY_YEAR_WORDS = [
 export type Entry =
   | ({ kind: 'genre' } & GenreWord)
   | { kind: 'theme'; theme: string }
-  | { kind: 'easy' }
+  | { kind: 'easy'; label: string }
   | { kind: 'media'; media: 'movie' | 'tv' }
   | { kind: 'language'; code: string }
   | { kind: 'rating'; floor: 'good' | 'top' }
@@ -296,7 +306,7 @@ function build(): Map<string, Entry> {
   const add = (words: string[], entry: Entry) => { for (const w of words) map.set(w, entry); };
   for (const [theme, words] of Object.entries(THEME_WORDS)) add(words, { kind: 'theme', theme });
   for (const [w, g] of GENRE_WORDS) map.set(w, { kind: 'genre', ...g });
-  add(EASY_WORDS, { kind: 'easy' });
+  for (const [label, words] of EASY_WORDS) add(words, { kind: 'easy', label });
   for (const [w, media] of MEDIA_WORDS) map.set(w, { kind: 'media', media });
   for (const [w, code] of LANGUAGE_WORDS) map.set(w, { kind: 'language', code });
   add(TOP_RATING_WORDS, { kind: 'rating', floor: 'top' });

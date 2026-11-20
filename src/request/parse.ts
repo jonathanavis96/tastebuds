@@ -48,6 +48,8 @@ interface Reading {
   floor: number | null;
   hiddenGem: boolean;
   easyPos: number | null;
+  /** The chip of the first tone word ("Feel-good", "Cosy"). */
+  easyLabel: string | null;
   genreHits: GenreHit[];
   themes: { key: string; pos: number }[];
   mustNot: RuleClause[];
@@ -88,7 +90,7 @@ function newReading(text: string, cy: number): Reading {
   return {
     cy, work: normalise(text), windows: [], bareYears: [], recency: null, anyYear: false,
     maxRuntime: null, shortFilm: false, minRuntime: null, media: new Set(), notMedia: new Set(),
-    language: null, floor: null, hiddenGem: false, easyPos: null, genreHits: [], themes: [],
+    language: null, floor: null, hiddenGem: false, easyPos: null, easyLabel: null, genreHits: [], themes: [],
     mustNot: [], similarTo: [],
   };
 }
@@ -400,7 +402,7 @@ function applyEntry(e: Entry, toks: Token[], i: number, len: number, r: Reading)
       if (!r.themes.some((t) => t.key === e.theme)) r.themes.push({ key: e.theme, pos: i });
       return;
     case 'easy':
-      r.easyPos ??= i;
+      if (r.easyPos === null) Object.assign(r, { easyPos: i, easyLabel: e.label });
       return;
     case 'media':
       // "show me something" asks for something; it does not say series.
@@ -487,8 +489,14 @@ function assemble(r: Reading, toks: Token[], now: Date): RequestRules {
   const rules = defaultRules(now);
   const placed = genreClauses(r.genreHits, toks);
   const mustNot = [...r.mustNot];
-  if (placed.length === 0 && r.easyPos !== null) {
-    placed.push({ pos: r.easyPos, noun: false, clause: { label: 'Easy watch', genres: [...EASY_GENRES], terms: [] } });
+  // A tone word ("feel-good", "light", "cosy") is a rule: never Horror, and with
+  // no genre named, one of the easy genres. "Cosy horror" asks for horror, so
+  // there the word only steers the ordering.
+  const tone = r.easyPos !== null && r.easyLabel !== null && !placed.some((p) => p.clause.genres.includes('Horror'))
+    ? r.easyLabel
+    : null;
+  if (tone !== null && r.easyPos !== null) {
+    if (placed.length === 0) placed.push({ pos: r.easyPos, noun: false, clause: { label: tone, genres: [...EASY_GENRES], terms: [] } });
     if (!mustNot.some((c) => c.genres.includes('Horror'))) mustNot.push({ label: 'horror', genres: ['Horror'], terms: [] });
   }
   const theme = themeClause(r.themes);
@@ -503,6 +511,7 @@ function assemble(r: Reading, toks: Token[], now: Date): RequestRules {
   rules.language = r.language;
   rules.hiddenGem = r.hiddenGem;
   rules.similarTo = r.similarTo;
+  rules.tone = tone;
   return rules;
 }
 

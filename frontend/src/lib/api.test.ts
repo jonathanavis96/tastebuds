@@ -66,6 +66,12 @@ describe('generateRecommendations', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('shows the server’s own words when it could not read the request', async () => {
+    const error = '“zzv” could not be read, so no picks were made. Try something like “like Inception”.';
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error }), { status: 422 }));
+    await expect(generateRecommendations({ profileId: 1, request: 'zzv' })).rejects.toThrow(error);
+  });
+
   it('gives the wait in seconds when it is under a minute', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '40' } }));
     await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow('Try again in 40 seconds.');

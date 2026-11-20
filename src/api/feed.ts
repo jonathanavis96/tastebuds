@@ -13,6 +13,7 @@ import { getTitleById } from '../db/repos/titles.js';
 import { defaultHardFilters, floorFilters, languagesFromHistory, titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import { titleTags } from '../request/tags.js';
 import type { RequestSummary } from '../request/rules.js';
+import { fittingCategory } from '../curation/categoryFit.js';
 
 /** One request's picks in the list, or (text null) the picks made without one. */
 export interface FeedSection {
@@ -79,6 +80,8 @@ export function enrichRec(db: Database, { request_summary: _summary, ...rec }: R
   const we = getWatchEvent(db, rec.profile_id, rec.title_id);
   return {
     ...rec,
+    // A label the title does not earn is replaced by the plain one (see fittingCategory).
+    category: t && rec.category ? fittingCategory(rec.category, t, rec.request_text ? 'Based on your request' : 'Top pick') : rec.category,
     rule_note: rec.rule_note ?? null,
     we_status: we?.status ?? null,
     rating: we?.rating ?? null,

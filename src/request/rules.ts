@@ -81,6 +81,11 @@ export interface RequestRules {
   hiddenGem: boolean;
   /** Titles named as a reference ("like Inception"). Used for ordering, never as a filter. */
   similarTo: string[];
+  /**
+   * The tone asked for ("Feel-good", "Light", "Cosy"), shown as a chip. It is
+   * enforced through `must`/`mustNot` (never Horror), not by this label.
+   */
+  tone: string | null;
 }
 
 /** With no year in the request, picks come from this many years back, counting the current one. */
@@ -112,6 +117,7 @@ export function defaultRules(now: Date = new Date()): RequestRules {
     language: null,
     hiddenGem: false,
     similarTo: [],
+    tone: null,
   };
 }
 

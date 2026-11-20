@@ -38,6 +38,16 @@ describe('RequestSummary (the heading of one request’s section)', () => {
     expect(getByText('7 titles match, all in your list')).toBeTruthy();
   });
 
+  it('names the older picks apart from the matches instead of counting them in', () => {
+    const { getByText } = render(RequestSummary, { text: 'thriller series', summary: makeSummary({ matched: 1 }), shown: 4, older: 3 });
+    expect(getByText('1 title matches and is in your list, plus 3 older picks')).toBeTruthy();
+  });
+
+  it('counts the recent picks only when older ones were added', () => {
+    const { getByText } = render(RequestSummary, { text: 'thriller series', summary: makeSummary({ matched: 6 }), shown: 7, older: 1 });
+    expect(getByText('6 titles match, all in your list, plus 1 older pick')).toBeTruthy();
+  });
+
   it('shows the server’s note, such as every match already being in the list', () => {
     const note = 'All 7 titles that match this are already in your list. Asking for a lower IMDb rating would show more.';
     const { getByText } = render(RequestSummary, { text: 'Thriller new 2025', summary: makeSummary({ matched: 7, note }), shown: 7 });

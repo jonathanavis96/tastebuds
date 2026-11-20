@@ -81,8 +81,18 @@ export async function generateRecommendations(opts: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts),
   });
+  if (res.status === 422) throw new Error(await serverMessage(res));
   if (!res.ok) throw new Error(generateFailureMessage(res));
   return res.json();
+}
+
+/** A request the server could not read: its reply says so and gives examples. */
+async function serverMessage(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body.error === 'string' && body.error) return body.error;
+  } catch { /* fall through */ }
+  return 'That request could not be read, so no picks were made. Try naming a genre, a year or a title it should be like.';
 }
 
 /**

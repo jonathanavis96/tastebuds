@@ -546,7 +546,8 @@
       {/if}
     {:else}
       {#each visibleSections as section (section.text ?? '')}
-        <RequestSummary text={section.text} summary={section.summary} shown={section.recs.length} />
+        <!-- A rule note is written only on an older pick added for a request (generate.ts olderPickNote). -->
+        <RequestSummary text={section.text} summary={section.summary} shown={section.recs.length} older={section.recs.filter(r => r.rule_note).length} />
         {#if section.recs.length > 0}
           <PosterFeed recommendations={section.recs} dismissedIds={dismissedRecIds} onOpen={openRec} />
         {/if}
