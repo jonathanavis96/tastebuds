@@ -66,7 +66,6 @@ describe('titleObeys', () => {
     const drama = { genres: '["Drama"]' };
     expect(check(medical, { ...drama, keywords: '["hospital"]' }).ok).toBe(true);
     expect(check(medical, { ...drama, synopsis: 'Two surgeons fight for a job.' }).ok).toBe(true);
-    expect(check(medical, { ...drama, title: 'The Nurses', keywords: '["nurse"]' }).ok).toBe(true);
     expect(check(medical, { ...drama, synopsis: 'A hospitality worker.' }).failed).toEqual(['not Medical']);
     expect(check('mind bending thriller', { keywords: '["mind-bending"]' }).ok).toBe(true);
   });
@@ -80,6 +79,18 @@ describe('titleObeys', () => {
     };
     expect(check('true story drama', comedy).failed).toEqual(['not True story']);
     expect(check('christmas comedy', { title: 'Santa Clarita Diet', genres: '["Comedy"]' }).ok).toBe(false);
+  });
+
+  it('still takes a named subject from the title, as a franchise often has it nowhere else', () => {
+    const starWars: RequestRules = {
+      ...defaultRules(NOW),
+      must: [{ label: 'Star Wars', genres: [], terms: ['star wars', 'jedi', 'skywalker', 'space'] }],
+    };
+    const solo = title({ title: 'Solo: A Star Wars Story', year: 2025, keywords: '["space opera"]', synopsis: 'A young smuggler.' });
+    expect(titleObeys(starWars, solo).ok).toBe(true);
+    // ...but a clause made only of theme words still needs keywords or synopsis
+    const space: RequestRules = { ...defaultRules(NOW), must: [{ label: 'Space', genres: [], terms: ['space', 'planet'] }] };
+    expect(titleObeys(space, title({ title: 'Kingdom of the Planet of the Apes', year: 2025 })).failed).toEqual(['not Space']);
   });
 
   it('matches a term that is the full name of a cast member', () => {

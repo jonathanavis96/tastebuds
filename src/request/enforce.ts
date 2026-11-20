@@ -3,6 +3,7 @@ import { HIDDEN_GEM_MAX_IMDB_VOTES } from './rules.js';
 import type { CanonGenre, RequestRules, RuleClause } from './rules.js';
 import { describeRuntime, describeYearWindow, languageName } from './describe.js';
 import { jsonStrings, titleTags } from './tags.js';
+import { THEMES } from './vocabulary.js';
 
 export type CheckableTitle = Pick<
   TitleRow,
@@ -38,7 +39,7 @@ export function titleObeys(rules: RequestRules, title: CheckableTitle): RuleChec
       name: flatten(title.title),
       cast: jsonStrings(title.cast).map(flatten),
     };
-    for (const c of rules.must) if (!clauseHolds(c, facts, false)) failed.push(`not ${c.label}`);
+    for (const c of rules.must) if (!clauseHolds(c, facts, namesASubject(c))) failed.push(`not ${c.label}`);
     for (const c of rules.mustNot) if (clauseHolds(c, facts, true)) failed.push(`excluded: ${c.label}`);
   }
   return { ok: failed.length === 0, failed };
@@ -94,10 +95,12 @@ interface TitleFacts {
   /** Each keyword and the synopsis. */
   texts: string[];
   /**
-   * The title's own name. It counts for an exclusion ("no nuns" keeps out The Nun),
-   * never on its own for a theme that must hold: on the live catalogue most titles
-   * that matched a theme only by name were wrong ("Based on a True Story", a comedy;
-   * "Killers of the Flower Moon" as space; "Santa Clarita Diet" as Christmas).
+   * The title's own name. It counts for an exclusion ("no nuns" keeps out The Nun)
+   * and for a named subject ("Star Wars": Solo: A Star Wars Story has only "space
+   * opera" in its keywords), never on its own for one of the built-in themes: on the
+   * live catalogue most titles that matched a theme only by name were wrong ("Based
+   * on a True Story", a comedy; "Killers of the Flower Moon" as space; "Santa Clarita
+   * Diet" as Christmas).
    */
   name: string;
   /** Cast names, matched whole: a term names a person only when it is the full name. */
@@ -106,6 +109,18 @@ interface TitleFacts {
 
 function flatten(s: string): string {
   return s.toLowerCase().replace(/-/g, ' ');
+}
+
+/** Every term of the built-in themes (space, time, true story, christmas, ...). */
+const THEME_TERMS = new Set(Object.values(THEMES).flatMap((t) => t.terms.map(flatten)));
+
+/**
+ * Whether a must-clause names a particular thing (a franchise, a character, a
+ * place) rather than one of the built-in themes: some of its words are not theme
+ * words. Only then may a title's name satisfy it.
+ */
+function namesASubject(c: RuleClause): boolean {
+  return c.terms.some((t) => !THEME_TERMS.has(flatten(t)));
 }
 
 function clauseHolds(c: RuleClause, facts: TitleFacts, nameCounts: boolean): boolean {
