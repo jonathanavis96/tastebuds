@@ -8,14 +8,23 @@
     summary: RequestSummary | null;
     /** How many of this request's picks are on screen. */
     shown: number;
+    /** How many of those are older titles added because too few recent ones matched (they carry a rule note). */
+    older?: number;
   }
 
-  let { text, summary, shown }: Props = $props();
+  let { text, summary, shown, older = 0 }: Props = $props();
 
-  function matchLine(matched: number, count: number): string {
+  /**
+   * "13 titles match, 10 in your list". The older picks added when too few recent
+   * titles matched are not among the matches, so they are named apart:
+   * "1 title matches and is in your list, plus 3 older picks".
+   */
+  function matchLine(matched: number, shown: number, older: number): string {
+    const count = Math.max(0, shown - older);
     const total = matched === 1 ? '1 title matches' : `${matched.toLocaleString()} titles match`;
-    if (count === 0) return total;
-    return count >= matched ? `${total}, all in your list` : `${total}, ${count} in your list`;
+    const inList = count === 0 ? '' : count < matched ? `, ${count} in your list` : matched === 1 ? ' and is in your list' : ', all in your list';
+    const extra = older > 0 ? `, plus ${older} older ${older === 1 ? 'pick' : 'picks'}` : '';
+    return `${total}${inList}${extra}`;
   }
 </script>
 
@@ -31,7 +40,7 @@
         {#each summary.understood as rule}<li class="chip">{rule}</li>{/each}
       </ul>
     {/if}
-    {#if summary.matched > 0}<p class="count">{matchLine(summary.matched, shown)}</p>{/if}
+    {#if summary.matched > 0}<p class="count">{matchLine(summary.matched, shown, older)}</p>{/if}
     {#if summary.note}
       <p class="note" class:none={summary.matched === 0}>{summary.note}</p>
     {:else if summary.matched === 0}
