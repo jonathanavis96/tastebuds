@@ -23,6 +23,7 @@ import {
   MIGRATE_015_DROP_SCRAPED_RT,
   MIGRATE_016_REQUEST_SUMMARY,
   MIGRATE_016_ARCHIVE_PENDING,
+  MIGRATE_017_IMDB_GAP_CHECKS,
 } from './schema.js';
 
 export function runMigrations(db: InstanceType<typeof Database>): void {
@@ -166,6 +167,9 @@ export function runMigrations(db: InstanceType<typeof Database>): void {
     const addsRequestSummary = !recColNames16.includes('request_summary');
     addMissingColumns(db, MIGRATE_016_REQUEST_SUMMARY, recColNames16);
     if (addsRequestSummary) db.exec(MIGRATE_016_ARCHIVE_PENDING);
+
+    // Migration 017: IMDb gap-fill lookups (idempotent via IF NOT EXISTS).
+    db.exec(MIGRATE_017_IMDB_GAP_CHECKS);
   })();
 }
 

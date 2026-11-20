@@ -9,6 +9,7 @@ import { upsertTitle } from '../db/repos/titles.js';
 import {
   applyCachedImdbRatings,
   imdbRatingsPath,
+  readRatedTitles,
   syncImdbGenres,
   syncImdbRatings,
   IMDB_BASICS_URL,
@@ -230,7 +231,7 @@ describe('syncImdbGenres', () => {
 
     const result = await syncImdbGenres(db, fetchMock as unknown as typeof fetch);
 
-    expect(result).toEqual({ updated: 2 });
+    expect(result).toEqual({ updated: 2, read: new Map() });
     expect(fetchMock).toHaveBeenCalledWith(IMDB_BASICS_URL, expect.anything());
     const rows = db.prepare('SELECT tmdb_id, imdb_genres FROM titles ORDER BY tmdb_id').all();
     expect(rows).toEqual([
@@ -240,12 +241,50 @@ describe('syncImdbGenres', () => {
       { tmdb_id: 4, imdb_genres: null },
     ]);
 
-    expect(await syncImdbGenres(db, fetchMock as unknown as typeof fetch)).toEqual({ updated: 0 });
+    expect((await syncImdbGenres(db, fetchMock as unknown as typeof fetch)).updated).toBe(0);
+  });
+
+  it('returns the basics rows of the uncatalogued ids asked for, in the same pass', async () => {
+    const db = createTestDb();
+    insertTitle(db, 1, 'tt0000001');
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(gzResponse(BASICS_TSV)));
+
+    const result = await syncImdbGenres(db, fetchMock as unknown as typeof fetch, new Set(['tt0000003', 'tt8888888', 'tt0000001']));
+
+    expect(result.updated).toBe(1);
+    expect(result.read).toEqual(new Map([
+      ['tt0000003', { titleType: 'movie', startYear: 2022, genres: [] }],
+      ['tt8888888', { titleType: 'movie', startYear: 2022, genres: ['Comedy'] }],
+    ]));
   });
 
   it('fails on an HTTP error', async () => {
     const db = createTestDb();
     const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 500 }));
     await expect(syncImdbGenres(db, fetchMock as unknown as typeof fetch)).rejects.toThrow('HTTP 500');
+  });
+});
+
+describe('readRatedTitles', () => {
+  let dir: string;
+  let config: { dbPath: string };
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'tastebuds-rated-'));
+    config = { dbPath: join(dir, 'tastebuds.db') };
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('lists the titles at both floors, minus the ones to skip', async () => {
+    const path = imdbRatingsPath(config);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, gzipSync(Buffer.from(RATINGS_TSV)));
+
+    const rated = await readRatedTitles(config, 6.0, 500, new Set(['tt0000003']));
+
+    expect(rated).toEqual(new Map([['tt0000001', { rating: '7.4', votes: 2500 }]]));
+  });
+
+  it('is empty when there is no ratings file yet', async () => {
+    expect((await readRatedTitles(config, 6.0, 500, new Set())).size).toBe(0);
   });
 });

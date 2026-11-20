@@ -64,24 +64,39 @@ function titleColumns(db: InstanceType<typeof Database>): string {
  * clauses, and only the rows that pass are ranked.
  */
 export function titlesObeying(db: InstanceType<typeof Database>, rules: RequestRules, q: RulesQuery): CandidateTitle[] {
+  const passing = candidateRows(db, rules, q, null).filter((r) => titleObeys(rules, r).ok);
+  return rerank(passing, q.affinity, new Set(), REQUEST_WEIGHTS).map(({ rank_score: _r, ...rest }) => rest as unknown as CandidateTitle);
+}
+
+/**
+ * How many of `ids` titlesObeying would return under the same rules and query:
+ * the titles already in the list that match. Reads only those rows.
+ */
+export function countObeying(db: InstanceType<typeof Database>, rules: RequestRules, q: RulesQuery, ids: number[]): number {
+  if (ids.length === 0) return 0;
+  return candidateRows(db, rules, q, ids).filter((r) => titleObeys(rules, r).ok).length;
+}
+
+/** The rows the column checks admit, with their distance to the query; only `onlyIds` when given. */
+function candidateRows(db: InstanceType<typeof Database>, rules: RequestRules, q: RulesQuery, onlyIds: number[] | null): CandidateTitle[] {
   const hard = hardFilterSql({ ...q.hardFilters, minYear: null });
   const own = rulesSql(rules);
-  const rows = db.prepare(`
+  const only = onlyIds === null ? { sql: '', params: [] } : { sql: ' AND t.id IN (SELECT value FROM json_each(?))', params: [JSON.stringify(onlyIds)] };
+  return db.prepare(`
     SELECT ${titleColumns(db)}, NULL AS embedding, vec_distance_cosine(t.embedding, ?) AS score
     FROM titles t
     WHERE t.embedding IS NOT NULL
       AND t.id NOT IN (SELECT title_id FROM watch_events WHERE profile_id IN (SELECT value FROM json_each(?)))
       AND t.id NOT IN (SELECT value FROM json_each(?))
-      ${hard.sql}${own.sql}
+      ${hard.sql}${own.sql}${only.sql}
   `).all(
     q.queryVec,
     JSON.stringify(q.vetoProfileIds),
     JSON.stringify(q.excludeTitleIds),
     ...hard.params,
     ...own.params,
+    ...only.params,
   ) as CandidateTitle[];
-  const passing = rows.filter((r) => titleObeys(rules, r).ok);
-  return rerank(passing, q.affinity, new Set(), REQUEST_WEIGHTS).map(({ rank_score: _r, ...rest }) => rest as unknown as CandidateTitle);
 }
 
 export interface RulesRetrieval {

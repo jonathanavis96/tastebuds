@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { DiscoverOpts, IdMatch, TmdbTitle, TmdbTitleDetail } from './types.js';
+import type { DiscoverOpts, IdMatch, TmdbFindResult, TmdbTitle, TmdbTitleDetail } from './types.js';
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 /** Per call: harvest and /generate loop over these, so a stall must fail fast. */
@@ -108,4 +108,13 @@ export async function searchTitles(
   const url = `${TMDB_BASE}/search/${mediaType}?api_key=${config.tmdbApiKey}&query=${encodeURIComponent(query)}${yearParam}`;
   const data = await tmdbFetch<{ results: TmdbTitle[] }>(url);
   return data.results;
+}
+
+/** The TMDB films and series that carry an IMDb id (tt…). */
+export async function findByImdbId(
+  imdbId: string,
+  config: Pick<Config, 'tmdbApiKey'>,
+): Promise<TmdbFindResult> {
+  const url = `${TMDB_BASE}/find/${encodeURIComponent(imdbId)}?api_key=${config.tmdbApiKey}&external_source=imdb_id`;
+  return tmdbFetch<TmdbFindResult>(url);
 }

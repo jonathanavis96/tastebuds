@@ -11,7 +11,8 @@ import { runHarvest } from './harvest.js';
 import { backfillRatings } from './backfillRatings.js';
 import { backfillTitleMeta } from './backfillMeta.js';
 import { fillMissingImdbIds, IMDB_ID_FILL_CAP_DEFAULT } from '../imdb/fillIds.js';
-import { syncImdbGenres, syncImdbRatings } from '../imdb/dataset.js';
+import { syncImdbRatings } from '../imdb/dataset.js';
+import { fillImdbGaps } from '../imdb/gapFill.js';
 import { refreshRtScores } from '../rt/refresh.js';
 
 /** Run one nightly step and log its result; a failing step never stops the next one. */
@@ -27,7 +28,8 @@ async function runStep(label: string, step: () => Promise<unknown>): Promise<voi
  * The nightly run, in order: harvest new titles, find missing imdb_ids, make
  * IMDb ratings match IMDb's ratings file, ask OMDb about titles it has never
  * seen (Rotten Tomatoes for films), re-read Rotten Tomatoes pages, then TMDB
- * metadata. IMDb genres are re-read on the 1st of each month (a 230 MB file).
+ * metadata. On Sundays (UTC) IMDb's basics file (230 MB) is read for genres and
+ * for well-rated titles the catalogue lacks, which are added (src/imdb/gapFill.ts).
  */
 export async function runNightly(
   db: InstanceType<typeof Database>,
@@ -37,7 +39,7 @@ export async function runNightly(
   await runStep('Harvest', () => runHarvest(db, config));
   await runStep('IMDb id fill', () => fillMissingImdbIds(db, config, { cap: IMDB_ID_FILL_CAP_DEFAULT }));
   await runStep('IMDb ratings sync', () => syncImdbRatings(db, config));
-  if (today.getUTCDate() === 1) await runStep('IMDb genres sync', () => syncImdbGenres(db));
+  if (today.getUTCDay() === 0) await runStep('IMDb genres and gap fill', () => fillImdbGaps(db, config));
   await runStep('Ratings backfill', () =>
     backfillRatings(db, config, { dailyCap: config.ratingsBackfillCap ?? RATINGS_BACKFILL_CAP_DEFAULT }),
   );
