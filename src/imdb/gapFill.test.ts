@@ -146,7 +146,40 @@ describe('fillImdbGaps', () => {
     const result = await fillImdbGaps(db, config, { now: NOW, deps });
 
     expect(result.outcomes).toEqual({ error: 4 });
+    expect(result.stopped).toBeNull();
     expect(db.prepare('SELECT COUNT(*) AS n FROM imdb_gap_checks').get()).toEqual({ n: 0 });
+  });
+
+  it('takes out a title whose embedding failed and records no check, so the next run adds it whole', async () => {
+    deps.embedText = vi.fn().mockRejectedValue(new Error('Ollama is down'));
+
+    const result = await fillImdbGaps(db, config, { now: NOW, deps });
+
+    expect(result.outcomes.error).toBe(1);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM titles WHERE tmdb_id = 101').get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM imdb_gap_checks WHERE imdb_id = 'tt0000001'").get()).toEqual({ n: 0 });
+  });
+
+  it('stops after 20 failed lookups in a row', async () => {
+    const many = ['tconst\taverageRating\tnumVotes', ...Array.from({ length: 40 }, (_, i) => `tt1${String(i).padStart(6, '0')}\t7.0\t${5000 + i}`)];
+    const basics = [BASICS_TSV.split('\n')[0], ...Array.from({ length: 40 }, (_, i) => `tt1${String(i).padStart(6, '0')}\tmovie\tM\tM\t0\t2023\t\\N\t90\tDrama`)];
+    writeFileSync(imdbRatingsPath(config), gzipSync(Buffer.from(many.join('\n') + '\n')));
+    deps.fetchImpl = vi.fn().mockImplementation(async () => new Response(gzipSync(Buffer.from(basics.join('\n') + '\n'))));
+    deps.findByImdbId.mockImplementation(async () => { throw new Error('TMDB request failed with HTTP 503'); });
+
+    const result = await fillImdbGaps(db, config, { now: NOW, deps });
+
+    expect(result.candidates).toBe(40);
+    expect(result.stopped).toBe('20 lookups in a row failed');
+    expect(deps.findByImdbId.mock.calls.length).toBeLessThan(24); // the 4 workers finish what they started
+  });
+
+  it('does not start a second run while one is going', async () => {
+    const first = fillImdbGaps(db, config, { now: NOW, deps });
+    const second = await fillImdbGaps(db, config, { now: NOW, deps });
+    await first;
+
+    expect(second.stopped).toBe('another run is in progress');
   });
 
   it('looks up the most-voted titles first, at most cap of them', async () => {
