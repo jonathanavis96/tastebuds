@@ -47,8 +47,8 @@ describe('ratingsStartupDue', () => {
     utimesSync(path, when, when);
   }
 
-  it('syncs ratings when the file is missing, and genres when no title has any', async () => {
-    expect(await ratingsStartupDue(db, config)).toEqual({ ratings: true, genres: true });
+  it('syncs ratings when the file is missing, and reads basics when no title has genres', async () => {
+    expect(await ratingsStartupDue(db, config)).toEqual({ ratings: true, basics: true });
   });
 
   it('syncs ratings only when the file is older than 36 hours', async () => {
@@ -58,8 +58,10 @@ describe('ratingsStartupDue', () => {
     expect((await ratingsStartupDue(db, config)).ratings).toBe(true);
   });
 
-  it('skips genres once any title has them', async () => {
+  it('reads basics until the gap fill has run once, even when titles have genres', async () => {
     db.prepare(`UPDATE titles SET imdb_genres = '["Drama"]'`).run();
-    expect((await ratingsStartupDue(db, config)).genres).toBe(false);
+    expect((await ratingsStartupDue(db, config)).basics).toBe(true);
+    db.prepare(`INSERT INTO imdb_gap_checks (imdb_id, outcome, checked_at) VALUES ('tt1', 'added', 1)`).run();
+    expect((await ratingsStartupDue(db, config)).basics).toBe(false);
   });
 });

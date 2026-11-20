@@ -1,9 +1,9 @@
 /**
  * CLI entry point for `npm run backfill:meta`. Fills TMDB metadata
  * (original_language, runtime_minutes, vote_average, status) for catalogue
- * titles that have never had it fetched — useful for a one-off manual sweep
- * of the whole ~17.8k pre-existing catalogue outside the nightly cron/startup
- * kick.
+ * titles that have never had it fetched, and reads it again for recent titles
+ * whose last read is a week old — the same job as the nightly cron and startup
+ * kick, run by hand.
  */
 import { config as dotenvConfig } from 'dotenv';
 import { loadConfig, META_BACKFILL_CAP_DEFAULT } from '../config.js';

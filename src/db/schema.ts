@@ -247,3 +247,15 @@ export const MIGRATE_016_REQUEST_SUMMARY = [
 export const MIGRATE_016_ARCHIVE_PENDING = `
   UPDATE recommendations SET state = 'shown' WHERE state = 'pending'
 `;
+
+// Migration 017: IMDb titles the gap fill (src/imdb/gapFill.ts) has looked up on
+// TMDB, so the weekly run does not ask about the same ones again. outcome is
+// 'added', 'in-catalogue', 'not-on-tmdb' or 'language:<code>'; an id is asked
+// about again once its check is old enough (TMDB links and household languages change).
+export const MIGRATE_017_IMDB_GAP_CHECKS = `
+  CREATE TABLE IF NOT EXISTS imdb_gap_checks (
+    imdb_id     TEXT PRIMARY KEY,
+    outcome     TEXT NOT NULL,
+    checked_at  INTEGER NOT NULL
+  )
+`;

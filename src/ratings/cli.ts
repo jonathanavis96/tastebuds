@@ -2,6 +2,7 @@
  * Run one ratings job by hand:
  *   npm run ratings:sync                 IMDb ratings from IMDb's ratings file
  *   npm run ratings:genres               IMDb genres from IMDb's basics file (230 MB)
+ *   npm run ratings:gaps -- --cap 500    the same pass, plus adding well-rated titles the catalogue lacks
  *   npm run ratings:rt -- --cap 30       re-read Rotten Tomatoes pages
  *   npm run ratings:imdb-ids -- --cap 50 fill missing imdb_id values from TMDB
  * In the container: node dist/server/ratings/cli.js <job> [--cap N]
@@ -11,9 +12,10 @@ import { loadConfig, RT_REFRESH_CAP_DEFAULT } from '../config.js';
 import { openDb } from '../db/open.js';
 import { syncImdbGenres, syncImdbRatings } from '../imdb/dataset.js';
 import { fillMissingImdbIds, IMDB_ID_FILL_CAP_DEFAULT } from '../imdb/fillIds.js';
+import { fillImdbGaps } from '../imdb/gapFill.js';
 import { refreshRtScores } from '../rt/refresh.js';
 
-const JOBS = ['sync', 'genres', 'rt', 'imdb-ids'] as const;
+const JOBS = ['sync', 'genres', 'gaps', 'rt', 'imdb-ids'] as const;
 type Job = (typeof JOBS)[number];
 
 function capArg(args: string[]): number | undefined {
@@ -41,7 +43,10 @@ async function main(): Promise<void> {
       result = await syncImdbRatings(db, config);
       break;
     case 'genres':
-      result = await syncImdbGenres(db);
+      result = { updated: (await syncImdbGenres(db)).updated };
+      break;
+    case 'gaps':
+      result = await fillImdbGaps(db, config, { cap });
       break;
     case 'rt':
       result = await refreshRtScores(db, { cap: cap ?? config.rtRefreshCap ?? RT_REFRESH_CAP_DEFAULT });

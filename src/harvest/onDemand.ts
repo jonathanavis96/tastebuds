@@ -86,7 +86,7 @@ export async function resolveKeywordId(
   return id;
 }
 
-interface Candidate {
+export interface Candidate {
   tmdbId: number;
   mediaType: 'movie' | 'tv';
 }
@@ -96,11 +96,11 @@ interface Candidate {
  * null when it could not be fetched (the reason is added to `errors`). A failed
  * embedding still stores the title, without a vector.
  */
-async function ingestTitle(
+export async function ingestTitle(
   db: InstanceType<typeof Database>,
   { tmdbId, mediaType }: Candidate,
-  config: Config,
-  deps: OnDemandDeps,
+  config: Pick<Config, 'tmdbApiKey' | 'ollamaUrl'>,
+  deps: Pick<OnDemandDeps, 'getTitleDetails' | 'embedText'>,
   errors: string[],
 ): Promise<number | null> {
   try {

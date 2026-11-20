@@ -35,6 +35,18 @@ export interface TmdbTitleDetail extends TmdbTitle {
   status?: string;
 }
 
+/** One title from TMDB's /find by IMDb id. */
+export interface TmdbFound {
+  id: number;
+  original_language?: string;
+}
+
+/** TMDB's /find answer for an IMDb id: the films and series that carry it. */
+export interface TmdbFindResult {
+  movie_results: TmdbFound[];
+  tv_results: TmdbFound[];
+}
+
 /** 'all': a title must carry every id (TMDB comma). 'any': one of them is enough (TMDB pipe). */
 export type IdMatch = 'all' | 'any';
 

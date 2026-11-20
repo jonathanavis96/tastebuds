@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import * as sqliteVec from 'sqlite-vec';
 import { runMigrations } from '../db/migrate.js';
 import { upsertTitle, getTitleById, getTitleByTmdbId } from '../db/repos/titles.js';
-import { backfillTitleMeta } from './backfillMeta.js';
+import { backfillTitleMeta, META_REFRESH_DAYS } from './backfillMeta.js';
 import type { TmdbTitleDetail } from '../tmdb/types.js';
 
 const mockConfig = { tmdbApiKey: 'test-key' };
@@ -169,5 +169,31 @@ describe('backfillTitleMeta', () => {
 
     const updated = getTitleById(db, title.id)!;
     expect(updated.vote_count).toBe(500);
+  });
+
+  it('reads a recent title again once its last read is META_REFRESH_DAYS old, oldest read first', async () => {
+    const db = createTestDb();
+    const now = new Date('2026-11-20T12:00:00Z');
+    const nowSec = Math.floor(now.getTime() / 1000);
+    const day = 86_400;
+    for (const [tmdbId, year, readDaysAgo] of [
+      [30, 2026, 60], // stored before release, read in September: read again
+      [31, 2021, META_REFRESH_DAYS + 1], // first year of the recent window: read again
+      [32, 2026, META_REFRESH_DAYS - 1], // read this week: left alone
+      [33, 2020, 300], // before the recent window: left alone
+    ]) {
+      insertTitle(db, { tmdbId });
+      db.prepare('UPDATE titles SET year = ?, meta_checked_at = ?, status = ?, vote_count = 3 WHERE tmdb_id = ?')
+        .run(year, nowSec - readDaysAgo * day, 'Post Production', tmdbId);
+    }
+    insertTitle(db, { tmdbId: 34 }); // never read: first
+
+    const fetchDetail = vi.fn().mockResolvedValue(baseDetail());
+    await backfillTitleMeta(db, mockConfig, { cap: 10, concurrency: 1, fetchDetail, now });
+
+    expect(fetchDetail.mock.calls.map((c) => c[0])).toEqual([34, 30, 31]);
+    const refreshed = getTitleByTmdbId(db, 30, 'movie')!;
+    expect(refreshed.status).toBe('Released');
+    expect(refreshed.vote_count).toBe(1000);
   });
 });

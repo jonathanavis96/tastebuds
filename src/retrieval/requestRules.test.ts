@@ -9,6 +9,7 @@ import { defaultHardFilters } from './filters.js';
 import { defaultRules, type RequestRules, type RuleClause } from '../request/rules.js';
 import { titleObeys } from '../request/enforce.js';
 import {
+  countObeying,
   findReferenceTitles,
   olderRoom,
   requestSlate,
@@ -71,6 +72,25 @@ function query(o: Partial<RulesQuery> = {}): RulesQuery {
 }
 
 const titles = (rows: Array<{ title: string }>) => rows.map(r => r.title).sort();
+
+describe('countObeying', () => {
+  it('counts the given titles that titlesObeying would return, and only those', () => {
+    const db = createDb();
+    const a = seed(db, 'Listed Thriller A');
+    const b = seed(db, 'Listed Thriller B');
+    const comedy = seed(db, 'Listed Comedy', { genres: '["Comedy"]' });
+    const old = seed(db, 'Listed Old Thriller', { year: 1995 });
+    const dismissed = seed(db, 'Dismissed Thriller');
+    seed(db, 'Unlisted Thriller');
+    const r = rules({ must: [genre('Thriller')] });
+    const q = query({ excludeTitleIds: [dismissed] });
+
+    expect(countObeying(db, r, q, [a, b, comedy, old, dismissed])).toBe(2);
+    expect(countObeying(db, r, q, [])).toBe(0);
+    const all = titlesObeying(db, r, q).map(t => t.id);
+    expect([a, b].every(id => all.includes(id))).toBe(true);
+  });
+});
 
 describe('titlesObeying', () => {
   it('returns only titles that satisfy every rule, each passing titleObeys', () => {

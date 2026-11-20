@@ -45,7 +45,7 @@ interface CatalogueRow {
   imdb_votes: number | null;
 }
 
-interface ImdbRating {
+export interface ImdbRating {
   rating: string;
   votes: number;
 }
@@ -119,14 +119,26 @@ export async function applyCachedImdbRatings(
   return listed.length;
 }
 
+/** One title's row in IMDb's basics file, as the gap fill needs it. */
+export interface ImdbBasicsRow {
+  /** IMDb's titleType: movie, tvSeries, tvMiniSeries, short, tvEpisode, … */
+  titleType: string;
+  startYear: number | null;
+  /** IMDb's genre names ("Crime", "Sci-Fi"); at most three, alphabetical. */
+  genres: string[];
+}
+
 /**
  * Stream IMDb's title.basics file (about 230 MB, not kept) and store each
- * catalogue title's IMDb genres in imdb_genres. Returns how many rows changed.
+ * catalogue title's IMDb genres in imdb_genres. Returns how many rows changed,
+ * and the basics rows of the ids in `alsoRead` (titles not in the catalogue
+ * that the gap fill is weighing), so one download serves both.
  */
 export async function syncImdbGenres(
   db: InstanceType<typeof Database>,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ updated: number }> {
+  alsoRead: ReadonlySet<string> = new Set(),
+): Promise<{ updated: number; read: Map<string, ImdbBasicsRow> }> {
   const rows = db
     .prepare('SELECT id, imdb_id, imdb_genres FROM titles WHERE imdb_id IS NOT NULL')
     .all() as Array<{ id: number; imdb_id: string; imdb_genres: string | null }>;
@@ -141,19 +153,52 @@ export async function syncImdbGenres(
   // Columns: tconst, titleType, primaryTitle, originalTitle, isAdult, startYear,
   // endYear, runtimeMinutes, genres ("Crime,Drama" or \N).
   const writes: Array<{ id: number; genres: string }> = [];
+  const read = new Map<string, ImdbBasicsRow>();
   for await (const line of gzipLines(Readable.fromWeb(res.body as WebReadableStream<Uint8Array>))) {
-    const matches = byImdbId.get(line.slice(0, line.indexOf('\t')));
-    if (!matches) continue;
+    const tconst = line.slice(0, line.indexOf('\t'));
+    const matches = byImdbId.get(tconst);
+    if (!matches && !alsoRead.has(tconst)) continue;
     const raw = line.slice(line.lastIndexOf('\t') + 1);
-    if (raw === '\\N' || raw === '') continue;
-    const genres = JSON.stringify(raw.split(','));
+    const names = raw === '\\N' || raw === '' ? [] : raw.split(',');
+    if (!matches) {
+      const fields = line.split('\t');
+      const year = Number(fields[5]);
+      read.set(tconst, { titleType: fields[1], startYear: Number.isInteger(year) ? year : null, genres: names });
+      continue;
+    }
+    if (names.length === 0) continue;
+    const genres = JSON.stringify(names);
     for (const row of matches) {
       if (row.imdb_genres !== genres) writes.push({ id: row.id, genres });
     }
   }
 
   applyImdbGenres(db, writes);
-  return { updated: writes.length };
+  return { updated: writes.length, read };
+}
+
+/**
+ * Every title in the ratings file on disk with at least `minVotes` votes and a
+ * rating of at least `minRating`, except the ids in `skip`. Empty when there is
+ * no file yet.
+ */
+export async function readRatedTitles(
+  config: Pick<Config, 'dbPath'>,
+  minRating: number,
+  minVotes: number,
+  skip: ReadonlySet<string>,
+): Promise<Map<string, ImdbRating>> {
+  const out = new Map<string, ImdbRating>();
+  const path = imdbRatingsPath(config);
+  if (!(await stat(path).then(() => true, () => false))) return out;
+  for await (const line of gzipLines(createReadStream(path))) {
+    const [tconst, average, votes] = line.split('\t');
+    const rating = Number(average);
+    const voteCount = Number(votes);
+    if (voteCount < minVotes || rating < minRating || skip.has(tconst)) continue;
+    out.set(tconst, { rating: rating.toFixed(1), votes: voteCount });
+  }
+  return out;
 }
 
 function selectCatalogue(

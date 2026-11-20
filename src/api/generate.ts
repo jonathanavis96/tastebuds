@@ -26,12 +26,14 @@ import {
 import { titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import {
   FULL_SET,
+  countObeying,
   findReferenceTitles,
   olderRoom,
   requestSlate,
   requestVector,
   retrieveUnderRules,
   withReferences,
+  type RulesQuery,
   type RulesRetrieval,
 } from '../retrieval/requestRules.js';
 import { arrangeRequestPicks, curateCandidates, curateRequest, withoutTmdbIdClashes, type CurationResult, type SpawnFn } from '../curation/curate.js';
@@ -349,19 +351,21 @@ function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, reque
   // a title with no IMDb rating fails it.
   const minImdb = Math.max(ownFloor, ctx.hardFilters.minImdbRating);
   const hardFilters = requestHardFilters(ctx, rules);
-  const retrieve = (exclude: number[]) => retrieveUnderRules(ctx.db, { ...rules, minImdb }, {
+  const enforced = { ...rules, minImdb };
+  const q: RulesQuery = {
     queryVec,
     hardFilters,
     vetoProfileIds: base.vetoProfileIds,
-    excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id), ...exclude],
+    excludeTitleIds: [...ctx.neverTitleIds, ...refs.map(r => r.id)],
     affinity: base.affinity,
-  }, now);
+  };
   // Only titles not yet in the list are offered, so asking again adds new ones,
   // and older titles join when too few new recent ones are left. Titles already
   // in the list still count as matching, so a repeat never answers "nothing
-  // matches" while they are on the screen.
-  const retrieval = retrieve([...ctx.pendingTitleIds]);
-  const matched = ctx.pendingTitleIds.size > 0 ? retrieve([]).inWindow.length : retrieval.inWindow.length;
+  // matches" while they are on the screen; only those rows are read to count them.
+  const inList = [...ctx.pendingTitleIds];
+  const retrieval = retrieveUnderRules(ctx.db, enforced, { ...q, excludeTitleIds: [...q.excludeTitleIds, ...inList] }, now);
+  const matched = retrieval.inWindow.length + countObeying(ctx.db, enforced, q, inList);
   return { rules, retrieval, matched, unseen: retrieval.inWindow.length };
 }
 

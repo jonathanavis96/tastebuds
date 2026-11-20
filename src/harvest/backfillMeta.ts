@@ -6,12 +6,18 @@
  * before these columns existed, and any title a future harvest inserts without
  * populating them.
  *
- * Selection order: titles with a NULL vote_count first (never harvested with
- * the newer popularity/vote_count columns either — the oldest, least-known
- * rows), then by vote_count DESC (well-known titles next), then id ASC as a
- * stable tiebreak. This mirrors the "most-established titles first" ordering
- * used by backfillRatings, while making sure never-touched legacy rows are not
- * starved behind an endless stream of high-vote-count titles.
+ * It also reads the metadata again for titles from the recent window
+ * (DEFAULT_RECENT_YEARS) once their last read is META_REFRESH_DAYS old. A title
+ * stored before its release keeps "Post Production" and a handful of votes
+ * until it is read again, and the hard filters drop it as unreleased: on
+ * 2026-11-20, 1,244 of 1,818 titles from 2026 still had fewer than 20 TMDB
+ * votes from a read made in September.
+ *
+ * Selection order: never-read titles first, with a NULL vote_count first among
+ * them (never harvested with the newer popularity/vote_count columns either —
+ * the oldest, least-known rows), then by vote_count DESC (well-known titles
+ * next), then id ASC as a stable tiebreak; after them the recent titles whose
+ * read is oldest.
  *
  * A TMDB 404 means the title was removed from TMDB — stamp meta_checked_at
  * and status = 'Missing' so it drops out of the candidate pool (not retried
@@ -28,12 +34,16 @@ import type { Config } from '../config.js';
 import type { TmdbTitleDetail } from '../tmdb/types.js';
 import { getTitleMeta } from '../tmdb/client.js';
 import { updateTitleMeta } from '../db/repos/titles.js';
+import { DEFAULT_RECENT_YEARS } from '../request/rules.js';
 
 interface MetaBackfillCandidate {
   id: number;
   tmdb_id: number;
   media_type: 'movie' | 'tv';
 }
+
+/** A recent title's TMDB metadata is read again once its last read is this many days old. */
+export const META_REFRESH_DAYS = 7;
 
 const REQUEST_PAUSE_MS = 60;
 const LOG_EVERY = 500;
@@ -69,20 +79,24 @@ export async function backfillTitleMeta(
       mediaType: 'movie' | 'tv',
       config: Pick<Config, 'tmdbApiKey'>,
     ) => Promise<TmdbTitleDetail>;
+    now?: Date;
   },
 ): Promise<{ processed: number; missing: number; errors: number }> {
   const fetchDetail = opts.fetchDetail ?? getTitleMeta;
   const concurrency = opts.concurrency ?? 4;
+  const now = opts.now ?? new Date();
+  const recentFrom = now.getFullYear() - (DEFAULT_RECENT_YEARS - 1);
+  const staleBefore = Math.floor(now.getTime() / 1000) - META_REFRESH_DAYS * 86_400;
 
   const candidates = db
-    .prepare<[number], MetaBackfillCandidate>(
+    .prepare<[number, number, number], MetaBackfillCandidate>(
       `SELECT id, tmdb_id, media_type
        FROM titles
-       WHERE meta_checked_at IS NULL
-       ORDER BY (vote_count IS NULL), vote_count DESC, id ASC
+       WHERE meta_checked_at IS NULL OR (year >= ? AND meta_checked_at < ?)
+       ORDER BY (meta_checked_at IS NOT NULL), meta_checked_at, (vote_count IS NULL), vote_count DESC, id ASC
        LIMIT ?`,
     )
-    .all(opts.cap);
+    .all(recentFrom, staleBefore, opts.cap);
 
   let processed = 0;
   let missing = 0;
