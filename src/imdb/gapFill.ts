@@ -161,7 +161,10 @@ async function lookUpAll(run: Run, gaps: GapTitle[]): Promise<{ outcomes: Record
     while (next < gaps.length && stopped === null) {
       const gap = gaps[next++];
       await new Promise((resolve) => setTimeout(resolve, REQUEST_PAUSE_MS));
-      const outcome = await lookUp(run, gap);
+      const outcome = await lookUp(run, gap).catch((err: unknown) => {
+        console.warn(`[tastebuds] IMDb gap fill: ${gap.imdbId} failed: ${String(err)}`);
+        return 'error';
+      });
       outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
       // A failed lookup is not recorded, so the next run tries it again.
       if (outcome === 'error') {
