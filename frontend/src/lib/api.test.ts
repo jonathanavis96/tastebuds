@@ -58,10 +58,24 @@ describe('generateRecommendations', () => {
     expect(result.recs[0].tags).toEqual(['Thriller', 'Crime']);
   });
 
-  it('throws on non-200 response, without retrying', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 429 }));
-    await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow('generate failed: 429');
+  it('says in plain words when the request cap refused it, with the wait, without retrying', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '130' } }));
+    await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow(
+      'Too many requests in the last few minutes, so this one was not run. Try again in 3 minutes.',
+    );
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives the wait in seconds when it is under a minute', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '40' } }));
+    await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow('Try again in 40 seconds.');
+  });
+
+  it('names the server error for any other failure', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 500 }));
+    await expect(generateRecommendations({ profileId: 1 })).rejects.toThrow(
+      'Picks could not be made just now (server error 500). Try again.',
+    );
   });
 });
 

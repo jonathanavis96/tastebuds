@@ -81,8 +81,24 @@ export async function generateRecommendations(opts: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(opts),
   });
-  if (!res.ok) throw new Error(`generate failed: ${res.status}`);
+  if (!res.ok) throw new Error(generateFailureMessage(res));
   return res.json();
+}
+
+/**
+ * What the person reads when Generate fails. The server allows a few requests
+ * every few minutes for the whole household (each one costs a model call), so
+ * the commonest failure is that cap: say so and say how long to wait.
+ */
+function generateFailureMessage(res: Response): string {
+  if (res.status === 429) {
+    const seconds = Number(res.headers.get('Retry-After'));
+    const wait = seconds > 0
+      ? (seconds < 60 ? `${seconds} seconds` : `${Math.ceil(seconds / 60)} minute${seconds > 60 ? 's' : ''}`)
+      : 'a few minutes';
+    return `Too many requests in the last few minutes, so this one was not run. Try again in ${wait}.`;
+  }
+  return `Picks could not be made just now (server error ${res.status}). Try again.`;
 }
 
 export async function rateTitle(profileId: number, titleId: number, rating: number, note?: string): Promise<void> {

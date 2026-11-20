@@ -355,8 +355,9 @@
     await loadRecs();
   }
 
-  async function handleGenerate(request?: string) {
-    if (!activeProfileId) return;
+  /** Resolves false when nothing was made, so the request box can give the text back. */
+  async function handleGenerate(request?: string): Promise<boolean> {
+    if (!activeProfileId) return false;
     generating = true;
     readingRequest = !!request;
     error = '';
@@ -369,8 +370,10 @@
       showFeed(feed);
       if (request) followRequestMedia(feed, request);
       dismissedRecIds = [];
+      return true;
     } catch (e) {
-      error = String(e);
+      error = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
       generating = false;
     }
@@ -403,7 +406,7 @@
       showFeed(await generateRecommendations(opts));
       dismissedRecIds = [];
     } catch (e) {
-      error = String(e);
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       generating = false;
     }

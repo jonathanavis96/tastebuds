@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
 
   interface Props {
-    onSubmit?: (text: string) => void;
+    /** Resolve false when the request was not run: the text goes back in the box. */
+    onSubmit?: (text: string) => void | boolean | Promise<void | boolean>;
   }
 
   let { onSubmit = () => {} }: Props = $props();
@@ -42,11 +43,20 @@
     timer = setInterval(() => { idx = (idx + 1) % examples.length; }, 3500);
   });
   onDestroy(() => clearInterval(timer));
+
+  async function submit() {
+    const sent = text.trim();
+    if (!sent) return;
+    text = '';
+    // A request that was not run (the household's request cap, a server error) comes
+    // back into the box, unless something new has been typed meanwhile.
+    if ((await onSubmit(sent)) === false && text === '') text = sent;
+  }
 </script>
 
 <div class="request-box">
   <textarea bind:value={text} {placeholder} rows={2}></textarea>
-  <button onclick={() => { if (text.trim()) { onSubmit(text.trim()); text = ''; } }}>
+  <button onclick={submit}>
     Generate
   </button>
 </div>
