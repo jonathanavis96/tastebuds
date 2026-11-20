@@ -87,6 +87,24 @@ describe('rate limiting', () => {
   });
 });
 
+describe('a request that cannot be read', () => {
+  it('is answered at once with examples, makes no picks and does not use up the request cap', async () => {
+    vi.mocked(curateCandidates).mockClear().mockResolvedValue(undefined as any);
+    const db = setupDb();
+    const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
+    const post = (body: unknown) => app.request('/api/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    for (let i = 0; i < 6; i++) {
+      const res = await post({ profileId: 1, request: 'asdkjh qwe zzv' });
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { error: string }).error).toMatch(/^“asdkjh qwe zzv” could not be read, so no picks were made\. Try something like/);
+    }
+    expect(curateCandidates).not.toHaveBeenCalled();
+    expect((await post({ profileId: 1 })).status).toBe(200);
+  });
+});
+
 describe('GET /api/recommendations/:profileId', () => {
   it('returns empty array for profile with no recommendations', async () => {
     const db = setupDb();

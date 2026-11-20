@@ -43,6 +43,7 @@ import { parseRequest } from '../request/parse.js';
 import { refineRulesWithModel } from '../request/modelParse.js';
 import { describeRules, describeYearWindow } from '../request/describe.js';
 import { titleObeys } from '../request/enforce.js';
+import { unreadableRequestReply } from '../request/unreadable.js';
 import type { RequestRules, RequestSummary } from '../request/rules.js';
 import { engagementMemberIds, feedFor, hardFiltersFor, soloProfileIds, type FeedResponse } from './feed.js';
 
@@ -74,7 +75,7 @@ export interface GenerateDeps {
 
 export type GenerateOutcome =
   | { ok: true; feed: FeedResponse }
-  | { ok: false; status: 400 | 404; error: string };
+  | { ok: false; status: 400 | 404 | 422; error: string };
 
 interface Context {
   db: Database;
@@ -116,8 +117,12 @@ export async function generatePicks(
     return { ok: false, status: 400, error: 'Two solo profiles are required for a Joint blend' };
   }
 
-  const ctx = buildContext(db, config, profile, body, deps);
   const request = body.request?.trim();
+  // A request that cannot be read at all is answered at once, with examples,
+  // instead of with generic picks after a model call.
+  const unreadable = request && body.surprise !== true ? unreadableRequestReply(request, deps.now?.() ?? new Date()) : null;
+  if (unreadable) return { ok: false, status: 422, error: unreadable };
+  const ctx = buildContext(db, config, profile, body, deps);
   if (request && body.surprise !== true) return { ok: true, feed: await generateForRequest(ctx, request) };
   await generateFromPool(ctx, body);
   return { ok: true, feed: feedFor(db, config, profileId) };

@@ -14,6 +14,7 @@ import { createRateLimiter } from './auth.js';
 import { tasteChartForProfile } from '../retrieval/tasteChart.js';
 import { feedFor } from './feed.js';
 import { generatePicks, type GenerateBody } from './generate.js';
+import { unreadableRequestReply } from '../request/unreadable.js';
 
 export function createApiRoutes(db: Database, config: Config): Hono {
   const api = new Hono();
@@ -31,6 +32,18 @@ export function createApiRoutes(db: Database, config: Config): Hono {
   // Tighter, dedicated cap on /generate specifically — it's the expensive one
   // (spawns `claude -p`), so it gets its own stricter budget on top.
   const generateLimiter = createRateLimiter({ windowMs: 5 * 60_000, max: 5, keyPrefix: 'generate' });
+  // A request that cannot be read is answered before the cap, so a slip of the
+  // keyboard does not use up one of the household's requests.
+  api.use('/generate', async (c, next) => {
+    let body: GenerateBody | null = null;
+    try {
+      body = await c.req.json<GenerateBody>();
+    } catch {
+      return next(); // the handler reports the bad body
+    }
+    const reply = typeof body?.request === 'string' && body.surprise !== true ? unreadableRequestReply(body.request) : null;
+    return reply ? c.json({ error: reply }, 422) : next();
+  });
   api.use('/generate', generateLimiter);
   // One /generate at a time per profile. A generate decides whether to clear the
   // profile's old pending picks by looking for pending rows newer than the ones it
