@@ -8,6 +8,7 @@ import { LANGUAGE_NAMES } from './vocabulary.js';
  */
 export function describeRules(rules: RequestRules): string[] {
   const chips = rules.must.map((c) => c.label);
+  if (rules.tone && !chips.includes(rules.tone)) chips.push(rules.tone);
   if (rules.mediaType) chips.push(rules.mediaType === 'movie' ? 'Films' : 'Series');
   const years = describeYearWindow(rules);
   if (years) chips.push(years);

@@ -58,7 +58,7 @@ const REQUESTS: Expected[] = [
   { text: 'Very scary movie', media: 'movie', must: [{ g: ['Horror'] }] },
   { text: 'Very scare movies', media: 'movie', must: [{ g: ['Horror'] }] },
   { text: 'More scary movies with good ratings.', media: 'movie', minImdb: 7.0, must: [{ g: ['Horror'] }] },
-  { text: 'Can you write something thriller light like inception something on those lines', must: [{ g: ['Thriller'] }], similarTo: ['inception something on those lines'] },
+  { text: 'Can you write something thriller light like inception something on those lines', must: [{ g: ['Thriller'] }], mustNot: [{ g: ['Horror'] }], similarTo: ['inception something on those lines'] },
   { text: 'Space, time, mind bending movies', media: 'movie', must: [{ theme: ['space', 'time', 'mind-bending'] }] },
   { text: 'Thrillers mind bending action', must: [{ g: ['Thriller'] }, { g: ['Action'] }, { theme: ['mind-bending'] }] },
   { text: 'casual easy watch', must: [{ g: ['Comedy', 'Family', 'Romance', 'Animation', 'Adventure'] }], mustNot: [{ g: ['Horror'] }] },
@@ -160,12 +160,12 @@ describe('parseRequest on every request typed so far', () => {
 
 describe('the app\'s example prompts', () => {
   it.each([
-    ['something funny and easy to watch', ['Funny', '2021 or newer']],
+    ['something funny and easy to watch', ['Funny', 'Easy watch', '2021 or newer', 'No horror']],
     ['a gripping thriller for tonight', ['Thriller', '2021 or newer']],
-    ['a feel-good film for a rainy day', ['Easy watch', 'Films', '2021 or newer', 'No horror']],
+    ['a feel-good film for a rainy day', ['Feel-good', 'Films', '2021 or newer', 'No horror']],
     ['something mind-bending and clever', ['Mind-bending', '2021 or newer']],
     ['a short movie under 90 minutes', ['Films', '2021 or newer', 'Under 90 min']],
-    ['a cosy series to binge', ['Easy watch', 'Series', '2021 or newer', 'No horror']],
+    ['a cosy series to binge', ['Cosy', 'Series', '2021 or newer', 'No horror']],
     ['something romantic but not cheesy', ['Romantic', '2021 or newer']],
     ['a true-story drama', ['True story', 'Drama', '2021 or newer']],
     ['a hidden-gem sci-fi', ['Sci-fi', '2021 or newer', 'Hidden gems']],
@@ -180,13 +180,29 @@ describe('the app\'s example prompts', () => {
     expect(parseRequest('kids movie no scary stuff', NOW).mustNot).toEqual([{ label: 'scary', genres: ['Horror'], terms: [] }]);
   });
 
-  it('reads the easy-watch words as a rule only when no genre is named', () => {
+  it('reads a tone word as a rule: never horror, and an easy genre when no genre is named', () => {
     const easy = parseRequest('a feel-good film for a rainy day', NOW);
     expect(easy.must[0].genres).toEqual(['Comedy', 'Family', 'Romance', 'Animation', 'Adventure']);
     expect(easy.mustNot).toEqual([{ label: 'horror', genres: ['Horror'], terms: [] }]);
+    expect(easy.tone).toBe('Feel-good');
     const soft = parseRequest('thriller light like Inception', NOW);
     expect(soft.must.map((c) => c.genres)).toEqual([['Thriller']]);
-    expect(soft.mustNot).toEqual([]);
+    expect(soft.mustNot).toEqual([{ label: 'horror', genres: ['Horror'], terms: [] }]);
+  });
+
+  it('keeps a feel-good comedy free of horror and shows the tone as a chip', () => {
+    const rules = parseRequest('feel-good comedy', NOW);
+    expect(rules.must.map((c) => c.genres)).toEqual([['Comedy']]);
+    expect(rules.mustNot).toEqual([{ label: 'horror', genres: ['Horror'], terms: [] }]);
+    expect(chips('feel-good comedy')).toEqual(['Comedy', 'Feel-good', '2021 or newer', 'No horror']);
+    expect(chips('something funny and light, nothing scary')).toEqual(['Funny', 'Light', '2021 or newer', 'No scary']);
+  });
+
+  it('leaves the tone as a hint when the request asks for horror itself', () => {
+    const rules = parseRequest('a cosy horror film', NOW);
+    expect(rules.must.map((c) => c.genres)).toEqual([['Horror']]);
+    expect(rules.mustNot).toEqual([]);
+    expect(rules.tone).toBeNull();
   });
 
   it('keeps a stated runtime over the short-film default', () => {
