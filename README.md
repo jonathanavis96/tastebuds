@@ -171,13 +171,17 @@ arrive without it (see **Ratings** below).
 IMDb ratings and vote counts come from IMDb's daily non-commercial data files
 (<https://developer.imdb.com/non-commercial-datasets/>): the ratings file is downloaded each
 night (and at startup when the copy beside the database is over 36 hours old) and kept in
-`data/imdb/`; IMDb's genres are read from its basics file once a month. Rotten Tomatoes scores
+`data/imdb/`. Once a week (Sunday, UTC, and at first startup) IMDb's basics file is read for
+genres, and also for well-rated titles the catalogue lacks: every film and series from the last
+ten years whose IMDb rating and vote count clear the hard filters is looked up on TMDB by its
+IMDb id and added when it is in a language the household watches (the TMDB harvest only walks
+popular lists, so it misses well-rated titles with modest TMDB traffic). Rotten Tomatoes scores
 are read from the title's own Rotten Tomatoes page, about one page a second, `RT_REFRESH_CAP`
 pages a night. OMDb, when a key is set, is the first source of a film's Rotten Tomatoes score
 and of an IMDb rating for a title the ratings file has not covered yet. Just before picks are
 shown, any rating that is due is checked again. Each job can be run by hand:
-`npm run ratings:sync`, `ratings:genres`, `ratings:rt -- --cap 30`, `ratings:imdb-ids -- --cap 50`
-(in Docker: `node dist/server/ratings/cli.js sync|genres|rt|imdb-ids [--cap N]`).
+`npm run ratings:sync`, `ratings:genres`, `ratings:gaps -- --cap 500`, `ratings:rt -- --cap 30`,
+`ratings:imdb-ids -- --cap 50` (in Docker: `node dist/server/ratings/cli.js sync|genres|gaps|rt|imdb-ids [--cap N]`).
 
 ### TMDB metadata (language, runtime, TMDB rating, release status)
 Each title also carries `original_language`, `runtime_minutes`, `vote_average` and `status`
@@ -185,7 +189,9 @@ from TMDB, used to hard-filter recommendations (e.g. exclude non-English titles,
 require a minimum TMDB score, or skip titles TMDB no longer lists). New harvests populate
 these automatically; a one-off `npm run backfill:meta` (or `node dist/server/harvest/backfillMetaCli.js`
 in Docker) sweeps any existing titles that don't have them yet — the app also runs this once
-in the background on first boot, and again nightly alongside the ratings backfill.
+in the background on first boot, and again nightly alongside the ratings backfill. Titles from
+the recent window are read again once their last read is a week old, so a title stored before
+its release stops looking unreleased.
 
 ---
 
