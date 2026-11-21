@@ -4,7 +4,7 @@ import { LANGUAGE_NAMES } from './vocabulary.js';
 /**
  * One short chip per rule, in reading order, for showing the viewer what was
  * understood: ["Thriller", "Films", "2025 or newer", "IMDb 7.0+", "No nuns"].
- * The default year window is described too ("2021 or newer"), since it filters.
+ * The default year window is described too ("2015 or newer"), since it filters.
  */
 export function describeRules(rules: RequestRules): string[] {
   const chips = rules.must.map((c) => c.label);

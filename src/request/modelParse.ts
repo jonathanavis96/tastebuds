@@ -5,6 +5,7 @@ import { CANON_GENRES } from './rules.js';
 import type { CanonGenre, RequestRules, RuleClause } from './rules.js';
 import { describeRules } from './describe.js';
 import { leftoverWords } from './parse.js';
+import { isMoodPhrase } from './vocabulary.js';
 
 /** Reading a request is a small task; the cheap model is enough. */
 export const REQUEST_PARSE_MODEL = 'claude-haiku-5-5';
@@ -120,7 +121,7 @@ export async function readWithModel(
 
 function mergeReading(base: RequestRules, raw: Record<string, unknown>, text: string, cy: number): RequestRules {
   const rules: RequestRules = { ...base, must: [...base.must], mustNot: [...base.mustNot], similarTo: [...base.similarTo] };
-  const subjects = cleanClauses(raw.subjects, text).slice(0, MAX_MODEL_CLAUSES);
+  const subjects = cleanClauses(raw.subjects, text, true).slice(0, MAX_MODEL_CLAUSES);
   const exclude = cleanClauses(raw.exclude, text).slice(0, MAX_MODEL_CLAUSES - subjects.length);
   addSubjects(rules, subjects);
   for (const c of exclude) {
@@ -135,15 +136,16 @@ function record(v: unknown): Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
-/** Clauses with usable terms whose label the request actually mentions. */
-function cleanClauses(raw: unknown, text: string): RuleClause[] {
+/** Clauses with usable terms whose label the request actually mentions. Soft only when `soft` and the label is a mood word. */
+function cleanClauses(raw: unknown, text: string, soft = false): RuleClause[] {
   if (!Array.isArray(raw)) return [];
   const out: RuleClause[] = [];
   for (const item of raw.map(record)) {
     const terms = cleanTerms(item.terms);
     if (terms.length === 0) continue;
     const label = typeof item.label === 'string' && item.label.trim().length > 0 ? item.label.trim().slice(0, 40) : terms[0];
-    if (mentioned(label, text)) out.push({ label, genres: [], terms });
+    if (!mentioned(label, text)) continue;
+    out.push(soft && isMoodPhrase(label) ? { label, genres: [], terms, soft: true } : { label, genres: [], terms });
   }
   return out;
 }
@@ -165,7 +167,11 @@ function mentioned(label: string, text: string): boolean {
     .some((w) => w.length >= 3 && flat.includes(w));
 }
 
-/** Subjects join the request's one any-of theme clause (the must clause without genres). */
+/**
+ * Subjects join the request's one any-of theme clause (the must clause without
+ * genres). The merged clause stays soft only when it and every subject added
+ * to it are soft: a subject the model names must hold.
+ */
 function addSubjects(rules: RequestRules, subjects: RuleClause[]): void {
   if (subjects.length === 0) return;
   const at = rules.must.findIndex((c) => c.genres.length === 0);
@@ -179,6 +185,7 @@ function addSubjects(rules: RequestRules, subjects: RuleClause[]): void {
     genres: [],
     terms: [...new Set([...(existing?.terms ?? []), ...subjects.flatMap((s) => s.terms)])],
   };
+  if ((existing === null || existing.soft === true) && subjects.every((s) => s.soft === true)) merged.soft = true;
   if (existing) rules.must[at] = merged;
   else rules.must.push(merged);
 }

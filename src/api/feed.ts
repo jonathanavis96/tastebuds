@@ -138,8 +138,8 @@ function sectionKey(text: string | null): string {
 /**
  * Picks grouped by the request that made them. The section with the newest
  * batch comes first, so a new request, or the same one asked again, is at the
- * top; within a section the older batches come first and each batch keeps the
- * order it was stored in (rank order), so asking again adds below. `recs` is
+ * top; within a section the newest batch comes first and each batch keeps the
+ * order it was stored in (rank order), so asking again adds on top. `recs` is
  * newest batch first, as getRecommendations returns them.
  */
 function sectionsOf(recs: RecommendationRow[]): Array<{ text: string | null; rows: RecommendationRow[] }> {
@@ -152,7 +152,7 @@ function sectionsOf(recs: RecommendationRow[]): Array<{ text: string | null; row
     sections.get(key)!.rows.push(r);
   }
   for (const s of sections.values()) {
-    s.rows.sort((a, b) => batchAge.get(b.created_at)! - batchAge.get(a.created_at)! || a.id - b.id);
+    s.rows.sort((a, b) => batchAge.get(a.created_at)! - batchAge.get(b.created_at)! || a.id - b.id);
   }
   return [...sections.values()];
 }
@@ -166,8 +166,8 @@ export function feedFor(db: Database, config: Config, profileId: number, fresh: 
   const grouped = sectionsOf(visibleRecs(db, config, profileId, getRecommendations(db, profileId, 'pending')));
   const sections = grouped.map(({ text, rows }) => ({
     text,
-    // Within a section the newest batch is last; its summary is the current one.
-    summary: parseRequestSummary([...rows].reverse().find(r => r.request_summary != null)?.request_summary ?? null),
+    // Within a section the newest batch is first; its summary is the current one.
+    summary: parseRequestSummary(rows.find(r => r.request_summary != null)?.request_summary ?? null),
     rows,
   }));
   if (fresh) {

@@ -136,6 +136,13 @@ export interface RequestPromptInput {
   understood: string[];
   /** Candidates inside the request's year window, best ranked first. */
   candidates: CandidateTitle[];
+  /**
+   * Close matches offered only to fill the list: they pass every rule but some
+   * mood words, named per tmdb_id in `closeMissed`. At most `closeRoom` are used.
+   */
+  close?: CandidateTitle[];
+  closeRoom?: number;
+  closeMissed?: ReadonlyMap<number, string[]>;
   /** Older candidates offered only to fill the list (default window widened), and how many of them may be used. */
   older: CandidateTitle[];
   olderRoom: number;
@@ -150,18 +157,28 @@ export interface RequestPromptInput {
  * one fits.
  */
 export function buildRequestPrompt(input: RequestPromptInput, profile: ProfileRow, sig: TasteSignatureRow): string {
+  const close = input.close ?? [];
+  const closeUsed = Math.min(input.closeRoom ?? 0, close.length);
   const olderUsed = Math.min(input.olderRoom, input.older.length);
-  const count = Math.min(MIN_REQUEST_PICKS, input.candidates.length + olderUsed);
+  const count = Math.min(MIN_REQUEST_PICKS, input.candidates.length + closeUsed + olderUsed);
   const rules = input.understood.map((u) => `- ${u}`).join('\n') || '- (no rules beyond the request itself)';
   const list = input.candidates.map(formatRequestCandidate).join('\n');
+  const missed = (c: CandidateTitle) => {
+    const labels = input.closeMissed?.get(c.tmdb_id) ?? [];
+    return labels.length > 0 ? ` (misses: ${labels.join(', ')})` : '';
+  };
+  const closeBlock = closeUsed > 0
+    ? `\n\n## Close matches (too few titles matched every rule; each passes all but the mood words noted; use at most ${closeUsed} of these, after the ones above)\n${close.map((c, i) => formatRequestCandidate(c, input.candidates.length + i) + missed(c)).join('\n')}`
+    : '';
+  const olderStart = input.candidates.length + (closeUsed > 0 ? close.length : 0);
   const olderBlock = olderUsed > 0
-    ? `\n\n## Older candidates (too few recent titles matched; use at most ${olderUsed} of these, after the ones above)\n${input.older.map((c, i) => formatRequestCandidate(c, input.candidates.length + i)).join('\n')}`
+    ? `\n\n## Older candidates (too few recent titles matched; use at most ${olderUsed} of these, after the ones above)\n${input.older.map((c, i) => formatRequestCandidate(c, olderStart + i)).join('\n')}`
     : '';
   const mediaLine = input.mediaOpen ? '\n- The request leaves film or series open: include both when both fit it well.' : '';
 
   return `${profile.name} asked for: "${input.text}"
 
-Every candidate below already satisfies all of the request's rules, which were checked title by title:
+Every candidate below already satisfies all of the request's rules${closeUsed > 0 ? ' (a close match all but the mood words it notes)' : ''}, which were checked title by title:
 ${rules}
 Do not judge whether a candidate fits those rules. Your job is to choose the ${count} best of them for this request and this viewer, best first, and to say in one line why each one suits.
 
@@ -169,7 +186,7 @@ Do not judge whether a candidate fits those rules. Your job is to choose the ${c
 ${buildPrefsBlock(sig)}
 
 ## Candidates (ranked by closeness to the request and to ${profile.name}'s taste)
-${list || '(none)'}${olderBlock}
+${list || '(none)'}${closeBlock}${olderBlock}
 
 ## Instructions
 Return ONLY a JSON object of the form {"items":[...]} where "items" holds exactly ${count} candidates, best first, each from the lists above and none twice.${mediaLine}

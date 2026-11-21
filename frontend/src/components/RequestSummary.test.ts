@@ -43,6 +43,14 @@ describe('RequestSummary (the heading of one request’s section)', () => {
     expect(getByText('1 title matches and is in your list, plus 3 older picks')).toBeTruthy();
   });
 
+  it('names close matches apart, and beside older picks', () => {
+    const one = render(RequestSummary, { text: 'sci-fi mind bending scary', summary: makeSummary({ matched: 1 }), shown: 10, close: 9 });
+    expect(one.getByText('1 title matches and is in your list, plus 9 close matches')).toBeTruthy();
+    cleanup();
+    const both = render(RequestSummary, { text: 'scary', summary: makeSummary({ matched: 1 }), shown: 6, close: 2, older: 3 });
+    expect(both.getByText('1 title matches and is in your list, plus 2 close matches and 3 older picks')).toBeTruthy();
+  });
+
   it('counts the recent picks only when older ones were added', () => {
     const { getByText } = render(RequestSummary, { text: 'thriller series', summary: makeSummary({ matched: 6 }), shown: 7, older: 1 });
     expect(getByText('6 titles match, all in your list, plus 1 older pick')).toBeTruthy();

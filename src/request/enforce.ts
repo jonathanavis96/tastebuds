@@ -33,16 +33,33 @@ export function titleObeys(rules: RequestRules, title: CheckableTitle): RuleChec
     hiddenGemFailure(rules, title),
   ].filter((f): f is string => f !== null);
   if (rules.must.length > 0 || rules.mustNot.length > 0) {
-    const facts: TitleFacts = {
-      tags: titleTags(title),
-      texts: [...jsonStrings(title.keywords), title.synopsis ?? ''].map(flatten),
-      name: flatten(title.title),
-      cast: jsonStrings(title.cast).map(flatten),
-    };
-    for (const c of rules.must) if (!clauseHolds(c, facts, namesASubject(c))) failed.push(`not ${c.label}`);
+    const facts = titleFacts(title);
+    for (const c of rules.must) if (!mustHolds(c, facts)) failed.push(`not ${c.label}`);
     for (const c of rules.mustNot) if (clauseHolds(c, facts, true)) failed.push(`excluded: ${c.label}`);
   }
   return { ok: failed.length === 0, failed };
+}
+
+/** Whether any must clause came from a mood word ("scary", "mind-bending"). */
+export function hasSoftClauses(rules: Pick<RequestRules, 'must'>): boolean {
+  return rules.must.some((c) => c.soft === true);
+}
+
+/**
+ * The rules a close match obeys: every rule but the soft must clauses. Genre
+ * nouns, subjects, exclusions, film or series, years, rating, runtime,
+ * language and hidden gem all still hold.
+ */
+export function hardRules(rules: RequestRules): RequestRules {
+  return { ...rules, must: rules.must.filter((c) => c.soft !== true) };
+}
+
+/** The labels of the soft must clauses `title` does not satisfy, in the request's order ("Scary"). */
+export function missedSoftLabels(rules: Pick<RequestRules, 'must'>, title: CheckableTitle): string[] {
+  const soft = rules.must.filter((c) => c.soft === true);
+  if (soft.length === 0) return [];
+  const facts = titleFacts(title);
+  return soft.filter((c) => !mustHolds(c, facts)).map((c) => c.label);
 }
 
 function mediaFailure(rules: RequestRules, t: CheckableTitle): string | null {
@@ -105,6 +122,19 @@ interface TitleFacts {
   name: string;
   /** Cast names, matched whole: a term names a person only when it is the full name. */
   cast: string[];
+}
+
+function titleFacts(title: CheckableTitle): TitleFacts {
+  return {
+    tags: titleTags(title),
+    texts: [...jsonStrings(title.keywords), title.synopsis ?? ''].map(flatten),
+    name: flatten(title.title),
+    cast: jsonStrings(title.cast).map(flatten),
+  };
+}
+
+function mustHolds(c: RuleClause, facts: TitleFacts): boolean {
+  return clauseHolds(c, facts, namesASubject(c));
 }
 
 function flatten(s: string): string {

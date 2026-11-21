@@ -46,6 +46,14 @@ export interface RuleClause {
   genres: CanonGenre[];
   /** Lowercase words or short phrases, matched on word boundaries (a trailing "s" is tolerated). */
   terms: string[];
+  /**
+   * True for a must clause read from a mood word ("scary", "gripping",
+   * "mind-bending"). When too few titles pass every rule, titles that miss only
+   * soft clauses may fill the list as close matches, each saying what it misses.
+   * Absent or false: the clause always holds (genre nouns, subjects, and every
+   * mustNot clause).
+   */
+  soft?: boolean;
 }
 
 /**
@@ -88,8 +96,11 @@ export interface RequestRules {
   tone: string | null;
 }
 
-/** With no year in the request, picks come from this many years back, counting the current one. */
-export const DEFAULT_RECENT_YEARS = 6;
+/**
+ * With no year in the request, picks come from this many calendar years back,
+ * counting the current one: "2015 or newer" in 2026, rolling on each January.
+ */
+export const DEFAULT_RECENT_YEARS = 12;
 /** "new" / "latest" means the current year and the one before. */
 export const NEW_YEARS = 2;
 /** "recent" means the current year and the two before. */

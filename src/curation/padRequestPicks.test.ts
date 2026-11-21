@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { arrangeRequestPicks, padRequestPicks, type CurationResult } from './curate.js';
+import { arrangeRequestPicks, closeByTier, padRequestPicks, type CurationResult } from './curate.js';
 import { buildRequestPrompt, MIN_REQUEST_PICKS, type RequestPromptInput } from './prompt.js';
 import type { CandidateTitle } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
@@ -15,7 +15,7 @@ function cand(tmdb_id: number): CandidateTitle {
   };
 }
 
-const WHY = 'Matches your request: Thriller, 2021 or newer.';
+const WHY = 'Matches your request: Thriller, 2015 or newer.';
 const pick = (tmdbId: number): CurationResult => ({ tmdbId, why: 'w', category: 'Based on your request', kind: 'core', predictedRating: 4 });
 
 const profile: ProfileRow = { id: 1, name: 'Alex', media_weighting: 0.5, is_derived: 0, config: '{}' };
@@ -78,6 +78,20 @@ describe('arrangeRequestPicks', () => {
   });
 });
 
+describe('arrangeRequestPicks with close matches', () => {
+  it('puts strict matches first, then close matches up to their room, then older titles in the room left', () => {
+    const recent = [cand(1), cand(2)];
+    const close = Array.from({ length: 10 }, (_, i) => cand(20 + i));
+    const older = Array.from({ length: 5 }, (_, i) => cand(100 + i));
+    // The model leads with close matches and older titles; the code keeps the groups in order.
+    const chosen = [pick(25), pick(100), pick(21), pick(2)];
+    const out = arrangeRequestPicks(chosen, { recent, close, closeRoom: 6, older, olderRoom: 2 }, WHY, MIN_REQUEST_PICKS);
+    expect(out.recent.map(p => p.tmdbId)).toEqual([2, 1]);
+    expect(out.close.map(p => p.tmdbId)).toEqual([25, 21, 20, 22, 23, 24]);
+    expect(out.older.map(p => p.tmdbId)).toEqual([100, 101]);
+  });
+});
+
 describe('request prompt', () => {
   const input = (over: Partial<RequestPromptInput> = {}): RequestPromptInput => ({
     text: 'Thriller new 2025',
@@ -109,10 +123,55 @@ describe('request prompt', () => {
     expect(prompt).toContain('exactly 3 candidates');
   });
 
+  it('lists close matches apart, each with the mood words it misses, before older fill-ins', () => {
+    const prompt = buildRequestPrompt(input({
+      candidates: [cand(1)],
+      close: [cand(30), cand(31)],
+      closeRoom: 2,
+      closeMissed: new Map([[30, ['Scary']], [31, ['Mind-bending', 'Scary']]]),
+      older: [cand(50)],
+      olderRoom: 1,
+    }), profile, sig);
+    expect(prompt).toContain('## Close matches');
+    expect(prompt).toContain('2. [tmdb_id:30]');
+    expect(prompt).toMatch(/\[tmdb_id:30\].*\(misses: Scary\)/);
+    expect(prompt).toMatch(/\[tmdb_id:31\].*\(misses: Mind-bending, Scary\)/);
+    expect(prompt).toContain('4. [tmdb_id:50]');
+    expect(prompt.indexOf('## Close matches')).toBeLessThan(prompt.indexOf('## Older candidates'));
+    expect(prompt).toContain('exactly 4 candidates');
+  });
+
   it('lists older fill-ins apart, with how many may be used', () => {
     const prompt = buildRequestPrompt(input({ candidates: [cand(1), cand(2)], older: [cand(50), cand(51), cand(52)], olderRoom: 2 }), profile, sig);
     expect(prompt).toContain('use at most 2 of these');
     expect(prompt).toContain('3. [tmdb_id:50]');
     expect(prompt).toContain('exactly 4 candidates');
+  });
+});
+
+describe('closeByTier', () => {
+  // 8 strict matches leave 2 places: titles 11 and 12 miss one mood word, 21 and 22 miss two.
+  const close = [cand(11), cand(12), cand(21), cand(22)];
+  const missed = new Map([[11, 1], [12, 1], [21, 2], [22, 2]]);
+  const groups = (closeOrder: CurationResult[]) => arrangeRequestPicks(
+    [...Array.from({ length: 8 }, (_, i) => pick(i + 1)), ...closeOrder],
+    { recent: Array.from({ length: 8 }, (_, i) => cand(i + 1)), close, closeRoom: 2, older: [], olderRoom: 0 },
+    WHY, 10,
+  );
+
+  it('keeps the titles missing fewer words when the model puts the others first', () => {
+    const reversed = [pick(22), pick(21), pick(12), pick(11)];
+    expect(groups(closeByTier(reversed, close, missed, WHY)).close.map(p => p.tmdbId)).toEqual([12, 11]);
+  });
+
+  it('brings back a better tier the model left out, padded with the plain line', () => {
+    const out = closeByTier([pick(22), pick(21)], close, missed, WHY);
+    expect(out.map(p => p.tmdbId)).toEqual([11, 12, 22, 21]);
+    expect(out[0].why).toBe(WHY);
+    expect(groups(out).close.map(p => p.tmdbId)).toEqual([11, 12]);
+  });
+
+  it('leaves out picks that are not close candidates', () => {
+    expect(closeByTier([pick(1), pick(21)], close, missed, WHY).map(p => p.tmdbId)).toEqual([11, 12, 21, 22]);
   });
 });

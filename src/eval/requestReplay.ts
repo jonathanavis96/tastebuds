@@ -29,6 +29,7 @@ import Database from 'better-sqlite3';
 import { createReadStream, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { createGunzip } from 'node:zlib';
+import { DEFAULT_RECENT_YEARS } from '../request/rules.js';
 
 interface ExpClause { g?: string[]; theme?: string[] }
 
@@ -87,7 +88,6 @@ export interface RequestScore {
   rated: number;
 }
 
-const DEFAULT_RECENT_YEARS = 6;
 const MIN_IMDB_VOTES = { movie: 1000, tv: 500 } as const;
 const HIDDEN_GEM_MAX_VOTES = 50_000;
 
