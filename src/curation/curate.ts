@@ -131,6 +131,27 @@ export function padRequestPicks(
 }
 
 /**
+ * The model's close-match choices, in the order the list must take them:
+ * fewest mood words missed first, the model's order within each tier, then
+ * the ranked titles of that tier it left out (padded with `why`). Truncating
+ * this list never drops a title missing one word for one missing two.
+ * `missed` gives each close candidate's tmdb_id its number of missed words;
+ * picks that are not close candidates are left out.
+ */
+export function closeByTier(
+  picks: CurationResult[],
+  close: CandidateTitle[],
+  missed: Map<number, number>,
+  why: string,
+): CurationResult[] {
+  const tiers = [...new Set(close.map(c => missed.get(c.tmdb_id) ?? 0))].sort((a, b) => a - b);
+  return tiers.flatMap((tier) => {
+    const group = close.filter(c => (missed.get(c.tmdb_id) ?? 0) === tier);
+    return padRequestPicks(picks.filter(p => missed.get(p.tmdbId) === tier), group, group.length, why);
+  });
+}
+
+/**
  * TMDB numbers movies and series separately, so a movie and a series can share a
  * tmdb_id. The model answers with the bare id, which could then land the pick on
  * the wrong title, so only the better-ranked of the two is offered. `seen` spans

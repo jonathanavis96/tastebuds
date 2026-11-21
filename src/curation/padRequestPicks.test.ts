@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { arrangeRequestPicks, padRequestPicks, type CurationResult } from './curate.js';
+import { arrangeRequestPicks, closeByTier, padRequestPicks, type CurationResult } from './curate.js';
 import { buildRequestPrompt, MIN_REQUEST_PICKS, type RequestPromptInput } from './prompt.js';
 import type { CandidateTitle } from '../retrieval/retrieve.js';
 import type { ProfileRow, TasteSignatureRow } from '../db/types.js';
@@ -146,5 +146,32 @@ describe('request prompt', () => {
     expect(prompt).toContain('use at most 2 of these');
     expect(prompt).toContain('3. [tmdb_id:50]');
     expect(prompt).toContain('exactly 4 candidates');
+  });
+});
+
+describe('closeByTier', () => {
+  // 8 strict matches leave 2 places: titles 11 and 12 miss one mood word, 21 and 22 miss two.
+  const close = [cand(11), cand(12), cand(21), cand(22)];
+  const missed = new Map([[11, 1], [12, 1], [21, 2], [22, 2]]);
+  const groups = (closeOrder: CurationResult[]) => arrangeRequestPicks(
+    [...Array.from({ length: 8 }, (_, i) => pick(i + 1)), ...closeOrder],
+    { recent: Array.from({ length: 8 }, (_, i) => cand(i + 1)), close, closeRoom: 2, older: [], olderRoom: 0 },
+    WHY, 10,
+  );
+
+  it('keeps the titles missing fewer words when the model puts the others first', () => {
+    const reversed = [pick(22), pick(21), pick(12), pick(11)];
+    expect(groups(closeByTier(reversed, close, missed, WHY)).close.map(p => p.tmdbId)).toEqual([12, 11]);
+  });
+
+  it('brings back a better tier the model left out, padded with the plain line', () => {
+    const out = closeByTier([pick(22), pick(21)], close, missed, WHY);
+    expect(out.map(p => p.tmdbId)).toEqual([11, 12, 22, 21]);
+    expect(out[0].why).toBe(WHY);
+    expect(groups(out).close.map(p => p.tmdbId)).toEqual([11, 12]);
+  });
+
+  it('leaves out picks that are not close candidates', () => {
+    expect(closeByTier([pick(1), pick(21)], close, missed, WHY).map(p => p.tmdbId)).toEqual([11, 12, 21, 22]);
   });
 });

@@ -37,7 +37,7 @@ import {
   type RulesQuery,
   type RulesRetrieval,
 } from '../retrieval/requestRules.js';
-import { arrangeRequestPicks, curateCandidates, curateRequest, withoutTmdbIdClashes, type CurationResult, type SpawnFn } from '../curation/curate.js';
+import { arrangeRequestPicks, closeByTier, curateCandidates, curateRequest, withoutTmdbIdClashes, type CurationResult, type SpawnFn } from '../curation/curate.js';
 import { ensureRulesCoverage, mergeRequestGenresToProfile, type OnDemandDeps } from '../harvest/onDemand.js';
 import { ensureFreshRatings } from '../ratings/freshness.js';
 import { parseRequest } from '../request/parse.js';
@@ -428,7 +428,11 @@ async function choosePicks(ctx: Context, text: string, understood: string[], r: 
   } catch (err) {
     console.warn(`[tastebuds] request curation failed for profile ${ctx.profile.id}, keeping the ranked titles: ${(err as Error).message}`);
   }
-  const arranged = arrangeRequestPicks(chosen, groups, why, FULL_SET);
+  // Fewest mood words missed decides which close matches make the list; the
+  // model's order only leads within a tier (see closeByTier).
+  const missedCount = new Map([...misses].map(([id, labels]) => [id, labels.length]));
+  const ordered = [...chosen.filter(p => !misses.has(p.tmdbId)), ...closeByTier(chosen, close, missedCount, why)];
+  const arranged = arrangeRequestPicks(ordered, groups, why, FULL_SET);
   const byTmdb = new Map([...recent, ...close, ...older].map(c => [c.tmdb_id, c]));
   const missCount = (res: CurationResult) => misses.get(res.tmdbId)?.length ?? 0;
   return [
