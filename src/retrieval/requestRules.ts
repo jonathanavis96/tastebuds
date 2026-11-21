@@ -1,12 +1,13 @@
 /**
  * Retrieval for a typed request: the titles that satisfy every rule of the
  * request, ranked by closeness to the request (blended with taste), genre
- * affinity, quality and popularity. Nothing outside the rules can be returned;
- * similarity and taste only order what passes.
+ * affinity, quality and popularity. Similarity and taste only order what passes.
+ * When too few titles pass, two fallbacks may fill the list, each pick saying
+ * why: close matches that miss only mood words, then a few older titles.
  */
 import type Database from 'better-sqlite3';
 import type { RequestRules } from '../request/rules.js';
-import { rulesSql, titleObeys } from '../request/enforce.js';
+import { hardRules, hasSoftClauses, missedSoftLabels, rulesSql, titleObeys } from '../request/enforce.js';
 import { hardFilterSql, type HardFilters } from './filters.js';
 import { rerank, type GenreAffinity } from './rerank.js';
 import { REQUEST_WEIGHTS, type CandidateTitle } from './retrieve.js';
@@ -14,18 +15,19 @@ import { REQUEST_WEIGHTS, type CandidateTitle } from './retrieve.js';
 /** A request comes back with this many picks when enough titles satisfy it. */
 export const FULL_SET = 10;
 /**
- * With no year in the request, a short list may take a few titles from before
- * the recent window: at most this many, none older than this many years before
- * the current one. They are exceptions that say why, never the bulk of a list;
- * anything older is for a request that asks for it ("any year", "90s").
+ * With no year in the request, a list still short after close matches may take
+ * a few titles from before the recent window: at most this many, from the
+ * OLDER_YEARS_BACK years just before the window's floor (2005 to 2014 when the
+ * window starts in 2015). They are exceptions that say why, never the bulk of a
+ * list; anything older is for a request that asks for it ("any year", "90s").
  */
 export const MAX_OLDER_PICKS = 3;
 export const OLDER_YEARS_BACK = 10;
 /** Candidates the model is shown for a request; when film vs series is open, this many of each. */
 export const SLATE_SIZE = 40;
 export const SLATE_PER_MEDIA = 30;
-/** Older titles offered per free place in the list, so the model has a choice among them. */
-const OLDER_CHOICE_PER_PLACE = 2;
+/** Close matches and older titles offered per free place in the list, so the model has a choice among them. */
+const CHOICE_PER_PLACE = 2;
 /** Words in a reference phrase tried as a title, longest prefix first. */
 const MAX_REFERENCE_WORDS = 6;
 const ARTICLES = new Set(['the', 'a', 'an']);
@@ -105,9 +107,18 @@ export interface RulesRetrieval {
   /** Titles satisfying every rule, best first. */
   inWindow: CandidateTitle[];
   /**
-   * Titles from just before the default year window that satisfy every other
-   * rule, best first; offered only to fill the list when `inWindow` is short.
-   * Empty unless the default window came up short.
+   * Close matches: titles in the same year window that satisfy every hard rule
+   * but miss one or more soft (mood) clauses, fewest missed first, then by rank.
+   * Offered only to fill the list when `inWindow` is short; empty otherwise or
+   * when the request has no soft clauses.
+   */
+  close: CandidateTitle[];
+  /** The rules the close matches satisfy (`rules` without its soft clauses); null when there are none. */
+  closeRules: RequestRules | null;
+  /**
+   * Titles from just before the default year window that satisfy every rule
+   * but the year, best first; offered only when the list is still short after
+   * the close matches. Empty unless the default window came up short.
    */
   older: CandidateTitle[];
   /** The rules the older titles satisfy (the years just before the window); null when there are none. */
@@ -115,39 +126,85 @@ export interface RulesRetrieval {
 }
 
 /**
- * Retrieve under `rules`. Only a default year window (no year in the request)
- * is ever reached behind, and only when fewer than FULL_SET titles pass: the
- * OLDER_YEARS_BACK years before the current one are searched for a few more.
+ * Titles that obey every hard rule of `rules` but miss at least one soft
+ * clause, leaving out `strictIds`: fewest soft clauses missed first, then in
+ * the usual request ranking.
+ */
+function closeMatches(
+  db: InstanceType<typeof Database>,
+  rules: RequestRules,
+  relaxed: RequestRules,
+  q: RulesQuery,
+  strictIds: Set<number>,
+): CandidateTitle[] {
+  const misses = new Map<number, number>();
+  const rows = candidateRows(db, relaxed, q, null).filter((r) => {
+    if (strictIds.has(r.id) || !titleObeys(relaxed, r).ok) return false;
+    const missed = missedSoftLabels(rules, r).length;
+    misses.set(r.id, missed);
+    return missed > 0;
+  });
+  const ranked = rerank(rows, q.affinity, new Set(), REQUEST_WEIGHTS).map(({ rank_score: _r, ...rest }) => rest as unknown as CandidateTitle);
+  // Array.prototype.sort is stable, so the ranking holds among equal misses.
+  return ranked.sort((a, b) => misses.get(a.id)! - misses.get(b.id)!);
+}
+
+/**
+ * Retrieve under `rules`. When fewer than FULL_SET titles pass every rule:
+ *  1. a request with soft (mood) clauses is offered close matches, titles in
+ *     the same year window that pass every hard rule and miss some mood words;
+ *  2. only if the list is still short, and only for a default year window (no
+ *     year in the request), the OLDER_YEARS_BACK years before the window's
+ *     floor are searched for a few more titles under the unchanged rules.
  * A stated, recent or "any" window is never widened: fewer titles come back.
  */
 export function retrieveUnderRules(
   db: InstanceType<typeof Database>,
   rules: RequestRules,
   q: RulesQuery,
-  now: Date,
 ): RulesRetrieval {
   const inWindow = titlesObeying(db, rules, q);
-  const floor = rules.yearMin;
-  const olderFloor = now.getFullYear() - OLDER_YEARS_BACK;
-  if (rules.yearSource !== 'default' || floor === null || olderFloor >= floor || inWindow.length >= FULL_SET) {
-    return { rules, inWindow, older: [], olderRules: null };
+  const none = { rules, inWindow, close: [], closeRules: null, older: [], olderRules: null };
+  if (inWindow.length >= FULL_SET) return none;
+
+  let close: CandidateTitle[] = [];
+  let closeRules: RequestRules | null = null;
+  if (hasSoftClauses(rules)) {
+    const relaxed = hardRules(rules);
+    close = closeMatches(db, rules, relaxed, q, new Set(inWindow.map((t) => t.id)));
+    closeRules = close.length > 0 ? relaxed : null;
   }
-  const olderRules: RequestRules = { ...rules, yearMin: olderFloor, yearMax: floor - 1 };
+  const withClose = { ...none, close, closeRules };
+
+  const floor = rules.yearMin;
+  const filled = inWindow.length + Math.min(close.length, FULL_SET - inWindow.length);
+  if (rules.yearSource !== 'default' || floor === null || filled >= FULL_SET) return withClose;
+  const olderRules: RequestRules = { ...rules, yearMin: floor - OLDER_YEARS_BACK, yearMax: floor - 1 };
   const older = titlesObeying(db, olderRules, q);
-  return { rules, inWindow, older, olderRules: older.length > 0 ? olderRules : null };
+  return { ...withClose, older, olderRules: older.length > 0 ? olderRules : null };
 }
 
-/** How many older titles may join the list: the places the window left free, MAX_OLDER_PICKS at most. */
+/** How many close matches may join the list: the places the strict matches left free. */
+export function closeRoom(r: RulesRetrieval): number {
+  return Math.min(r.close.length, Math.max(0, FULL_SET - r.inWindow.length));
+}
+
+/** How many older titles may join the list: the places still free after the close matches, MAX_OLDER_PICKS at most. */
 export function olderRoom(r: RulesRetrieval): number {
-  return r.older.length > 0 ? Math.min(MAX_OLDER_PICKS, Math.max(0, FULL_SET - r.inWindow.length)) : 0;
+  if (r.older.length === 0) return 0;
+  return Math.min(MAX_OLDER_PICKS, Math.max(0, FULL_SET - r.inWindow.length - closeRoom(r)));
 }
 
 /**
  * The candidates shown to the model: the best SLATE_SIZE in the window (or the
  * best SLATE_PER_MEDIA films and series each, so both can be offered, when the
- * request leaves that open), and a choice of older titles for the free places.
+ * request leaves that open), and a choice of close matches and older titles
+ * for the free places.
  */
-export function requestSlate(r: RulesRetrieval, mediaOpen: boolean): { recent: CandidateTitle[]; older: CandidateTitle[] } {
+export function requestSlate(
+  r: RulesRetrieval,
+  mediaOpen: boolean,
+): { recent: CandidateTitle[]; close: CandidateTitle[]; older: CandidateTitle[] } {
   let recent: CandidateTitle[];
   if (mediaOpen) {
     const count = { movie: 0, tv: 0 };
@@ -155,7 +212,11 @@ export function requestSlate(r: RulesRetrieval, mediaOpen: boolean): { recent: C
   } else {
     recent = r.inWindow.slice(0, SLATE_SIZE);
   }
-  return { recent, older: r.older.slice(0, olderRoom(r) * OLDER_CHOICE_PER_PLACE) };
+  return {
+    recent,
+    close: r.close.slice(0, closeRoom(r) * CHOICE_PER_PLACE),
+    older: r.older.slice(0, olderRoom(r) * CHOICE_PER_PLACE),
+  };
 }
 
 export interface ReferenceTitle {

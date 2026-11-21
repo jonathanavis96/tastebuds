@@ -23,7 +23,7 @@ import {
 import type { Config } from '../config.js';
 
 const mockConfig: Pick<Config, 'ollamaUrl'> = { ollamaUrl: 'http://localhost:11434' };
-/** Fixed clock for the rolling year floor: recent means 2021 or newer. */
+/** Fixed clock for the rolling year floor: recent means 2015 or newer. */
 const DEFAULT_HARD_FILTERS = defaultHardFilters(new Date('2026-06-01T00:00:00Z'));
 const DIM = 8;
 
@@ -85,7 +85,7 @@ const JUNK: Array<[string, Record<string, unknown>]> = [
   ['Fourteen Minute Short', { runtime_minutes: 14 }],
   ['Silent Era', { year: 1927 }],
   ['Low Rated', { vote_average: 4.8 }],
-  ['Not Recent', { year: 2015 }],
+  ['Not Recent', { year: 2014 }],
   ['No IMDb Rating', { imdb_rating: null }],
   ['Low IMDb Rating', { imdb_rating: '5.4' }],
   ['Few IMDb Votes', { imdb_votes: 120 }],
@@ -154,12 +154,12 @@ describe('widening through the taste pool', () => {
   it('widens year → runtime → IMDb votes in order until the pool minimum is met, and reports the steps', async () => {
     const db = createTestDb();
     const pid = seedProfile(db, 'A');
-    // 4 strict-passing movies, then 3 unlocked at year>=2011, 3 at year>=2001,
+    // 4 strict-passing movies, then 3 unlocked at year>=2005, 3 at year>=1995,
     // 2 at year>=1980, 2 at runtime>=40 and 6 at IMDb votes>=300 — 20 in total,
     // which is MIN_POOL_ROWS, so the ladder stops before the TMDB vote step.
     for (let i = 0; i < 4; i++) seedTitle(db, `Strict ${i}`);
-    for (let i = 0; i < 3; i++) seedTitle(db, `Tens ${i}`, { year: 2014 });
-    for (let i = 0; i < 3; i++) seedTitle(db, `Noughties ${i}`, { year: 2004 });
+    for (let i = 0; i < 3; i++) seedTitle(db, `Noughties ${i}`, { year: 2008 });
+    for (let i = 0; i < 3; i++) seedTitle(db, `Nineties ${i}`, { year: 1998 });
     for (let i = 0; i < 2; i++) seedTitle(db, `Eighties ${i}`, { year: 1986 });
     for (let i = 0; i < 2; i++) seedTitle(db, `Short ${i}`, { runtime_minutes: 45 });
     for (let i = 0; i < 6; i++) seedTitle(db, `Lesser Known ${i}`, { imdb_votes: 400 });
@@ -174,10 +174,10 @@ describe('widening through the taste pool', () => {
       mockConfig,
     );
     const titles = pool.onTaste.map(c => c.title);
-    expect(steps).toEqual(['year>=2011', 'year>=2001', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150']);
+    expect(steps).toEqual(['year>=2005', 'year>=1995', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150']);
     expect(titles.filter(t => t.startsWith('Strict'))).toHaveLength(4);
-    expect(titles.filter(t => t.startsWith('Tens'))).toHaveLength(3);
     expect(titles.filter(t => t.startsWith('Noughties'))).toHaveLength(3);
+    expect(titles.filter(t => t.startsWith('Nineties'))).toHaveLength(3);
     expect(titles.filter(t => t.startsWith('Eighties'))).toHaveLength(2);
     expect(titles.filter(t => t.startsWith('Short'))).toHaveLength(2);
     expect(titles.filter(t => t.startsWith('Lesser'))).toHaveLength(6);

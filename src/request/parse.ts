@@ -2,7 +2,7 @@ import {
   defaultRules, GOOD_RATING_FLOOR, NEW_YEARS, RECENT_YEARS, TOP_RATING_FLOOR,
 } from './rules.js';
 import type { CanonGenre, RequestRules, RuleClause } from './rules.js';
-import { EASY_GENRES, FILLER, LEXICON, MAX_PHRASE_WORDS, THEMES, VOCAB } from './vocabulary.js';
+import { EASY_GENRES, FEEL_THEMES, FILLER, LEXICON, MAX_PHRASE_WORDS, THEMES, VOCAB } from './vocabulary.js';
 import type { Entry } from './vocabulary.js';
 
 /** "A short film" with no stated length means at most this many minutes. */
@@ -24,6 +24,8 @@ interface GenreHit {
   genres: CanonGenre[];
   label: string;
   noun: boolean;
+  /** A mood word: its clause is soft (RuleClause.soft). */
+  soft: boolean;
   pos: number;
   end: number;
 }
@@ -395,7 +397,7 @@ function readWords(toks: Token[], r: Reading): void {
 function applyEntry(e: Entry, toks: Token[], i: number, len: number, r: Reading): void {
   switch (e.kind) {
     case 'genre':
-      r.genreHits.push({ genres: e.genres, label: e.label, noun: e.noun, pos: i, end: i + len });
+      r.genreHits.push({ genres: e.genres, label: e.label, noun: e.noun, soft: e.soft, pos: i, end: i + len });
       return;
     case 'theme':
       if (isIdiom(e.theme, toks, i, len)) return;
@@ -446,6 +448,8 @@ interface Placed {
  * Genre hits → clauses. Two genre nouns joined by "and"/"or"/"&"/"/" form one
  * either-of clause; words simply listed each make their own clause. The same
  * genres named twice are one clause, labelled by the noun when there is one.
+ * A clause from a mood word is soft; named again by a noun or a hard word
+ * ("scary horror"), it is hard.
  */
 function genreClauses(hits: GenreHit[], toks: Token[]): Placed[] {
   const groups: GenreHit[][] = [];
@@ -460,15 +464,19 @@ function genreClauses(hits: GenreHit[], toks: Token[]): Placed[] {
   const add = (p: Placed) => {
     const key = [...p.clause.genres].sort().join('|');
     const same = placed.find((q) => [...q.clause.genres].sort().join('|') === key);
-    if (!same) placed.push(p);
-    else if (p.noun && !same.noun) Object.assign(same, { noun: true, clause: { ...same.clause, label: p.clause.label } });
+    if (!same) {
+      placed.push(p);
+      return;
+    }
+    if (p.noun && !same.noun) Object.assign(same, { noun: true, clause: { ...same.clause, label: p.clause.label } });
+    if (!p.clause.soft && same.clause.soft) same.clause = withSoft(same.clause, false);
   };
   for (const g of groups) {
     const [first] = g;
     if (g.length === 1) {
       for (const genre of first.genres) {
         const label = first.genres.length > 1 ? genre : first.label;
-        add({ pos: first.pos, noun: first.noun, clause: { label, genres: [genre], terms: [] } });
+        add({ pos: first.pos, noun: first.noun, clause: withSoft({ label, genres: [genre], terms: [] }, first.soft) });
       }
       continue;
     }
@@ -478,11 +486,23 @@ function genreClauses(hits: GenreHit[], toks: Token[]): Placed[] {
   return placed;
 }
 
+/** `clause` with `soft: true`, or without the field when it is hard. */
+function withSoft(clause: RuleClause, soft: boolean): RuleClause {
+  const { soft: _old, ...rest } = clause;
+  return soft ? { ...rest, soft: true } : rest;
+}
+
+/**
+ * The request's themes form one any-of clause. It is soft only when every theme
+ * in it is a feel ("mind-bending"); with a subject in it ("mind-bending space")
+ * it is hard, since the subject must hold.
+ */
 function themeClause(themes: Reading['themes']): Placed | null {
   if (themes.length === 0) return null;
   const label = themes.map((t) => THEMES[t.key].label).join(', ');
   const terms = [...new Set(themes.flatMap((t) => THEMES[t.key].terms))];
-  return { pos: themes[0].pos, noun: true, clause: { label, genres: [], terms } };
+  const soft = themes.every((t) => FEEL_THEMES.has(t.key));
+  return { pos: themes[0].pos, noun: true, clause: withSoft({ label, genres: [], terms }, soft) };
 }
 
 function assemble(r: Reading, toks: Token[], now: Date): RequestRules {

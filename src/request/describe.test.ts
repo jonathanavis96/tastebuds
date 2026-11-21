@@ -11,7 +11,7 @@ function rules(over: Partial<RequestRules>): RequestRules {
 
 describe('describeRules', () => {
   it('describes the default window, since it filters', () => {
-    expect(describeRules(defaultRules(NOW))).toEqual(['2021 or newer']);
+    expect(describeRules(defaultRules(NOW))).toEqual(['2015 or newer']);
   });
 
   it('lists every rule in reading order', () => {
@@ -44,6 +44,6 @@ describe('describeRules', () => {
 
   it('names series, a minimum runtime and other languages', () => {
     expect(describeRules(rules({ mediaType: 'tv', minRuntime: 120, language: 'ko' })))
-      .toEqual(['Series', '2021 or newer', 'Over 120 min', 'Korean']);
+      .toEqual(['Series', '2015 or newer', 'Over 120 min', 'Korean']);
   });
 });

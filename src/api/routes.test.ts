@@ -257,7 +257,7 @@ describe('feed response: the picks in one section per request', () => {
     for (const r of feed.recs) expect(r).not.toHaveProperty('request_summary');
   });
 
-  it('adds a repeat of a request below its earlier picks, and moves that section to the top', async () => {
+  it('adds a repeat of a request above its earlier picks, and moves that section to the top', async () => {
     const db = setupDb();
     const first = addPick(db, 841, '2026-11-01T10:00:00.000Z', 'Thriller new 2025', JSON.stringify(newer));
     const comedy = addPick(db, 842, '2026-11-02T10:00:00.000Z', 'comedy', JSON.stringify(older));
@@ -265,7 +265,7 @@ describe('feed response: the picks in one section per request', () => {
     const app = new Hono().route('/api', createApiRoutes(db, mockConfig));
 
     const feed = await (await app.request('/api/recommendations/1')).json() as Feed;
-    expect(feed.sections.map(s => s.recIds)).toEqual([[first, again], [comedy]]);
+    expect(feed.sections.map(s => s.recIds)).toEqual([[again, first], [comedy]]);
     expect(feed.sections[0].summary).toMatchObject({ note: 'Asked again.' });
   });
 

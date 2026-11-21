@@ -6,9 +6,11 @@ import { upsertTitle } from '../db/repos/titles.js';
 import { upsertProfile } from '../db/repos/profiles.js';
 import { upsertWatchEvent } from '../db/repos/watchEvents.js';
 import { defaultHardFilters } from './filters.js';
-import { defaultRules, type RequestRules, type RuleClause } from '../request/rules.js';
+import { defaultRules, DEFAULT_RECENT_YEARS, type RequestRules, type RuleClause } from '../request/rules.js';
+import { parseRequest } from '../request/parse.js';
 import { titleObeys } from '../request/enforce.js';
 import {
+  closeRoom,
   countObeying,
   findReferenceTitles,
   olderRoom,
@@ -164,19 +166,19 @@ describe('titlesObeying', () => {
 describe('retrieveUnderRules: recent by default', () => {
   function catalogue(db: InstanceType<typeof Database>, recent: number) {
     for (let i = 0; i < recent; i++) seed(db, `Recent ${i}`, { year: 2023 });
-    for (let i = 0; i < 4; i++) seed(db, `Twenty Tens ${i}`, { year: 2018 });
-    for (let i = 0; i < 6; i++) seed(db, `Noughties ${i}`, { year: 2008 });
+    for (let i = 0; i < 4; i++) seed(db, `Before Window ${i}`, { year: 2010 });
+    for (let i = 0; i < 6; i++) seed(db, `Too Old ${i}`, { year: 2003 });
   }
 
-  it('reaches ten years back for a short default window, and offers a few older titles for the free places', () => {
+  it('reaches the ten years before the window\'s floor for a short default window, and offers a few older titles for the free places', () => {
     const db = createDb();
     catalogue(db, 3);
-    const r = retrieveUnderRules(db, rules({ must: [genre('Thriller')] }), query(), NOW);
+    const r = retrieveUnderRules(db, rules({ must: [genre('Thriller')] }), query());
 
     expect(r.inWindow).toHaveLength(3);
-    // 2016 to 2020 only: the 2008 titles are for a request that asks for them.
-    expect([r.olderRules?.yearMin, r.olderRules?.yearMax]).toEqual([2016, 2020]);
-    expect(r.older.map(t => t.year)).toEqual([2018, 2018, 2018, 2018]);
+    // 2005 to 2014 only: the 2003 titles are for a request that asks for them.
+    expect([r.olderRules?.yearMin, r.olderRules?.yearMax]).toEqual([2005, 2014]);
+    expect(r.older.map(t => t.year)).toEqual([2010, 2010, 2010, 2010]);
     expect(olderRoom(r)).toBe(MAX_OLDER_PICKS);
     const slate = requestSlate(r, false);
     expect(slate.recent).toHaveLength(3);
@@ -186,13 +188,13 @@ describe('retrieveUnderRules: recent by default', () => {
   it('offers no more older titles than the list has free places', () => {
     const db = createDb();
     catalogue(db, FULL_SET - 1);
-    expect(olderRoom(retrieveUnderRules(db, rules({}), query(), NOW))).toBe(1);
+    expect(olderRoom(retrieveUnderRules(db, rules({}), query()))).toBe(1);
   });
 
   it('does not widen once the default window holds a full set', () => {
     const db = createDb();
     catalogue(db, FULL_SET);
-    const r = retrieveUnderRules(db, rules({}), query(), NOW);
+    const r = retrieveUnderRules(db, rules({}), query());
     expect(r.older).toEqual([]);
     expect(r.olderRules).toBeNull();
     expect(olderRoom(r)).toBe(0);
@@ -202,10 +204,113 @@ describe('retrieveUnderRules: recent by default', () => {
     for (const yearSource of ['stated', 'recent'] as const) {
       const db = createDb();
       catalogue(db, 3);
-      const r = retrieveUnderRules(db, rules({ yearMin: 2023, yearSource }), query(), NOW);
+      const r = retrieveUnderRules(db, rules({ yearMin: 2023, yearSource }), query());
       expect(r.inWindow).toHaveLength(3);
       expect(r.older).toEqual([]);
     }
+  });
+});
+
+describe('the default year window', () => {
+  it('is the last twelve calendar years: the current year minus 11', () => {
+    expect(DEFAULT_RECENT_YEARS).toBe(12);
+    expect(defaultRules(NOW).yearMin).toBe(NOW.getFullYear() - 11);
+    expect(parseRequest('thriller', NOW).yearMin).toBe(2015);
+    expect(defaultRules(new Date('2030-03-01T12:00:00Z')).yearMin).toBe(2019);
+  });
+});
+
+describe('retrieveUnderRules: close matches for soft (mood) clauses', () => {
+  const scary: RuleClause = { label: 'Scary', genres: ['Horror'], terms: [], soft: true };
+  const bending: RuleClause = { label: 'Mind-bending', genres: [], terms: ['twist ending', 'time loop'], soft: true };
+  const scifi = genre('Science Fiction');
+  const moody = rules({ must: [scifi, bending, scary] });
+
+  it('returns the strict matches, then close matches ordered by fewest soft clauses missed, then by rank', () => {
+    const db = createDb();
+    seed(db, 'Strict', { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]' });
+    // Nearest to the query, but misses both moods: last among the close matches.
+    seed(db, 'Misses Both Near', { genres: '["Science Fiction"]', embedding: vec(0) });
+    seed(db, 'Misses Scary Far', { genres: '["Science Fiction"]', keywords: '["twist ending"]', embedding: vec(5) });
+    seed(db, 'Misses Scary Near', { genres: '["Science Fiction"]', keywords: '["time loop"]', embedding: vec(0) });
+    seed(db, 'Misses Bending', { genres: '["Science Fiction","Horror"]', embedding: vec(5) });
+    // Hard rules still hold: not sci-fi, too old, excluded.
+    seed(db, 'Horror Only', { genres: '["Horror"]', keywords: '["time loop"]' });
+    seed(db, 'Old Sci-fi', { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]', year: 2001 });
+    seed(db, 'Nun Sci-fi', { genres: '["Science Fiction"]', keywords: '["time loop","nun"]' });
+
+    const r = retrieveUnderRules(db, { ...moody, mustNot: [term('nuns', 'nun')] }, query());
+
+    expect(r.inWindow.map(t => t.title)).toEqual(['Strict']);
+    expect(r.close.map(t => t.title)).toEqual(['Misses Scary Near', 'Misses Scary Far', 'Misses Bending', 'Misses Both Near']);
+    expect(r.closeRules?.must).toEqual([scifi]);
+    expect(r.close.every(t => titleObeys(r.closeRules!, t).ok)).toBe(true);
+    expect(closeRoom(r)).toBe(4);
+    const slate = requestSlate(r, false);
+    expect(slate.recent.map(t => t.title)).toEqual(['Strict']);
+    expect(slate.close).toHaveLength(4);
+  });
+
+  it('offers no close matches when ten or more titles match every rule', () => {
+    const db = createDb();
+    for (let i = 0; i < FULL_SET; i++) seed(db, `Strict ${i}`, { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]' });
+    seed(db, 'Close', { genres: '["Science Fiction"]', keywords: '["time loop"]' });
+    const r = retrieveUnderRules(db, moody, query());
+    expect(r.inWindow).toHaveLength(FULL_SET);
+    expect(r.close).toEqual([]);
+    expect(r.closeRules).toBeNull();
+  });
+
+  it('offers no close matches when the request has no soft clauses', () => {
+    const db = createDb();
+    seed(db, 'Sci-fi Horror', { genres: '["Science Fiction","Horror"]' });
+    seed(db, 'Sci-fi Only', { genres: '["Science Fiction"]' });
+    const r = retrieveUnderRules(db, rules({ must: [scifi, genre('Horror')] }), query());
+    expect(r.inWindow.map(t => t.title)).toEqual(['Sci-fi Horror']);
+    expect(r.close).toEqual([]);
+  });
+
+  it('reaches for older titles only when the list is still short after the close matches', () => {
+    const fill = (db: InstanceType<typeof Database>, close: number) => {
+      seed(db, 'Strict', { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]' });
+      for (let i = 0; i < close; i++) seed(db, `Close ${i}`, { genres: '["Science Fiction"]', keywords: '["time loop"]' });
+      for (let i = 0; i < 5; i++) seed(db, `Older ${i}`, { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]', year: 2010 });
+    };
+    const full = createDb();
+    fill(full, 9);
+    const enough = retrieveUnderRules(full, moody, query());
+    expect([enough.inWindow.length, enough.close.length]).toEqual([1, 9]);
+    expect(enough.older).toEqual([]);
+    expect(olderRoom(enough)).toBe(0);
+
+    const short = createDb();
+    fill(short, 7);
+    const r = retrieveUnderRules(short, moody, query());
+    expect([r.inWindow.length, r.close.length, closeRoom(r)]).toEqual([1, 7, 7]);
+    expect([r.olderRules?.yearMin, r.olderRules?.yearMax]).toEqual([2005, 2014]);
+    // Older titles obey every rule, moods included; two places are left.
+    expect(r.older).toHaveLength(5);
+    expect(olderRoom(r)).toBe(2);
+  });
+
+  it('reproduces the reported case in miniature: sci-fi mind bending scary series', () => {
+    const db = createDb();
+    const series = (title: string, o: Record<string, unknown>) =>
+      seed(db, title, { media_type: 'tv', status: 'Ended', imdb_rating: '8.0', year: 2022, ...o });
+    series('Strict Show', { genres: '["Science Fiction","Horror"]', keywords: '["time loop"]' });
+    for (const name of ['Severed', 'Pantheonic', 'Dark Matters', 'Loki-ish', 'Bodies Found', 'Peripheral Vision']) {
+      series(name, { genres: '["Science Fiction","Drama"]', keywords: '["alternate reality"]' });
+    }
+    series('Plain Drama', { genres: '["Drama"]', keywords: '["alternate reality"]' });
+    series('Low Rated', { genres: '["Science Fiction"]', keywords: '["time loop"]', imdb_rating: '6.5' });
+    series('A Film', { media_type: 'movie', status: 'Released', genres: '["Science Fiction"]', keywords: '["time loop"]' });
+
+    const asked = { ...parseRequest('Sci-fi mind bending scary', NOW), mediaType: 'tv' as const, minImdb: 7.0 };
+    expect(asked.must.map(c => [c.label, c.soft === true])).toEqual([['Sci-fi', false], ['Mind-bending', true], ['Scary', true]]);
+
+    const r = retrieveUnderRules(db, asked, query());
+    expect(r.inWindow.map(t => t.title)).toEqual(['Strict Show']);
+    expect(r.close.map(t => t.title).sort()).toEqual(['Bodies Found', 'Dark Matters', 'Loki-ish', 'Pantheonic', 'Peripheral Vision', 'Severed']);
   });
 });
 
@@ -214,7 +319,7 @@ describe('requestSlate', () => {
     const db = createDb();
     for (let i = 0; i < SLATE_PER_MEDIA + 5; i++) seed(db, `Film ${i}`);
     for (let i = 0; i < 5; i++) seed(db, `Series ${i}`, { media_type: 'tv', status: 'Ended', embedding: vec(4) });
-    const r = retrieveUnderRules(db, rules({}), query(), NOW);
+    const r = retrieveUnderRules(db, rules({}), query());
     const slate = requestSlate(r, true);
     expect(slate.recent.filter(t => t.media_type === 'movie')).toHaveLength(SLATE_PER_MEDIA);
     expect(slate.recent.filter(t => t.media_type === 'tv')).toHaveLength(5);

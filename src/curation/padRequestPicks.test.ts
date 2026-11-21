@@ -15,7 +15,7 @@ function cand(tmdb_id: number): CandidateTitle {
   };
 }
 
-const WHY = 'Matches your request: Thriller, 2021 or newer.';
+const WHY = 'Matches your request: Thriller, 2015 or newer.';
 const pick = (tmdbId: number): CurationResult => ({ tmdbId, why: 'w', category: 'Based on your request', kind: 'core', predictedRating: 4 });
 
 const profile: ProfileRow = { id: 1, name: 'Alex', media_weighting: 0.5, is_derived: 0, config: '{}' };
@@ -78,6 +78,20 @@ describe('arrangeRequestPicks', () => {
   });
 });
 
+describe('arrangeRequestPicks with close matches', () => {
+  it('puts strict matches first, then close matches up to their room, then older titles in the room left', () => {
+    const recent = [cand(1), cand(2)];
+    const close = Array.from({ length: 10 }, (_, i) => cand(20 + i));
+    const older = Array.from({ length: 5 }, (_, i) => cand(100 + i));
+    // The model leads with close matches and older titles; the code keeps the groups in order.
+    const chosen = [pick(25), pick(100), pick(21), pick(2)];
+    const out = arrangeRequestPicks(chosen, { recent, close, closeRoom: 6, older, olderRoom: 2 }, WHY, MIN_REQUEST_PICKS);
+    expect(out.recent.map(p => p.tmdbId)).toEqual([2, 1]);
+    expect(out.close.map(p => p.tmdbId)).toEqual([25, 21, 20, 22, 23, 24]);
+    expect(out.older.map(p => p.tmdbId)).toEqual([100, 101]);
+  });
+});
+
 describe('request prompt', () => {
   const input = (over: Partial<RequestPromptInput> = {}): RequestPromptInput => ({
     text: 'Thriller new 2025',
@@ -107,6 +121,24 @@ describe('request prompt', () => {
   it('asks for every candidate when fewer than ten exist', () => {
     const prompt = buildRequestPrompt(input({ candidates: [cand(1), cand(2), cand(3)] }), profile, sig);
     expect(prompt).toContain('exactly 3 candidates');
+  });
+
+  it('lists close matches apart, each with the mood words it misses, before older fill-ins', () => {
+    const prompt = buildRequestPrompt(input({
+      candidates: [cand(1)],
+      close: [cand(30), cand(31)],
+      closeRoom: 2,
+      closeMissed: new Map([[30, ['Scary']], [31, ['Mind-bending', 'Scary']]]),
+      older: [cand(50)],
+      olderRoom: 1,
+    }), profile, sig);
+    expect(prompt).toContain('## Close matches');
+    expect(prompt).toContain('2. [tmdb_id:30]');
+    expect(prompt).toMatch(/\[tmdb_id:30\].*\(misses: Scary\)/);
+    expect(prompt).toMatch(/\[tmdb_id:31\].*\(misses: Mind-bending, Scary\)/);
+    expect(prompt).toContain('4. [tmdb_id:50]');
+    expect(prompt.indexOf('## Close matches')).toBeLessThan(prompt.indexOf('## Older candidates'));
+    expect(prompt).toContain('exactly 4 candidates');
   });
 
   it('lists older fill-ins apart, with how many may be used', () => {

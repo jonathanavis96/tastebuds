@@ -188,18 +188,29 @@ const THEME_WORDS: Record<string, string[]> = {
 };
 
 /**
+ * Themes that name a feel rather than a subject. Like a mood word, a feel is a
+ * soft rule (RuleClause.soft): space, time travel, true story or christmas say
+ * what a title is about and always hold, while "mind-bending" or
+ * "psychological" describe how it plays, which titles' keywords record unevenly.
+ */
+export const FEEL_THEMES: ReadonlySet<string> = new Set(['mind-bending', 'psychological']);
+
+/**
  * A genre or mood word. `noun` marks a genre noun ("thriller", "horror"), which
  * may be joined to the next one by "and"/"or" into one either-of clause; mood
- * words ("scary", "gripping") never join.
+ * words ("scary", "gripping") never join. `soft` marks a mood word, whose
+ * clause may be missed by a close match (RuleClause.soft); every mood word is
+ * soft except "kid friendly" / "family friendly", which is a hard requirement.
  */
 interface GenreWord {
   genres: CanonGenre[];
   label: string;
   noun: boolean;
+  soft: boolean;
 }
 
-function genre(g: CanonGenre, label: string, noun: boolean, words: string[]): [string, GenreWord][] {
-  return words.map((w) => [w, { genres: [g], label, noun }]);
+function genre(g: CanonGenre, label: string, noun: boolean, words: string[], soft = !noun): [string, GenreWord][] {
+  return words.map((w) => [w, { genres: [g], label, noun, soft }]);
 }
 
 const GENRE_WORDS: [string, GenreWord][] = [
@@ -228,15 +239,15 @@ const GENRE_WORDS: [string, GenreWord][] = [
   ...genre('Documentary', 'Documentary', true, ['documentary', 'docuseries', 'doc', 'docu']),
   ...genre('Adventure', 'Adventure', true, ['adventure']),
   ...genre('Family', 'Family', true, ['family', 'kid']),
-  ...genre('Family', 'Family', false, ['kid friendly', 'family friendly']),
+  ...genre('Family', 'Family', false, ['kid friendly', 'family friendly'], false),
   ...genre('War', 'War', true, ['war']),
   ...genre('Western', 'Western', true, ['western', 'cowboy']),
   ...genre('History', 'History', true, ['history']),
   ...genre('History', 'Historical', false, ['historical', 'period']),
   ...genre('Music', 'Musical', true, ['musical', 'music']),
   ...genre('Reality', 'Reality', true, ['reality show', 'reality tv']),
-  ['rom com', { genres: ['Romance', 'Comedy'], label: 'Rom-com', noun: false }],
-  ['romcom', { genres: ['Romance', 'Comedy'], label: 'Rom-com', noun: false }],
+  ['rom com', { genres: ['Romance', 'Comedy'], label: 'Rom-com', noun: false, soft: true }],
+  ['romcom', { genres: ['Romance', 'Comedy'], label: 'Rom-com', noun: false, soft: true }],
 ];
 
 /** "Easy watch" means one of these, and never Horror, when the request names no genre. */
@@ -360,3 +371,15 @@ export const VOCAB: ReadonlySet<string> = new Set([
 ]);
 
 export const MAX_PHRASE_WORDS = Math.max(...[...LEXICON.keys()].map((p) => p.split(' ').length));
+
+/**
+ * Whether a phrase is a mood word or a feel ("scary", "Mind-bending",
+ * "edge-of-seat"): a clause the model adds under such a label is soft like the
+ * parser's own. Anything else the model adds is hard.
+ */
+export function isMoodPhrase(phrase: string): boolean {
+  const key = phrase.toLowerCase().replace(/[-_]/g, ' ').replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  const entry = LEXICON.get(key);
+  if (entry?.kind === 'genre') return entry.soft;
+  return entry?.kind === 'theme' && FEEL_THEMES.has(entry.theme);
+}

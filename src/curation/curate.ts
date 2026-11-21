@@ -217,7 +217,7 @@ export async function curateCandidates(
  * Ask the model to order a request's candidates and write the "why" lines.
  * Returns its picks in its order, keeping only tmdb_ids it was shown, each
  * once; storing them is the caller's job. Rejects when the call fails.
- * `input.candidates` and `input.older` must not share a tmdb_id (see
+ * `input.candidates`, `input.close` and `input.older` must not share a tmdb_id (see
  * withoutTmdbIdClashes).
  */
 export async function curateRequest(
@@ -228,7 +228,7 @@ export async function curateRequest(
   spawnFn?: SpawnFn,
 ): Promise<CurationResult[]> {
   const results = await runCuration(buildRequestPrompt(input, profile, sig), config, spawnFn);
-  const known = new Set([...input.candidates, ...input.older].map(c => c.tmdb_id));
+  const known = new Set([...input.candidates, ...(input.close ?? []), ...input.older].map(c => c.tmdb_id));
   const seen = new Set<number>();
   const kept = results.filter((r) => {
     if (!known.has(r.tmdbId) || seen.has(r.tmdbId)) return false;
@@ -239,24 +239,31 @@ export async function curateRequest(
 }
 
 /**
- * The final order of a request's picks. Titles from the request's own year
- * window come first and fill the list up to MIN_REQUEST_PICKS; older titles
- * (offered only when the default window had too few) follow, never more than
- * `olderRoom`. Within each group the model's order leads and the ranked
+ * The final order of a request's picks. Titles that match every rule come
+ * first and fill the list up to `size`; close matches (offered only when too
+ * few matched every rule) follow, never more than `closeRoom`; then older
+ * titles (offered only when the default window was still short), never more
+ * than `olderRoom`. Within each group the model's order leads and the ranked
  * candidates pad what it left out, so a failed or short answer still returns
  * every title the rules allow, in rank order.
  */
 export function arrangeRequestPicks(
   chosen: CurationResult[],
-  groups: { recent: CandidateTitle[]; older: CandidateTitle[]; olderRoom: number },
+  groups: { recent: CandidateTitle[]; close?: CandidateTitle[]; closeRoom?: number; older: CandidateTitle[]; olderRoom: number },
   padWhy: string,
   size: number,
-): { recent: CurationResult[]; older: CurationResult[] } {
-  const recentIds = new Set(groups.recent.map(c => c.tmdb_id));
-  const olderIds = new Set(groups.older.map(c => c.tmdb_id));
+): { recent: CurationResult[]; close: CurationResult[]; older: CurationResult[] } {
+  const close = groups.close ?? [];
+  const take = (group: CandidateTitle[], target: number) => {
+    const ids = new Set(group.map(c => c.tmdb_id));
+    return padRequestPicks(chosen.filter(p => ids.has(p.tmdbId)).slice(0, target), group, target, padWhy);
+  };
   const recentTarget = Math.min(size, groups.recent.length);
-  const olderTarget = Math.min(groups.olderRoom, groups.older.length, Math.max(0, size - recentTarget));
-  const recent = padRequestPicks(chosen.filter(p => recentIds.has(p.tmdbId)).slice(0, recentTarget), groups.recent, recentTarget, padWhy);
-  const older = padRequestPicks(chosen.filter(p => olderIds.has(p.tmdbId)).slice(0, olderTarget), groups.older, olderTarget, padWhy);
-  return { recent, older };
+  const closeTarget = Math.min(groups.closeRoom ?? 0, close.length, Math.max(0, size - recentTarget));
+  const olderTarget = Math.min(groups.olderRoom, groups.older.length, Math.max(0, size - recentTarget - closeTarget));
+  return {
+    recent: take(groups.recent, recentTarget),
+    close: take(close, closeTarget),
+    older: take(groups.older, olderTarget),
+  };
 }

@@ -99,9 +99,17 @@ code; similarity to the request (blended with your taste), genre affinity, quali
 popularity only order the titles that pass. A title named as an example ("like Heat")
 steers the order and is never a pick itself.
 
-With no year in the request, picks are **recent by default** (the last six calendar years).
-Only then, and only when fewer than 10 titles match, older ones are added to fill the list,
-after the recent ones, and each says why ("Older pick: only 6 titles from 2021 on matched.").
+Mood words ("scary", "gripping", "funny") and feels ("mind-bending") are **soft**: when fewer
+than 10 titles match every rule, close matches fill the list, after the strict ones. A close
+match is in the same year window and keeps every other rule (genre nouns such as sci-fi or
+horror, subjects, exclusions, film or series, rating, runtime, language); the ones missing
+the fewest mood words come first, and each says what it misses ("Close match: not tagged
+Scary."). Series rarely carry Horror, so "scary sci-fi series" needs this.
+
+With no year in the request, picks are **recent by default** (the last twelve calendar years:
+2015 or newer in 2026). Only then, and only when the list is still short after any close
+matches, up to three older ones from the ten years before that are added, after the rest,
+and each says why ("Older pick: only 6 titles from 2015 on matched.").
 A stated or "new/recent" window is never widened: when fewer than 10 titles match, the list
 is shorter, and a note says what would show more. If the library is thin for a request,
 TMDB is asked for titles inside the rules first.

@@ -46,7 +46,7 @@ describe('refineRulesWithModel', () => {
     const prompt = args[args.indexOf('-p') + 1];
     expect(prompt).toContain('Today is 2026-11-19.');
     expect(prompt).toContain('Request: "Stephen King series"');
-    expect(prompt).toContain('Already understood: Series, 2021 or newer');
+    expect(prompt).toContain('Already understood: Series, 2015 or newer');
     expect(prompt).toContain('Words not yet understood: stephen, king');
     expect(prompt).toMatch(/Add nothing the request does not say/);
   });
@@ -74,6 +74,28 @@ describe('refineRulesWithModel', () => {
     expect(rules.must).toHaveLength(1);
     expect(rules.must[0].label).toBe('Mind-bending, chess');
     expect(rules.must[0].terms).toEqual(expect.arrayContaining(['time loop', 'chess', 'grandmaster']));
+  });
+
+  it('keeps a subject the model adds hard, and a mood it adds soft', async () => {
+    const spawn = answering({
+      ...EMPTY,
+      subjects: [
+        { label: 'chess', terms: ['chess', 'grandmaster'] },
+      ],
+    });
+    const { rules } = await refine('scary films about chess', spawn);
+    expect(rules.must.map((c) => [c.label, c.soft === true])).toEqual([['Scary', true], ['chess', false]]);
+
+    const moody = answering({ ...EMPTY, subjects: [{ label: 'mind-bending', terms: ['twist ending', 'surreal'] }] });
+    const { base, rules: soft } = await refine('something to bend my mind', moody);
+    expect(moody).toHaveBeenCalled();
+    expect(base.must).toEqual([]);
+    expect(soft.must.map((c) => [c.label, c.soft === true])).toEqual([['mind-bending', true]]);
+
+    // A subject joined to a soft theme clause makes the any-of clause hard.
+    const joined = answering({ ...EMPTY, subjects: [{ label: 'chess', terms: ['chess', 'grandmaster'] }] });
+    const { rules: hard } = await refine('mind-bending films about chess', joined);
+    expect(hard.must.map((c) => [c.label, c.soft === true])).toEqual([['Mind-bending, chess', false]]);
   });
 
   it('does not repeat a subject the parser already named', async () => {

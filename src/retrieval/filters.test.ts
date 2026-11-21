@@ -24,7 +24,7 @@ function createTestDb(): InstanceType<typeof Database> {
   return db;
 }
 
-/** Fixed clock for the rolling year floor: recent means 2021 or newer. */
+/** Fixed clock for the rolling year floor: recent means 2015 or newer. */
 const NOW = new Date('2026-06-01T00:00:00Z');
 const DEFAULT_HARD_FILTERS = defaultHardFilters(NOW);
 
@@ -65,7 +65,7 @@ describe('hardFilterSql', () => {
     addTitle(db, { title: 'Keep' });
     addTitle(db, { title: 'FewVotes', vote_count: 12 });
     addTitle(db, { title: 'LowRated', vote_average: 4.9 });
-    addTitle(db, { title: 'TooOld', year: 2020 });
+    addTitle(db, { title: 'TooOld', year: 2014 });
     addTitle(db, { title: 'Short', runtime_minutes: 14 });
     expect(survivors(db, DEFAULT_HARD_FILTERS)).toEqual(['Keep']);
   });
@@ -135,9 +135,9 @@ describe('hardFilterSql', () => {
 });
 
 describe('defaultHardFilters', () => {
-  it('admits the last six calendar years, counting the current one', () => {
-    expect(defaultHardFilters(new Date('2026-01-01T12:00:00Z')).minYear).toBe(2021);
-    expect(defaultHardFilters(new Date('2031-07-01T12:00:00Z')).minYear).toBe(2026);
+  it('admits the last twelve calendar years, counting the current one', () => {
+    expect(defaultHardFilters(new Date('2026-01-01T12:00:00Z')).minYear).toBe(2015);
+    expect(defaultHardFilters(new Date('2031-07-01T12:00:00Z')).minYear).toBe(2020);
   });
 });
 
@@ -149,7 +149,7 @@ describe('WIDENING_STEPS', () => {
       f = step.apply(f);
       seen.push(f);
     }
-    expect(seen.map(s => s.minYear)).toEqual([2011, 2001, 1980, 1980, 1980, 1980]);
+    expect(seen.map(s => s.minYear)).toEqual([2005, 1995, 1980, 1980, 1980, 1980]);
     expect(seen.map(s => s.minRuntimeMovie)).toEqual([60, 60, 60, 40, 40, 40]);
     expect(seen.map(s => [s.minImdbVotesMovie, s.minImdbVotesTv])).toEqual([
       [1000, 500], [1000, 500], [1000, 500], [1000, 500], [300, 150], [300, 150],
@@ -196,14 +196,14 @@ describe('withWidening', () => {
   });
 
   it('widens in order and stops at the first step that meets the minimum', () => {
-    // Only the year floor matters to this fake catalogue: 2001 unlocks enough rows.
+    // Only the year floor matters to this fake catalogue: 1995 unlocks enough rows.
     const res = withWidening(DEFAULT_HARD_FILTERS, 10, f =>
-      f.minYear != null && f.minYear <= 2001 ? Array.from({ length: 12 }, (_, i) => i) : [1, 2],
+      f.minYear != null && f.minYear <= 1995 ? Array.from({ length: 12 }, (_, i) => i) : [1, 2],
     );
     expect(res.rows).toHaveLength(12);
-    expect(res.filters.minYear).toBe(2001);
+    expect(res.filters.minYear).toBe(1995);
     expect(res.filters.minRuntimeMovie).toBe(DEFAULT_HARD_FILTERS.minRuntimeMovie);
-    expect(res.stepsApplied).toEqual(['year>=2011', 'year>=2001']);
+    expect(res.stepsApplied).toEqual(['year>=2005', 'year>=1995']);
   });
 
   it('exhausts every step and returns the best effort when the catalogue is thin', () => {
@@ -214,7 +214,7 @@ describe('withWidening', () => {
     expect(res.filters.minVotesMovie).toBe(HARD_FLOOR.minVotesMovie);
     expect(res.filters.minImdbVotesMovie).toBe(HARD_FLOOR.minImdbVotesMovie);
     expect(res.stepsApplied).toEqual([
-      'year>=2011', 'year>=2001', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150', 'votes>=20/10',
+      'year>=2005', 'year>=1995', 'year>=1980', 'runtime>=40', 'imdbVotes>=300/150', 'votes>=20/10',
     ]);
   });
 

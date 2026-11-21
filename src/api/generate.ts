@@ -26,6 +26,7 @@ import {
 import { titleIdsPassing, type HardFilters } from '../retrieval/filters.js';
 import {
   FULL_SET,
+  closeRoom,
   countObeying,
   findReferenceTitles,
   olderRoom,
@@ -42,7 +43,7 @@ import { ensureFreshRatings } from '../ratings/freshness.js';
 import { parseRequest } from '../request/parse.js';
 import { refineRulesWithModel } from '../request/modelParse.js';
 import { describeRules, describeYearWindow } from '../request/describe.js';
-import { titleObeys } from '../request/enforce.js';
+import { missedSoftLabels, titleObeys } from '../request/enforce.js';
 import { unreadableRequestReply } from '../request/unreadable.js';
 import type { RequestRules, RequestSummary } from '../request/rules.js';
 import { engagementMemberIds, feedFor, hardFiltersFor, soloProfileIds, type FeedResponse } from './feed.js';
@@ -246,10 +247,15 @@ interface Planned {
   unseen: number;
 }
 
+/** Where a pick came from: every rule matched, a close match (missed mood words), or an older title. */
+type PickGroup = 'match' | 'close' | 'older';
+/** The order the groups are listed in: strict matches always before close matches, older titles last. */
+const GROUP_ORDER: PickGroup[] = ['match', 'close', 'older'];
+
 interface RequestPick {
   title: CandidateTitle;
   result: CurationResult;
-  older: boolean;
+  group: PickGroup;
 }
 
 /** Times each stage of a request (read, embed, discovery, retrieval, curation, ratings), for the one log line per request. */
@@ -282,7 +288,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
 
   const base = requestBase(ctx);
   const requestEmbedding = await stages.run('embed', () => (deps.embedFn ?? embedText)(text, config));
-  const plan = (): Planned => planRequest(ctx, asked, base, requestEmbedding, now);
+  const plan = (): Planned => planRequest(ctx, asked, base, requestEmbedding);
 
   let planned = await stages.run('retrieval', plan);
   let discovered = 0;
@@ -296,16 +302,24 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   const why = understood.length > 0 ? `Matches your request: ${understood.join(', ')}.` : 'Matches your request.';
 
   let picks: RequestPick[] = [];
-  if (retrieval.inWindow.length + retrieval.older.length > 0) {
+  if (retrieval.inWindow.length + retrieval.close.length + retrieval.older.length > 0) {
     picks = await stages.run('curation', () => choosePicks(ctx, text, understood, retrieval, why));
     picks = keepObeying(picks, retrieval);
     picks = await stages.run('ratings', () => freshlyRated(ctx, picks, planned, why));
   }
 
-  const olderCount = picks.filter(p => p.older).length;
+  const olderCount = picks.filter(p => p.group === 'older').length;
+  const closeCount = picks.filter(p => p.group === 'close').length;
   const inList = matched - planned.unseen;
-  const summary: RequestSummary = { text, understood, matched, note: summaryNote(rules, retrieval.olderRules, matched, inList, picks.length, olderCount) };
-  const ruleNote = olderCount > 0 ? olderPickNote(rules, matched, inList) : null;
+  const summary: RequestSummary = {
+    text, understood, matched,
+    note: summaryNote(rules, retrieval.olderRules, matched, inList, picks.length, olderCount, closeCount),
+  };
+  const ruleNote = (p: RequestPick): string | null => {
+    if (p.group === 'older') return olderPickNote(rules, matched, inList);
+    if (p.group === 'close') return closePickNote(missedSoftLabels(retrieval.rules, p.title));
+    return null;
+  };
   for (const p of picks) {
     upsertRecommendation(db, {
       profile_id: profile.id,
@@ -318,7 +332,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
       kind: 'core',
       predicted_rating: p.result.predictedRating,
       request_summary: JSON.stringify(summary),
-      rule_note: p.older ? ruleNote : null,
+      rule_note: ruleNote(p),
     });
   }
   takeBatch(ctx);
@@ -327,7 +341,7 @@ async function generateForRequest(ctx: Context, text: string): Promise<FeedRespo
   const fmt = (name: string) => (stages.ms[name] == null ? '-' : `${stages.ms[name]}ms`);
   console.log(
     `[tastebuds] request profile=${profile.id} text=${JSON.stringify(text)} chips=[${understood.join(', ')}] ` +
-    `matched=${matched} picked=${picks.length} older=${olderCount}` +
+    `matched=${matched} picked=${picks.length} older=${olderCount} close=${closeCount}` +
     `${retrieval.olderRules ? ` widened=${describeYearWindow(retrieval.olderRules) ?? 'any year'}` : ''} discovered=${discovered} ` +
     `read=${fmt('read')} embed=${fmt('embed')} discovery=${fmt('discovery')} retrieval=${fmt('retrieval')} curation=${fmt('curation')} ratings=${fmt('ratings')}`,
   );
@@ -343,7 +357,7 @@ function requestBase(ctx: Context): RequestBase {
 }
 
 /** References, the final rules and the retrieval under them. Database only, so it is cheap to run again after discovery. */
-function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, requestEmbedding: number[], now: Date): Planned {
+function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, requestEmbedding: number[]): Planned {
   const refs = findReferenceTitles(ctx.db, asked.similarTo);
   // The profile's own IMDb setting is a rule of every request it makes, so it is
   // part of the rules the viewer is shown; the larger of it and the request's
@@ -365,11 +379,11 @@ function planRequest(ctx: Context, asked: RequestRules, base: RequestBase, reque
     affinity: base.affinity,
   };
   // Only titles not yet in the list are offered, so asking again adds new ones,
-  // and older titles join when too few new recent ones are left. Titles already
+  // and close matches, then older titles, join when too few new ones are left. Titles already
   // in the list still count as matching, so a repeat never answers "nothing
   // matches" while they are on the screen; only those rows are read to count them.
   const inList = [...ctx.pendingTitleIds];
-  const retrieval = retrieveUnderRules(ctx.db, enforced, { ...q, excludeTitleIds: [...q.excludeTitleIds, ...inList] }, now);
+  const retrieval = retrieveUnderRules(ctx.db, enforced, { ...q, excludeTitleIds: [...q.excludeTitleIds, ...inList] });
   const matched = retrieval.inWindow.length + countObeying(ctx.db, enforced, q, inList);
   return { rules, retrieval, matched, unseen: retrieval.inWindow.length };
 }
@@ -395,32 +409,41 @@ async function discover(ctx: Context, rules: RequestRules): Promise<number> {
  * The model orders the slate and writes the "why" lines; the code decides the
  * final list (arrangeRequestPicks). When the call fails the ranked titles
  * already obey the rules, so they are kept in rank order with a plain line.
+ * Close matches keep the fewest-missed-first order whatever the model said.
  */
 async function choosePicks(ctx: Context, text: string, understood: string[], r: RulesRetrieval, why: string): Promise<RequestPick[]> {
   const seen = new Set<number>();
   const slate = requestSlate(r, r.rules.mediaType === null);
   const recent = withoutTmdbIdClashes(slate.recent, seen);
+  const close = withoutTmdbIdClashes(slate.close, seen);
   const older = withoutTmdbIdClashes(slate.older, seen);
-  const room = olderRoom(r);
+  const misses = new Map(close.map(c => [c.tmdb_id, missedSoftLabels(r.rules, c)]));
+  const groups = { recent, close, closeRoom: closeRoom(r), older, olderRoom: olderRoom(r) };
   let chosen: CurationResult[] = [];
   try {
     chosen = await curateRequest(
-      { text, understood, candidates: recent, older, olderRoom: room, mediaOpen: r.rules.mediaType === null },
+      { text, understood, candidates: recent, ...groups, closeMissed: misses, mediaOpen: r.rules.mediaType === null },
       ctx.profile, ctx.sig, ctx.config, ctx.deps.spawnFn,
     );
   } catch (err) {
     console.warn(`[tastebuds] request curation failed for profile ${ctx.profile.id}, keeping the ranked titles: ${(err as Error).message}`);
   }
-  const arranged = arrangeRequestPicks(chosen, { recent, older, olderRoom: room }, why, FULL_SET);
-  const byTmdb = new Map([...recent, ...older].map(c => [c.tmdb_id, c]));
+  const arranged = arrangeRequestPicks(chosen, groups, why, FULL_SET);
+  const byTmdb = new Map([...recent, ...close, ...older].map(c => [c.tmdb_id, c]));
+  const missCount = (res: CurationResult) => misses.get(res.tmdbId)?.length ?? 0;
   return [
-    ...arranged.recent.map(result => ({ title: byTmdb.get(result.tmdbId)!, result, older: false })),
-    ...arranged.older.map(result => ({ title: byTmdb.get(result.tmdbId)!, result, older: true })),
+    ...arranged.recent.map(result => ({ title: byTmdb.get(result.tmdbId)!, result, group: 'match' as const })),
+    ...[...arranged.close].sort((a, b) => missCount(a) - missCount(b))
+      .map(result => ({ title: byTmdb.get(result.tmdbId)!, result, group: 'close' as const })),
+    ...arranged.older.map(result => ({ title: byTmdb.get(result.tmdbId)!, result, group: 'older' as const })),
   ];
 }
 
+/** The rules a pick is held to: a close match all but the soft clauses, an older title all but the year window. */
 function rulesFor(p: RequestPick, r: RulesRetrieval): RequestRules {
-  return p.older && r.olderRules ? r.olderRules : r.rules;
+  if (p.group === 'older' && r.olderRules) return r.olderRules;
+  if (p.group === 'close' && r.closeRules) return r.closeRules;
+  return r.rules;
 }
 
 /** Every pick checked once more before it is stored. A failure here is a bug upstream: the pick is dropped and logged. */
@@ -454,15 +477,16 @@ async function freshlyRated(ctx: Context, picks: RequestPick[], planned: Planned
   if (kept.length === picks.length) return kept;
 
   const used = new Set(picks.map(p => p.title.id));
-  const next = (group: CandidateTitle[], older: boolean): RequestPick[] => {
-    const lost = picks.filter(p => p.older === older).length - kept.filter(p => p.older === older).length;
-    return group.filter(t => !used.has(t.id)).slice(0, lost).map(title => ({
-      title, older, result: { tmdbId: title.tmdb_id, why, category: 'Based on your request', kind: 'core', predictedRating: null },
+  const pool: Record<PickGroup, CandidateTitle[]> = { match: r.inWindow, close: r.close, older: r.older };
+  const next = (group: PickGroup): RequestPick[] => {
+    const lost = picks.filter(p => p.group === group).length - kept.filter(p => p.group === group).length;
+    return pool[group].filter(t => !used.has(t.id)).slice(0, lost).map(title => ({
+      title, group, result: { tmdbId: title.tmdb_id, why, category: 'Based on your request', kind: 'core', predictedRating: null },
     }));
   };
-  const replaced = await passing([...next(r.inWindow, false), ...next(r.older, true)]);
+  const replaced = await passing(GROUP_ORDER.flatMap(next));
   const all = [...kept, ...replaced];
-  return [...all.filter(p => !p.older), ...all.filter(p => p.older)];
+  return GROUP_ORDER.flatMap(g => all.filter(p => p.group === g));
 }
 
 /**
@@ -481,20 +505,51 @@ function olderPickNote(rules: RequestRules, matched: number, inList: number): st
   return `Older pick: ${recentShortfall(rules, matched, inList)}.`;
 }
 
+/** Why a close match is in the list: "Close match: not tagged Scary." */
+function closePickNote(missed: string[]): string {
+  return `Close match: not tagged ${joinOr(missed)}.`;
+}
+
+/**
+ * How many titles matched every word: "only 1 title matched every word", or,
+ * when some were already in the list, "only 2 new titles matched every word".
+ */
+function everyWordShortfall(matched: number, inList: number): string {
+  const count = inList > 0
+    ? countPhrase(matched - inList).replace(/titles?$/, m => `new ${m}`)
+    : countPhrase(matched);
+  return `${count} matched every word`;
+}
+
 function countPhrase(n: number): string {
   return n === 0 ? 'no titles' : n === 1 ? 'only 1 title' : `only ${n} titles`;
 }
 
 /**
- * A plain sentence for the viewer when the batch is short or older titles were
- * added, saying what would show more; null for a full batch from the window.
- * `inList` of the `matched` titles were already in the list before this call.
+ * A plain sentence for the viewer when the batch is short, or close matches or
+ * older titles were added, saying what would show more; null for a full batch
+ * that matched every rule. `inList` of the `matched` titles were already in the
+ * list before this call.
  */
-function summaryNote(rules: RequestRules, olderRules: RequestRules | null, matched: number, inList: number, picked: number, older: number): string | null {
-  if (older > 0 && olderRules) {
-    return `${capitalise(recentShortfall(rules, matched, inList))}, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
-      `${older === 1 ? 'was' : 'were'} added. Say "any year" to see older ones.`;
+function summaryNote(
+  rules: RequestRules,
+  olderRules: RequestRules | null,
+  matched: number,
+  inList: number,
+  picked: number,
+  older: number,
+  close: number,
+): string | null {
+  const added: string[] = [];
+  if (close > 0) {
+    added.push(`${capitalise(everyWordShortfall(matched, inList))}, so ${close} close ${close === 1 ? 'match was' : 'matches were'} added. ` +
+      'Each card says what it misses.');
   }
+  if (older > 0 && olderRules) {
+    added.push(`${capitalise(recentShortfall(rules, matched, inList))}, so ${older} from ${olderRules.yearMin} to ${olderRules.yearMax} ` +
+      `${older === 1 ? 'was' : 'were'} added. Say "any year" to see older ones.`);
+  }
+  if (added.length > 0) return added.join(' ');
   if (picked >= FULL_SET) return null;
   let found: string;
   if (matched === 0) found = 'Nothing in the library matches all of this.';

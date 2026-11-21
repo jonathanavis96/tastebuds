@@ -178,9 +178,9 @@ describe('backfillTitleMeta', () => {
     const day = 86_400;
     for (const [tmdbId, year, readDaysAgo] of [
       [30, 2026, 60], // stored before release, read in September: read again
-      [31, 2021, META_REFRESH_DAYS + 1], // first year of the recent window: read again
+      [31, 2015, META_REFRESH_DAYS + 1], // first year of the recent window: read again
       [32, 2026, META_REFRESH_DAYS - 1], // read this week: left alone
-      [33, 2020, 300], // before the recent window: left alone
+      [33, 2014, 300], // before the recent window: left alone
     ]) {
       insertTitle(db, { tmdbId });
       db.prepare('UPDATE titles SET year = ?, meta_checked_at = ?, status = ?, vote_count = 3 WHERE tmdb_id = ?')

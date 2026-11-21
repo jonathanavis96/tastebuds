@@ -9,7 +9,7 @@ type Clause = { g: CanonGenre[] } | { theme: string[] };
 
 /**
  * One request as typed and the rules it must parse to. Omitted keys mean: no
- * film/series, the default window from 2021, no floor, no exclusions, no
+ * film/series, the default window from 2015, no floor, no exclusions, no
  * references. `needsModel` marks a subject the parser is not expected to know.
  */
 interface Expected {
@@ -139,7 +139,7 @@ describe('parseRequest on every request typed so far', () => {
         mediaType: r.mediaType, yearMin: r.yearMin, yearMax: r.yearMax, yearSource: r.yearSource,
         minImdb: r.minImdb, language: r.language, hiddenGem: r.hiddenGem, similarTo: r.similarTo,
       }).toEqual({
-        mediaType: want.media ?? null, yearMin: want.yearMin ?? 2021, yearMax: null,
+        mediaType: want.media ?? null, yearMin: want.yearMin ?? 2015, yearMax: null,
         yearSource: want.yearSource ?? 'default', minImdb: want.minImdb ?? null,
         language: want.language ?? null, hiddenGem: want.hiddenGem ?? false, similarTo: want.similarTo ?? [],
       });
@@ -160,16 +160,16 @@ describe('parseRequest on every request typed so far', () => {
 
 describe('the app\'s example prompts', () => {
   it.each([
-    ['something funny and easy to watch', ['Funny', 'Easy watch', '2021 or newer', 'No horror']],
-    ['a gripping thriller for tonight', ['Thriller', '2021 or newer']],
-    ['a feel-good film for a rainy day', ['Feel-good', 'Films', '2021 or newer', 'No horror']],
-    ['something mind-bending and clever', ['Mind-bending', '2021 or newer']],
-    ['a short movie under 90 minutes', ['Films', '2021 or newer', 'Under 90 min']],
-    ['a cosy series to binge', ['Cosy', 'Series', '2021 or newer', 'No horror']],
-    ['something romantic but not cheesy', ['Romantic', '2021 or newer']],
-    ['a true-story drama', ['True story', 'Drama', '2021 or newer']],
-    ['a hidden-gem sci-fi', ['Sci-fi', '2021 or newer', 'Hidden gems']],
-    ['something dark and tense', ['Tense', '2021 or newer']],
+    ['something funny and easy to watch', ['Funny', 'Easy watch', '2015 or newer', 'No horror']],
+    ['a gripping thriller for tonight', ['Thriller', '2015 or newer']],
+    ['a feel-good film for a rainy day', ['Feel-good', 'Films', '2015 or newer', 'No horror']],
+    ['something mind-bending and clever', ['Mind-bending', '2015 or newer']],
+    ['a short movie under 90 minutes', ['Films', '2015 or newer', 'Under 90 min']],
+    ['a cosy series to binge', ['Cosy', 'Series', '2015 or newer', 'No horror']],
+    ['something romantic but not cheesy', ['Romantic', '2015 or newer']],
+    ['a true-story drama', ['True story', 'Drama', '2015 or newer']],
+    ['a hidden-gem sci-fi', ['Sci-fi', '2015 or newer', 'Hidden gems']],
+    ['something dark and tense', ['Tense', '2015 or newer']],
   ])('%s', (text, want) => {
     expect(chips(text)).toEqual(want);
     expect(leftoverWords(text, NOW)).toEqual([]);
@@ -194,8 +194,8 @@ describe('the app\'s example prompts', () => {
     const rules = parseRequest('feel-good comedy', NOW);
     expect(rules.must.map((c) => c.genres)).toEqual([['Comedy']]);
     expect(rules.mustNot).toEqual([{ label: 'horror', genres: ['Horror'], terms: [] }]);
-    expect(chips('feel-good comedy')).toEqual(['Comedy', 'Feel-good', '2021 or newer', 'No horror']);
-    expect(chips('something funny and light, nothing scary')).toEqual(['Funny', 'Light', '2021 or newer', 'No scary']);
+    expect(chips('feel-good comedy')).toEqual(['Comedy', 'Feel-good', '2015 or newer', 'No horror']);
+    expect(chips('something funny and light, nothing scary')).toEqual(['Funny', 'Light', '2015 or newer', 'No scary']);
   });
 
   it('leaves the tone as a hint when the request asks for horror itself', () => {
@@ -239,7 +239,7 @@ describe('year windows', () => {
     ['last year', 2025, 2025, 'stated'],
     ['the latest comedies', 2025, null, 'recent'],
     ['something recent', 2024, null, 'recent'],
-    ['a comedy', 2021, null, 'default'],
+    ['a comedy', 2015, null, 'default'],
   ])('%s', (text, yearMin, yearMax, yearSource) => {
     const r = parseRequest(text, NOW);
     expect([r.yearMin, r.yearMax, r.yearSource]).toEqual([yearMin, yearMax, yearSource]);
@@ -257,7 +257,7 @@ describe('year windows', () => {
 
   it('does not read a runtime as a year or a decade', () => {
     const r = parseRequest('under 90 minutes', NOW);
-    expect([r.yearMin, r.yearSource, r.maxRuntime]).toEqual([2021, 'default', 90]);
+    expect([r.yearMin, r.yearSource, r.maxRuntime]).toEqual([2015, 'default', 90]);
   });
 });
 
@@ -369,29 +369,29 @@ describe('other rule words', () => {
 describe('words that only look like a rule', () => {
   it('keeps a number that opens a referenced title out of the year window', () => {
     const odyssey = parseRequest('movies like 2001 a space odyssey', NOW);
-    expect([odyssey.yearMin, odyssey.yearSource]).toEqual([2021, 'default']);
+    expect([odyssey.yearMin, odyssey.yearSource]).toEqual([2015, 'default']);
     expect(odyssey.similarTo).toEqual(['2001 a space odyssey']);
     expect(odyssey.must).toEqual([]);
     const war = parseRequest('1917 type of movie', NOW);
-    expect([war.yearMin, war.yearSource, war.similarTo]).toEqual([2021, 'default', ['1917']]);
+    expect([war.yearMin, war.yearSource, war.similarTo]).toEqual([2015, 'default', ['1917']]);
   });
 
   it('reads "time" as a subject only when it is listed as one', () => {
-    expect(chips('a good time, something funny')).toEqual(['Funny', '2021 or newer']);
-    expect(chips('no time to waste, a thriller')).toEqual(['Thriller', '2021 or newer']);
-    expect(chips('sci-fi about time')).toEqual(['Sci-fi', 'Time', '2021 or newer']);
+    expect(chips('a good time, something funny')).toEqual(['Funny', '2015 or newer']);
+    expect(chips('no time to waste, a thriller')).toEqual(['Thriller', '2015 or newer']);
+    expect(chips('sci-fi about time')).toEqual(['Sci-fi', 'Time', '2015 or newer']);
   });
 
   it('reads "best friends" as a subject, not as a rating word', () => {
     const r = parseRequest('best friends comedy', NOW);
     expect(r.minImdb).toBeNull();
-    expect(chips('best friends comedy')).toEqual(['Friendship', 'Comedy', '2021 or newer']);
+    expect(chips('best friends comedy')).toEqual(['Friendship', 'Comedy', '2015 or newer']);
     expect(leftoverWords('best friends comedy', NOW)).toEqual([]);
   });
 
   it('knows true crime and Christmas without a model call', () => {
-    expect(chips('true crime documentary series')).toEqual(['True crime', 'Documentary', 'Series', '2021 or newer']);
-    expect(chips('christmas movies')).toEqual(['Christmas', 'Films', '2021 or newer']);
+    expect(chips('true crime documentary series')).toEqual(['True crime', 'Documentary', 'Series', '2015 or newer']);
+    expect(chips('christmas movies')).toEqual(['Christmas', 'Films', '2015 or newer']);
     expect(leftoverWords('true crime documentary series', NOW)).toEqual([]);
     expect(leftoverWords('christmas movies', NOW)).toEqual([]);
   });
@@ -425,3 +425,34 @@ describe('more than one exclusion, and exclusions that have no rule', () => {
   });
 });
 
+
+describe('soft (mood) clauses', () => {
+  const must = (text: string) => parseRequest(text, NOW).must.map((c) => [c.label, c.soft === true]);
+
+  it('marks mood words and feels soft, and genre nouns and subjects hard', () => {
+    expect(must('scary')).toEqual([['Scary', true]]);
+    expect(must('horror')).toEqual([['Horror', false]]);
+    expect(must('mind bending')).toEqual([['Mind-bending', true]]);
+    expect(must('time travel')).toEqual([['Time travel', false]]);
+    expect(must('sci-fi mind bending scary')).toEqual([['Sci-fi', false], ['Mind-bending', true], ['Scary', true]]);
+    expect(must('a gripping, funny rom-com')).toEqual([['Gripping', true], ['Funny', true], ['Romance', true]]);
+    expect(must('psychological drama')).toEqual([['Psychological', true], ['Drama', false]]);
+  });
+
+  it('never makes an exclusion soft', () => {
+    const r = parseRequest('scary movie, no nuns and not scary clowns', NOW);
+    expect(r.mustNot.length).toBeGreaterThan(0);
+    expect(r.mustNot.every((c) => c.soft === undefined)).toBe(true);
+    expect(parseRequest('no nuns', NOW).mustNot).toEqual([{ label: 'nuns', genres: [], terms: ['nun', 'evil nun', 'convent'] }]);
+  });
+
+  it('keeps a clause hard when a noun or a subject shares it', () => {
+    // "scary horror": one Horror clause, named by the noun.
+    expect(must('scary horror')).toEqual([['Horror', false]]);
+    expect(must('horror, scary')).toEqual([['Horror', false]]);
+    // Themes form one any-of clause; with a subject in it, it must hold.
+    expect(must('mind bending space')).toEqual([['Mind-bending, Space', false]]);
+    // A family-friendly request is a requirement, not a mood.
+    expect(must('kid friendly')).toEqual([['Family', false]]);
+  });
+});
