@@ -376,6 +376,27 @@ describe('generatePicks for a request', () => {
       expect(second.feed.request).toMatchObject({ matched: 24, note: null });
     });
 
+    it('keeps one batch in stored order when storing it crosses a millisecond', async () => {
+      const db = setupDb();
+      for (let i = 0; i < 24; i++) seed(db, `Thriller ${i}`);
+      // Every clock read lands on a later millisecond, as on a slow write;
+      // takeBatch stamps the whole batch with one time after it is stored.
+      const real = Date.prototype.toISOString;
+      let tick = 0;
+      const spy = vi.spyOn(Date.prototype, 'toISOString').mockImplementation(function (this: Date) {
+        return real.call(new Date(this.getTime() + tick++));
+      });
+      try {
+        const out = await ask(db);
+        if (!out.ok) throw new Error('generate failed');
+        const rows = stored(db);
+        expect(new Set(rows.map(r => r.created_at)).size).toBe(1);
+        expect(out.feed.sections[0].recIds).toEqual([...rows].sort((a, b) => a.id - b.id).map(r => r.id));
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('asked again with every match already listed, says so instead of "nothing matches"', async () => {
       const db = setupDb();
       for (let i = 0; i < 6; i++) seed(db, `Thriller ${i}`);
